@@ -1,0 +1,12 @@
+!.gitignore
+
+*.orig
+*.rej
+*.*~
+.DS_Store
+*.bak
+*.patch
+*.diff
+.vscode/
+.idea/
+build/

@@ -1,0 +1,87 @@
+[worldserver]
+
+########################################
+# Boss Mechanics configuration
+########################################
+#
+#    BossMechanics.Enable
+#        Description: Enable the mechanic registry. When disabled, every Mechanic:: registration is refused (scripts
+#                     keep working; no telegraphs, no resolve damage, no Weakened).
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Enable = 1
+
+#
+#    BossMechanics.Debug
+#        Description: Log every resolve (hits per pass), every failure event and the map tick diff.
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#
+
+BossMechanics.Debug = 0
+
+#
+#    BossMechanics.ReferenceHealth.Rows
+#        Description: Stub reference health, "level:nonTank:tank" entries separated by spaces. Mechanic damage
+#                     percents are taken of these numbers, linearly interpolated by the owner's level and clamped
+#                     at both ends. Placeholders until the dungeon difficulties work installs measured numbers.
+#        Default:     "20:1000:1500 60:5000:8000"
+#
+
+BossMechanics.ReferenceHealth.Rows = "20:1000:1500 60:5000:8000"
+
+#
+#    BossMechanics.Telegraph.FollowMode
+#        Description: How markers follow a moving anchor (unit anchors, player-attached markers).
+#        Default:     0 - Spline step: one spline per interval that moves and turns together
+#                     1 - MoveFollow (circles only, no facing)
+#                     2 - Teleport every interval (jumpy, always correct)
+#
+
+BossMechanics.Telegraph.FollowMode = 0
+
+#
+#    BossMechanics.Telegraph.FollowIntervalMs
+#        Description: Follow update interval in milliseconds (minimum 50).
+#        Default:     200
+#
+
+BossMechanics.Telegraph.FollowIntervalMs = 200
+
+#
+#    BossMechanics.Telegraph.Lift
+#        Description: Height of a marker above its anchor, in yards (raise it if markers z-fight with the floor).
+#        Default:     0.1
+#
+
+BossMechanics.Telegraph.Lift = 0.1
+
+#
+#    BossMechanics.Telegraph.ShrinkProjectileLines
+#        Description: Shorten a projectile line's marker behind the projectile (cosmetic).
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#
+
+BossMechanics.Telegraph.ShrinkProjectileLines = 0
+
+#
+#    BossMechanics.MaxActivePerMap
+#        Description: Most mechanics one map may hold at once; registrations above it are refused with a warning.
+#        Default:     256
+#
+
+BossMechanics.MaxActivePerMap = 256
+
+#
+#    BossMechanics.OpenWorld.CandidateRadius
+#        Description: Outside instances (dungeons, raids, battlegrounds), only players within this many yards of a
+#                     mechanic's owner can be picked or counted by it: Spread carriers, random RunOut targets, Bait,
+#                     Stack/Soak and HoldStill checks, mine triggers. Instances always use the whole map. `.mech test`
+#                     mechanics are additionally limited to the GM's group (or the GM alone). 0 = the whole map.
+#        Default:     100
+#
+
+BossMechanics.OpenWorld.CandidateRadius = 100
