@@ -127,7 +127,7 @@ namespace BossMechanics
         MechanicRef& From(MeasuredFrom from);           // RunOut
         MechanicRef& TankExempt();                      // shape kinds; a cone Zone becomes a Frontal
         // telegraph and bookkeeping
-        MechanicRef& Colour(BossMechanics::Colour colour);
+        MechanicRef& Color(BossMechanics::Color color);
         MechanicRef& Tag(uint32 tag);
         MechanicRef& NoTelegraph();
         MechanicRef& OnHit(std::function<void(Unit* hit)> fn);
@@ -159,7 +159,7 @@ namespace BossMechanics
         LaneBuilder& ExceptOne(float width, Milliseconds warn, Axis axis = Axis::X);
         // A persistent cell at every crossing of an X lane and a Y lane of this set (L10).
         LaneBuilder& BurnCrossings(Milliseconds duration, Milliseconds tick, float pct);
-        // Options on every lane and cell made so far (damage, Weakened, tag, colour...).
+        // Options on every lane and cell made so far (damage, Weakened, tag, color...).
         LaneBuilder& Each(std::function<void(MechanicRef&)> const& fn);
 
         uint32 Id() const { return _laneSet; }

@@ -128,14 +128,19 @@ namespace BossMechanics
         return "?";
     }
 
-    char const* ColourName(Colour colour)
+    char const* ColorName(Color color)
     {
-        switch (colour)
+        switch (color)
         {
-            case Colour::Red: return "red";
-            case Colour::Yellow: return "yellow";
-            case Colour::Blue: return "blue";
-            case Colour::Purple: return "purple";
+            case Color::Red: return "red";
+            case Color::Yellow: return "yellow";
+            case Color::Blue: return "blue";
+            case Color::Purple: return "purple";
+            case Color::Orange: return "orange";
+            case Color::Green: return "green";
+            case Color::Teal: return "teal";
+            case Color::White: return "white";
+            case Color::Black: return "black";
         }
         return "?";
     }
@@ -248,7 +253,7 @@ namespace BossMechanics
         return ls;
     }
 
-    Colour Registry::DefaultColour(Encounter const& e, Family f) const
+    Color Registry::DefaultColor(Encounter const& e, Family f) const
     {
         return f == Family::GetIn ? e.getIn : e.getOut;
     }
@@ -290,7 +295,7 @@ namespace BossMechanics
 
         m.id = _nextId++;
         m.family = FamilyOf(m.kind);
-        m.colour = DefaultColour(e, m.family);
+        m.color = DefaultColor(e, m.family);
         m.lastPose = ToPose(m.anchor.point);
         m.lastPose = AnchorPose(m);
         uint32 const id = m.id;

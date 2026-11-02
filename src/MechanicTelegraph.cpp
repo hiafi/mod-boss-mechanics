@@ -104,9 +104,9 @@ namespace BossMechanics::Telegraph
             return p;
         }
 
-        uint8 ColourIndex(ActiveMechanic const& m)
+        uint8 ColorIndex(ActiveMechanic const& m)
         {
-            return static_cast<uint8>(m.colour);
+            return static_cast<uint8>(m.color);
         }
 
         bool IsCarrierKind(ActiveMechanic const& m)
@@ -178,10 +178,6 @@ namespace BossMechanics::Telegraph
             else if (pick.clamped)
                 LOG_WARN(kLog, "Mechanic {} ({} {}, tag {}): shape is past the end of its marker ladder; drawn at the "
                     "last step (the hitbox stays exact)", m.id, KindName(m.kind), ShapeName(m.shape.type), m.tag);
-            if (pick.colourFallback)
-                LOG_WARN(kLog, "Mechanic {} ({} {}, tag {}): {} markers exist in red and yellow only; drawn {}", m.id,
-                    KindName(m.kind), ShapeName(m.shape.type), m.tag, ShapeName(m.shape.type),
-                    ColourName(static_cast<Colour>(ColourIndex(m) % Ids::COLOUR_COUNT_GET_OUT)));
         }
 
         // A marker for `piece` with its follow state; not listed in m.markers (SpawnPiece does that for outlines).
@@ -301,7 +297,7 @@ namespace BossMechanics::Telegraph
         {
             Geo::Pose pose;
             Shape const shape = DrawnShape(reg, m, now, pose);
-            VisualPick const pick = PickVisual(shape, ColourIndex(m), MarkerLayer::Outline);
+            VisualPick const pick = PickVisual(shape, ColorIndex(m), MarkerLayer::Outline);
             bool const facingMatters = shape.type == ShapeType::Cone || shape.type == ShapeType::Line;
             Unit* owner = FindUnit(map, m.owner);
             if (spawning)
@@ -345,8 +341,8 @@ namespace BossMechanics::Telegraph
         std::vector<CarrierHost> CarrierHosts(ActiveMechanic const& m, std::vector<ObjectGuid> const& carriers)
         {
             std::vector<CarrierHost> hosts;
-            uint8 const colour = ColourIndex(m);
-            VisualPick const ring = PickVisual(Shape::Circle(m.shape.radius), colour, MarkerLayer::Outline);
+            uint8 const color = ColorIndex(m);
+            VisualPick const ring = PickVisual(Shape::Circle(m.shape.radius), color, MarkerLayer::Outline);
             if (ring.pieces.empty())
                 return hosts;
             if (!IsRunOutFromOwner(m))
@@ -356,7 +352,7 @@ namespace BossMechanics::Telegraph
                 return hosts;
             }
             hosts.push_back({ m.owner, ring.pieces.front() });
-            VisualPick const small = PickVisual(Shape::Circle(Rules::kRunOutTargetMarkerRadiusYd), colour,
+            VisualPick const small = PickVisual(Shape::Circle(Rules::kRunOutTargetMarkerRadiusYd), color,
                 MarkerLayer::Outline);
             for (ObjectGuid const& c : carriers)
                 if (c != m.owner && !small.pieces.empty())
@@ -461,7 +457,7 @@ namespace BossMechanics::Telegraph
         void SpawnGetIn(Map* map, TelegraphState& state, Registry const& reg, ActiveMechanic& m)
         {
             Unit* owner = FindUnit(map, m.owner);
-            VisualPick const pick = PickVisual(Shape::Circle(m.shape.radius), ColourIndex(m), MarkerLayer::Outline);
+            VisualPick const pick = PickVisual(Shape::Circle(m.shape.radius), ColorIndex(m), MarkerLayer::Outline);
             if (pick.pieces.empty())
                 return;
             if (m.kind == Kind::Spot)
@@ -524,11 +520,11 @@ namespace BossMechanics::Telegraph
             ModuleConfig const& cfg = GetConfig();
             bool const live = DangerLive(m, now);
             float const f = FillFraction(m.createdAt, m.resolveAt, now, Milliseconds(cfg.fillLeadMs));
-            uint8 const colour = ColourIndex(m);
+            uint8 const color = ColorIndex(m);
             Unit* owner = FindUnit(map, m.owner);
             auto pickFor = [&](Shape const& shape)
             {
-                VisualPick pick = PickFill(shape, colour, f, live);
+                VisualPick pick = PickFill(shape, color, f, live);
                 if (!cfg.fill && !live)
                     for (VisualPiece& piece : pick.pieces)
                         piece.display = 0;         // timer off: the fill only shows the live danger

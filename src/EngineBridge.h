@@ -11,7 +11,7 @@
  *   m.carrierMarkers. Picks displays with PickVisual (MechanicMath.h): circle/donut/cone/line from
  *   Registry::EffectiveShape, Spread/RunOut a ring of m.shape.radius on each carrier (Registry::Carriers; RunOut
  *   From(Owner): on the owner, plus a small ring on each target), Stack/Soak a disc, Spot a disc on each spot.
- *   The fill layer (PickFill, the timer) is the telegraph's own state, never in m.markers. Colour: m.colour.
+ *   The fill layer (PickFill, the timer) is the telegraph's own state, never in m.markers. Color: m.color.
  * - UpdateMarkers(map, m, now): every Tick while the mechanic lives (follow unit anchors and carriers, step the fill
  *   timer, show the full fill once a mine arms or a persistent zone resolves, optional projectile shrink). C2
  *   throttles to its follow and fill intervals.

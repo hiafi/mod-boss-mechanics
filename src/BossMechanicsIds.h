@@ -10,27 +10,35 @@
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
  *
- * Display ids (CreatureDisplayInfo id = CreatureModelData id; colour index c: red 0, yellow 1,
- * blue 2, purple 3; get-out shapes ship red and yellow only). Every telegraph draws two layers
- * (MechanicTelegraph.h): O = outline (rim + faint interior, static, the full hitbox), F = fill (rim +
- * solid interior, the timer that grows into the outline):
+ * Display ids (CreatureDisplayInfo id = CreatureModelData id): one block of 100 ids per color,
  *
- * | 90500-90503 | disc (F)                                 | 90500 + c          |
- * | 90504-90507 | ring (O; also player get-out radii)      | 90504 + c          |
- * | 90508-90521 | donut (F), ratio rho in kDonutRatios     | 90508 + 2j + c     |
- * | 90522-90537 | cone (F), angle in kConeAngles           | 90522 + 2j + c     |
- * | 90538-90587 | line (F), aspect k_i = 2^(i/8), i 0..24  | 90538 + 2i + c     |
- * | 90588-90637 | line (O)                                 | 90588 + 2i + c     |
- * | 90638-90653 | cone (O)                                 | 90638 + 2j + c     |
- * | 90654-90667 | donut (O)                                | 90654 + 2j + c     |
- * | 90668-90669 | timer ring (rim only): a donut's timer   | 90668 + c          |
- * | 90670-90699 | spare (90690-90695: the asset script's opt-in diagnostic displays) |
-  */
+ *     id = 91000 + 100 * c + offset(shape) + step                       (MarkerDisplay below)
+ *
+ * c = color index (Color in MechanicRegistry.h: red 0, yellow 1, blue 2, purple 3, orange 4, green 5, teal 6,
+ * white 7, black 8). Every shape exists in every color. Every telegraph draws two layers (MechanicTelegraph.h):
+ * O = outline (rim + faint interior, static, the full hitbox), F = fill (rim + solid interior, the timer that grows
+ * into the outline). Inside one color's block:
+ *
+ * | +0       | disc (F)                                                   |
+ * | +1       | ring (O; also player get-out radii)                        |
+ * | +2       | timer ring (rim only): a donut's timer                     |
+ * | +3..+9   | donut (F), ratio rho_j in kDonutRatios                     |
+ * | +10..+16 | donut (O)                                                  |
+ * | +17..+24 | cone (F), angle_j in kConeAngles                           |
+ * | +25..+32 | cone (O)                                                   |
+ * | +33..+57 | line (F), aspect k_i = 2^(i/8), i 0..24                     |
+ * | +58..+82 | line (O)                                                   |
+ * | +83..+99 | spare                                                      |
+ *
+ * 91000-91882 used, 91900-91999 spare (91990-91995: the asset script's opt-in diagnostic displays). The markers used
+ * 90500-90699 before the colors fix (M1-FIX-COLORS-REPORT.md); those ids are free again.
+ */
 
 #ifndef MOD_BOSS_MECHANICS_IDS_H
 #define MOD_BOSS_MECHANICS_IDS_H
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace BossMechanics::Ids
@@ -50,22 +58,24 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t NPC_MECHANIC_MARKER = 300400;
     constexpr std::uint32_t NPC_MECHANIC_TEST_OWNER = 300401;
 
-    // Displays (F = fill layer, O = outline layer)
-    constexpr std::uint32_t DISPLAY_DISC_BASE = 90500;          // F, + c (4 colours)
-    constexpr std::uint32_t DISPLAY_RING_BASE = 90504;          // O, + c (4 colours)
-    constexpr std::uint32_t DISPLAY_DONUT_BASE = 90508;         // F, + 2j + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_CONE_BASE = 90522;          // F, + 2j + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_LINE_BASE = 90538;          // F, + 2i + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_LINE_OUTLINE_BASE = 90588;  // O, + 2i + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_CONE_OUTLINE_BASE = 90638;  // O, + 2j + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_DONUT_OUTLINE_BASE = 90654; // O, + 2j + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_TIMER_RING_BASE = 90668;    // + c (red, yellow): rim only
-    constexpr std::uint32_t DISPLAY_LAST = 90669;
-    constexpr std::uint32_t DISPLAY_SPARE_FIRST = 90670;
-    constexpr std::uint32_t DISPLAY_SPARE_LAST = 90699;
+    // Displays: a table of shape ladders inside one 100-id block per color (see the table above).
+    enum class MarkerShape : std::uint8_t
+    {
+        Disc,           // F
+        Ring,           // O
+        TimerRing,      // a donut's timer, rim only
+        Donut,          // F, step = kDonutRatios index
+        DonutOutline,   // O
+        Cone,           // F, step = kConeAngles index
+        ConeOutline,    // O
+        Line,           // F, step = line ladder index
+        LineOutline     // O
+    };
 
-    constexpr std::uint8_t COLOUR_COUNT_ALL = 4;                // disc, ring
-    constexpr std::uint8_t COLOUR_COUNT_GET_OUT = 2;            // donut, cone, line, timer ring
+    constexpr std::uint8_t COLOR_COUNT = 9;
+    constexpr std::uint32_t DISPLAY_FIRST = 91000;
+    constexpr std::uint32_t DISPLAY_COLOR_STRIDE = 100;
+    constexpr std::uint32_t DISPLAY_SLICE_LAST = 91999;
 
     // The timer ring's band, as a fraction of its radius (patch_bossmechanics_markers.py TIMER_RIM_FRAC).
     constexpr float kTimerRingBandFrac = 0.04f;
@@ -77,6 +87,65 @@ namespace BossMechanics::Ids
     // Line aspect ladder: k_i = 2^(i/8), i = 0..kLineSteps-1 (1 to 8; longer lines draw abutting pieces).
     constexpr std::uint32_t kLineSteps = 25;
     constexpr float kLineMaxAspect = 8.f;
+
+    // Steps per shape, in id order inside a color block (MarkerShape order).
+    constexpr std::array<std::uint32_t, 9> kMarkerShapeSteps = { 1, 1, 1,
+        static_cast<std::uint32_t>(kDonutRatios.size()), static_cast<std::uint32_t>(kDonutRatios.size()),
+        static_cast<std::uint32_t>(kConeAngles.size()), static_cast<std::uint32_t>(kConeAngles.size()),
+        kLineSteps, kLineSteps };
+
+    // First offset of each shape inside a color block: the running sum of the steps before it.
+    constexpr std::array<std::uint32_t, 10> kMarkerShapeOffsets = []
+    {
+        std::array<std::uint32_t, 10> out{};
+        for (std::size_t i = 0; i < kMarkerShapeSteps.size(); ++i)
+            out[i + 1] = out[i] + kMarkerShapeSteps[i];
+        return out;
+    }();
+
+    constexpr std::uint32_t DISPLAY_PER_COLOR = kMarkerShapeOffsets.back();    // 83
+    constexpr std::uint32_t DISPLAY_LAST =
+        DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + DISPLAY_PER_COLOR - 1;
+    static_assert(DISPLAY_PER_COLOR <= DISPLAY_COLOR_STRIDE, "a color block overflows its 100 ids");
+    static_assert(DISPLAY_LAST == 91882 && DISPLAY_LAST <= DISPLAY_SLICE_LAST);
+
+    // The display of one shape step in one color (patch_bossmechanics_markers.py display_id). color and step are
+    // clamped into range, so every call names a shipped display.
+    constexpr std::uint32_t MarkerDisplay(std::uint8_t color, MarkerShape shape, std::uint32_t step = 0)
+    {
+        std::size_t const s = static_cast<std::size_t>(shape);
+        std::uint32_t const c = color < COLOR_COUNT ? color : COLOR_COUNT - 1;
+        std::uint32_t const k = step < kMarkerShapeSteps[s] ? step : kMarkerShapeSteps[s] - 1;
+        return DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * c + kMarkerShapeOffsets[s] + k;
+    }
+
+    struct MarkerDisplayParts
+    {
+        bool valid = false;
+        std::uint8_t color = 0;
+        MarkerShape shape = MarkerShape::Disc;
+        std::uint32_t step = 0;
+    };
+
+    // The inverse of MarkerDisplay; valid = false for any id that is not a shipped marker display.
+    constexpr MarkerDisplayParts DecodeMarkerDisplay(std::uint32_t display)
+    {
+        MarkerDisplayParts out;
+        if (display < DISPLAY_FIRST || display > DISPLAY_LAST)
+            return out;
+        std::uint32_t const rel = display - DISPLAY_FIRST;
+        std::uint32_t const offset = rel % DISPLAY_COLOR_STRIDE;
+        if (offset >= DISPLAY_PER_COLOR)
+            return out;
+        std::size_t s = 0;
+        while (offset >= kMarkerShapeOffsets[s + 1])
+            ++s;
+        out.valid = true;
+        out.color = static_cast<std::uint8_t>(rel / DISPLAY_COLOR_STRIDE);
+        out.shape = static_cast<MarkerShape>(s);
+        out.step = offset - kMarkerShapeOffsets[s];
+        return out;
+    }
 }
 
 #endif

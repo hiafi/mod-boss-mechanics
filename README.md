@@ -43,7 +43,7 @@ A boss script that calls the API must be compiled in the `modules` target (this 
 using namespace BossMechanics;
 
 // in the boss AI (me = the boss, the encounter owner); BeginEncounter goes in JustEngagedWith, never in Reset
-Mechanic::BeginEncounter(me, { Colour::Red, Colour::Blue, BOSS_RHAHKZOR });      // optional: palette, boss state
+Mechanic::BeginEncounter(me, { Color::Red, Color::Blue, BOSS_RHAHKZOR });      // optional: palette, boss state
 MechanicHandle cleave = Mechanic::Cone(me, me, 60.f, 20.f, 2500ms, TankExempt::Yes).Damage(35.f).Weakened();
 Mechanic::Line(me, me, target, 3.f, 2000ms).Projectile(20.f).OutAndBack().ExcludeSourceEnd(5.f).Damage(30.f);
 Mechanic::Mine(me, pos, 4.f, 3000ms, 500ms).Cap(1, 3).Damage(40.f).Weakened();
@@ -83,7 +83,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `WeakenedOncePerPlayer()`, `Persistent(duration, tick)`, `Projectile(speed)`, `ProjectileUnit(unit)`,
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
 `AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `Count(n)`, `Targets(set)`,
-`SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Colour(c)`, `Tag(n)`, `NoTelegraph()`,
+`SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`, `NoTelegraph()`,
 `OnHit(fn)`, `OnResolve(fn)`.
 
 Damage is a percent of the reference health (`ReferenceHealthProvider`; M1 ships the config stub), one flat number per
@@ -107,12 +107,27 @@ Blood Craze, Vengeance-style talents), like a boss ability would.
 | Spot | none | disc on each spot | OffSpot |
 
 (*) `From(Owner)`: the ring of r sits on the owner (the hitbox) and a small ring
-(`Rules::kRunOutTargetMarkerRadiusYd`, 1.5 yd, same colour) follows the target, so the target knows it must run.
+(`Rules::kRunOutTargetMarkerRadiusYd`, 1.5 yd, same color) follows the target, so the target knows it must run.
 
 Every unit hit posts `Hit`. Pets take damage but never reach the ledger or Weakened. Only alive player-controlled units
 can be hit (GMs never). `ResolveResult.hits` lists the units the filter kept, so an immune target (Divine Shield,
-Ice Block) is listed although it took nothing. Get-out kinds draw in the encounter's get-out colour (red by
-default), get-in kinds in its get-in colour (blue by default); cones, donuts and lines exist in red and yellow only.
+Ice Block) is listed although it took nothing. Get-out kinds draw in the encounter's get-out color (red by
+default), get-in kinds in its get-in color (blue by default); `Color(c)` overrides one mechanic. Every shape exists
+in all nine colors:
+
+| Color | RGB | Reads poorly on |
+| --- | --- | --- |
+| red | 230, 40, 30 | — |
+| yellow | 245, 200, 40 | sand |
+| blue | 30, 140, 255 | — (brightened from 40, 120, 240) |
+| purple | 185, 90, 250 | — |
+| orange | 255, 130, 20 | sand |
+| green | 80, 225, 60 | grass |
+| teal | 20, 215, 200 | snow |
+| white | 245, 245, 245 | snow |
+| black | 0, 0, 0 | dark floors (it darkens the floor) |
+
+The textures are white; each marker model's M2 color multiplies them (M1-FIX-COLORS-REPORT.md).
 
 ### Weakened (205000)
 
@@ -167,7 +182,7 @@ it is never bigger than the outline. Per shape:
 
 - Circle, Stack/Soak/Spot discs, Spread/RunOut rings: a disc grows from the centre.
 - Cone: grows from the apex (uniform scale keeps the angle).
-- Donut: a rim-only timer ring (90668+c) shrinks from the outer rim to the drawn hole, its band always on the danger
+- Donut: a rim-only timer ring shrinks from the outer rim to the drawn hole, its band always on the danger
   side; once live (a persistent donut), the filled donut.
 - Line: grows from the source end (after `ExcludeSourceEnd`) at the outline's width: ladder display swaps at
   scale = width, so the length never blends; a square of its length while shorter than the width; a multi-piece
@@ -219,7 +234,7 @@ pieces are re-picked and respawned when their count changes).
 
 ```
 .mech test <shape> <size> <ms> [key=value ...]
-.mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech palette <red|yellow> <blue|purple>
+.mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech palette <out color> <in color>
 ```
 
 GMs are never valid targets: use `.gm off` (the command reminds you). The test encounter's owner is a hostile Mechanic
@@ -238,29 +253,31 @@ are never touched. Invite the bots you test with.
 | rearcone | length | `angle=` (90); offset 180 |
 | line | length | `width=` (4), `exclude=` (0) |
 | projectile | length | `width=` (3), `speed=` (10), `back=0/1`, `pause=` (0), `exclude=` (0) |
-| mine | radius | `grace=` (500), `cap=` (0), `life=` (0 = until triggered or cleared); arms after `<ms>` |
+| mine | radius | `grace=` (500), `cap=` (0 = none), `group=` (0), `life=` (0 = until set off or cleared) |
 | lanes | lane width | `count=` (3), `gap=` (6), `axis=x/y`, `frame=` (40x40), `safe=1`, `cross=1`, `burn=` (6000) |
 | spread | radius | `count=` (0 = everyone) |
 | runout | radius | target = selected unit; `from=owner` measures from the test owner |
 | stack | radius | anchored on the selected unit (else the point) |
 | soak | radius | `need=` (2) |
 
-`safe=1` fires every lane but one; `cross=1` adds lanes on the other axis and a burning cell at every crossing (for
-`burn=` ms, ticking every `tick=`, `pct=` per tick). The frame is centred on the anchor point, X along the GM's facing.
+A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
+group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
+adds lanes on the other axis and a burning cell at every crossing (for `burn=` ms, ticking every `tick=`, `pct=` per
+tick). The frame is centred on the anchor point, X along the GM's facing.
 
 Common keys: `dmg=` flat (0 = telegraph only), `pct=` (20, percent of reference health), `tankpct=`,
 `school=physical|holy|fire|nature|frost|shadow|arcane` (physical), `weak=0/1` (0), `once=1`, `persist=<ms>`,
 `tick=<ms>` (1000), `anchor=point|me|target` (point: the selected unit's position, else the GM's; facing = the
-GM's), `colour=red|yellow|blue|purple`, `repeat=` (1, max 50), `every=` (1000 ms; repeats are registered from the test
-owner's scheduler), `scatter=` (0 yd: random offset per repeat, point anchors), `tele=0` (no marker). Damage keys do
-not apply to stack and soak, nor do `weak=`/`once=` (Weakened lands only from resolve hits). Keys that do not fit
-the shape are listed back as ignored.
+GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1, max 50), `every=` (1000 ms;
+repeats are registered from the test owner's scheduler), `scatter=` (0 yd: random offset per repeat, point anchors),
+`tele=0` (no marker). Damage keys do not apply to stack and soak, nor do `weak=`/`once=` (Weakened lands only from
+resolve hits). Keys that do not fit the shape are listed back as ignored.
 
-- `.mech list`: id, kind, shape, colour, tag, time to resolve and to expiry, marker count.
+- `.mech list`: id, kind, shape, color, tag, time to resolve and to expiry, marker count.
 - `.mech ledger [name]`: per encounter, per-player failure counts by tag; with a name, also that player's last ten
   events.
 - `.mech weakened n`: sets n stacks on the selected player (yourself when none), for the threat check.
-- `.mech palette out in`: the test encounter's get-out and get-in colours for new test mechanics.
+- `.mech palette out in`: the test encounter's get-out and get-in colors for new test mechanics (any two colors).
 - `.mech clear`: ends the `.mech test` encounters only (markers, mechanics, ledger, the Weakened they stacked), drops
   combat with the test owner and despawns it. A real boss fight on the map keeps its mechanics.
 - `.mech clear all`: ends **every** encounter on the map, real bosses included (the boss's next registration then
@@ -294,9 +311,10 @@ the shape are listed back as ignored.
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
-| 90500-90669 | Marker displays, fill: disc 90500+c, donut 90508+2j+c, cone 90522+2j+c, line 90538+2i+c |
-| | outline: ring 90504+c, line 90588+2i+c, cone 90638+2j+c, donut 90654+2j+c; timer ring 90668+c |
-| 90670-90699 | spare (90690-90695: the asset script's opt-in diagnostic displays) |
+| 91000-91882 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
+| | offsets: disc 0, ring 1, timer ring 2, donut 3+j, donut outline 10+j, cone 17+j, cone outline 25+j, |
+| | line 33+i, line outline 58+i (83 per color; +83..+99 spare) |
+| 91900-91999 | spare (91990-91995: the asset script's opt-in diagnostics); the old slice 90500-90699 is free |
 
 The spell and creature rows come from dbc-tools (`apps/dbc-tools/source/npcs/boss_mechanics.py`), the displays and
 models from `apps/dbc-tools/patch_bossmechanics_markers.py`. A dungeon that wants its own combat-log name declares a

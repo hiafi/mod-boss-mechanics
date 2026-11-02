@@ -48,7 +48,7 @@ namespace BossMechanics
         constexpr std::size_t kMaxEventsPerEncounter = 1024;
         // A tracked projectile that moves back by more than this along the line has turned around.
         constexpr float kTrackedReversalYd = 0.05f;
-        // RunOut From(Owner): the hitbox ring sits on the owner; this small ring (the mechanic's colour) follows the
+        // RunOut From(Owner): the hitbox ring sits on the owner; this small ring (the mechanic's color) follows the
         // targeted player so the target knows it is the one who must run (review M3, harness ruling 2026-11-02).
         constexpr float kRunOutTargetMarkerRadiusYd = 1.5f;
         // Telegraph fill: a fill piece smaller than this (yd) is not drawn yet (no near-zero creature scale).
@@ -570,7 +570,6 @@ namespace BossMechanics
         std::vector<VisualPiece> pieces;
         bool clamped = false;           // the shape is past the end of its ladder (drawn at the last step or filled)
         bool filled = false;            // drawn as a full disc: donut hole below the ladder, cone wider than the ladder
-        bool colourFallback = false;    // blue/purple asked for a red/yellow-only shape
     };
 
     // Smallest ladder index with value >= x (within eps); size() when none.
@@ -619,25 +618,23 @@ namespace BossMechanics
     }
 
     // The full-size pieces of one layer. Ladder rounding is the same for both layers (the outline and the full fill
-    // draw the same geometry): cones round the angle up, donuts the ratio down, lines the length up.
-    inline VisualPick PickVisual(Shape const& shape, std::uint8_t colour, MarkerLayer layer)
+    // draw the same geometry): cones round the angle up, donuts the ratio down, lines the length up. Every shape exists
+    // in every color (Ids::MarkerDisplay); a color index past the palette draws the last color.
+    inline VisualPick PickVisual(Shape const& shape, std::uint8_t color, MarkerLayer layer)
     {
+        using Ids::MarkerShape;
         VisualPick pick;
         bool const outline = layer == MarkerLayer::Outline;
-        std::uint8_t c = std::min<std::uint8_t>(colour, Ids::COLOUR_COUNT_ALL - 1);
-        auto getOutColour = [&pick](std::uint8_t col) -> std::uint8_t
+        auto display = [color](MarkerShape s, std::size_t step = 0)
         {
-            if (col < Ids::COLOUR_COUNT_GET_OUT)
-                return col;
-            pick.colourFallback = true;
-            return col % Ids::COLOUR_COUNT_GET_OUT;
+            return Ids::MarkerDisplay(color, s, static_cast<std::uint32_t>(step));
         };
-        std::uint32_t const circleBase = outline ? Ids::DISPLAY_RING_BASE : Ids::DISPLAY_DISC_BASE;
+        MarkerShape const circle = outline ? MarkerShape::Ring : MarkerShape::Disc;
 
         switch (shape.type)
         {
             case ShapeType::Circle:
-                pick.pieces.push_back({ circleBase + c, shape.radius, 0.f, 0.f });
+                pick.pieces.push_back({ display(circle), shape.radius, 0.f, 0.f });
                 break;
             case ShapeType::Donut:
             {
@@ -660,14 +657,13 @@ namespace BossMechanics
                         // danger (the hole is not shown) rather than a safe-looking area that hits.
                         pick.clamped = true;
                         pick.filled = true;
-                        pick.pieces.push_back({ circleBase + getOutColour(c), shape.radius, 0.f, 0.f });
+                        pick.pieces.push_back({ display(circle), shape.radius, 0.f, 0.f });
                         break;
                     }
                     j = LadderAtMost(Ids::kDonutRatios, ratio);
                 }
-                std::uint32_t const base = outline ? Ids::DISPLAY_DONUT_OUTLINE_BASE : Ids::DISPLAY_DONUT_BASE;
-                pick.pieces.push_back({ base + 2 * static_cast<std::uint32_t>(j) + getOutColour(c), shape.radius,
-                    0.f, 0.f });
+                pick.pieces.push_back({ display(outline ? MarkerShape::DonutOutline : MarkerShape::Donut, j),
+                    shape.radius, 0.f, 0.f });
                 break;
             }
             case ShapeType::Cone:
@@ -679,12 +675,11 @@ namespace BossMechanics
                     // a full disc of the cone's length on the apex (never smaller than the hitbox).
                     pick.clamped = true;
                     pick.filled = true;
-                    pick.pieces.push_back({ circleBase + getOutColour(c), shape.length, 0.f, 0.f });
+                    pick.pieces.push_back({ display(circle), shape.length, 0.f, 0.f });
                     break;
                 }
-                std::uint32_t const base = outline ? Ids::DISPLAY_CONE_OUTLINE_BASE : Ids::DISPLAY_CONE_BASE;
-                pick.pieces.push_back({ base + 2 * static_cast<std::uint32_t>(j) + getOutColour(c), shape.length,
-                    Geo::DegToRad(shape.facingOffsetDeg), 0.f });
+                pick.pieces.push_back({ display(outline ? MarkerShape::ConeOutline : MarkerShape::Cone, j),
+                    shape.length, Geo::DegToRad(shape.facingOffsetDeg), 0.f });
                 break;
             }
             case ShapeType::Line:
@@ -696,11 +691,10 @@ namespace BossMechanics
                 std::uint32_t const n = std::max<std::uint32_t>(1,
                     static_cast<std::uint32_t>(std::ceil(ratio / Ids::kLineMaxAspect - 1e-4f)));
                 float const pieceLen = drawn / n;
-                std::uint32_t const i = LineStepFor(pieceLen / shape.width);
-                std::uint32_t const base = outline ? Ids::DISPLAY_LINE_OUTLINE_BASE : Ids::DISPLAY_LINE_BASE;
-                std::uint32_t const display = base + 2 * i + getOutColour(c);
+                std::uint32_t const piece = display(outline ? MarkerShape::LineOutline : MarkerShape::Line,
+                    LineStepFor(pieceLen / shape.width));
                 for (std::uint32_t k = 0; k < n; ++k)
-                    pick.pieces.push_back({ display, shape.width, Geo::DegToRad(shape.facingOffsetDeg),
+                    pick.pieces.push_back({ piece, shape.width, Geo::DegToRad(shape.facingOffsetDeg),
                         shape.excludeStart + k * pieceLen });
                 break;
             }
@@ -712,12 +706,9 @@ namespace BossMechanics
     // ring and cones; length for line pieces. 0 for display 0. Tests and the debug log use it.
     inline float PieceExtent(VisualPiece const& piece)
     {
-        if (piece.display >= Ids::DISPLAY_LINE_BASE && piece.display < Ids::DISPLAY_CONE_OUTLINE_BASE)
-        {
-            std::uint32_t const base = piece.display < Ids::DISPLAY_LINE_OUTLINE_BASE ? Ids::DISPLAY_LINE_BASE
-                : Ids::DISPLAY_LINE_OUTLINE_BASE;
-            return LineAspect((piece.display - base) / 2) * piece.scale;
-        }
+        Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
+        if (parts.valid && (parts.shape == Ids::MarkerShape::Line || parts.shape == Ids::MarkerShape::LineOutline))
+            return LineAspect(parts.step) * piece.scale;
         return piece.display ? piece.scale : 0.f;
     }
 
@@ -748,9 +739,10 @@ namespace BossMechanics
     //   never blends a length), and while it is shorter than the width it is a square of its length. Piece k + 1
     //   starts once piece k's drawn end reaches it (outline pieces round up, so neighbours overlap a little).
     // Pieces smaller than Rules::kFillMinScaleYd are left out (display 0).
-    inline VisualPick PickFill(Shape const& shape, std::uint8_t colour, float f, bool active)
+    inline VisualPick PickFill(Shape const& shape, std::uint8_t color, float f, bool active)
     {
-        VisualPick pick = PickVisual(shape, colour, MarkerLayer::Fill);
+        using Ids::MarkerShape;
+        VisualPick pick = PickVisual(shape, color, MarkerLayer::Fill);
         if (active || pick.pieces.empty())
             return pick;
         f = std::clamp(f, 0.f, 1.f);
@@ -763,11 +755,10 @@ namespace BossMechanics
         if (shape.type == ShapeType::Donut && !pick.filled)
         {
             VisualPiece& piece = pick.pieces.front();
-            std::uint32_t const j = (piece.display - Ids::DISPLAY_DONUT_BASE) / 2;
-            std::uint32_t const c = (piece.display - Ids::DISPLAY_DONUT_BASE) % 2;
+            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
             float const outer = shape.radius;
-            float const end = std::min(outer, Ids::kDonutRatios[j] * outer / (1.f - Ids::kTimerRingBandFrac));
-            piece.display = Ids::DISPLAY_TIMER_RING_BASE + c;
+            float const end = std::min(outer, Ids::kDonutRatios[parts.step] * outer / (1.f - Ids::kTimerRingBandFrac));
+            piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::TimerRing);
             piece.scale = outer + f * (end - outer);
             tooSmall(piece);
             return pick;
@@ -786,8 +777,8 @@ namespace BossMechanics
         // Line: every piece shares the outline's step i (aspect k_i) and width w.
         VisualPiece const first = pick.pieces.front();
         float const w = first.scale;
-        std::uint32_t const i = (first.display - Ids::DISPLAY_LINE_BASE) / 2;
-        std::uint32_t const c = (first.display - Ids::DISPLAY_LINE_BASE) % 2;
+        Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(first.display);
+        std::uint32_t const i = parts.step;
         float const pieceDrawn = LineAspect(i) * w;
         float const total = pick.pieces.back().forward - first.forward + pieceDrawn;
         float const filled = f * total;
@@ -805,12 +796,13 @@ namespace BossMechanics
             {
                 if (len < w)
                 {
-                    piece.display = Ids::DISPLAY_LINE_BASE + c; // aspect 1, a square of side len
+                    piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::Line);     // aspect 1, a square
                     piece.scale = std::max(len, 0.f);
                     tooSmall(piece);
                 }
                 else
-                    piece.display = Ids::DISPLAY_LINE_BASE + 2 * std::min(i, LineStepAtMost(len / w)) + c;
+                    piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::Line,
+                        std::min(i, LineStepAtMost(len / w)));
             }                                                   // else full: the outline's own geometry
             if (piece.display)
                 prevEnd = start + PieceExtent(piece);

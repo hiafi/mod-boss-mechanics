@@ -450,10 +450,10 @@ namespace BossMechanics
         return *this;
     }
 
-    MechanicRef& MechanicRef::Colour(BossMechanics::Colour colour)
+    MechanicRef& MechanicRef::Color(BossMechanics::Color color)
     {
-        if (ActiveMechanic* m = Edit("Colour", true, true))
-            m->colour = colour;
+        if (ActiveMechanic* m = Edit("Color", true, true))
+            m->color = color;
         return *this;
     }
 
