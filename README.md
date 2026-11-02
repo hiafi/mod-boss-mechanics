@@ -65,7 +65,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 
 | Function | What |
 | --- | --- |
-| `BeginEncounter(owner, opt)` / `EndEncounter(owner)` | Palette and boss state id; implicit at the first registration |
+| `BeginEncounter(owner, opt)` / `EndEncounter(owner)` | Palette (out, in, cross lanes, cells), boss state id |
 | `Zone(owner, Shapes::Circle/Donut/Cone/Line/LineFacing(...), warn)` | Any shape on a point or unit anchor |
 | `Circle`, `Donut`, `Cone(owner, source, angle, len, warn, exempt)`, `Line` | Zone shortcuts |
 | `Mine(owner, pos, r, arm, grace)` | Ring while arming, disc when armed; a player inside for `grace` detonates it |
@@ -84,7 +84,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
 `AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `Count(n)`, `Targets(set)`,
 `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`, `NoTelegraph()`,
-`OnHit(fn)`, `OnResolve(fn)`.
+`NoFillTimer()`, `OnHit(fn)`, `OnResolve(fn)`.
 
 Damage is a percent of the reference health (`ReferenceHealthProvider`; M1 ships the config stub), one flat number per
 target set by the resolve spell, so boss buffs and the creature damage rate never change it
@@ -184,12 +184,13 @@ it is never bigger than the outline. Per shape:
 - Cone: grows from the apex (uniform scale keeps the angle).
 - Donut: a rim-only timer ring shrinks from the outer rim to the drawn hole, its band always on the danger
   side; once live (a persistent donut), the filled donut.
-- Line: grows from the source end (after `ExcludeSourceEnd`) at the outline's width: ladder display swaps at
-  scale = width, so the length never blends; a square of its length while shorter than the width; a multi-piece
-  line fills piece by piece.
+- Line: grows from the source end (after `ExcludeSourceEnd`), always at the outline's full width: ladder display
+  swaps at scale = width, so the length never blends; it first shows at a quarter of the width long; a multi-piece
+  line fills piece by piece (each piece once the one before it is full).
 - Travelling projectile lines: no fill (the projectile is the timer).
 - Mines: the fill grows while the mine arms and is full while it is armed (the old ring-then-disc, now with a timer).
 - Persistent zones: full fill from the resolve to the end (no regrowth per tick).
+- `NoFillTimer()` (lane crossing cells): outline only until the danger is live, then the full fill.
 - RunOut `From(Owner)`: the owner's ring gets the fill; the small pointer rings on the targets do not.
 
 `Telegraph.Fill = 0` drops the timer: the outline is drawn alone until the danger is live (an armed mine, a persistent
@@ -205,9 +206,17 @@ resizes send one value update per fill marker per step (~7 per second), like a m
 - Donut ratios round **down** to the ladder (0.25, 0.33, 0.40, 0.50, 0.60, 0.67, 0.75): the drawn safe hole is never
   bigger than the real one (`Rules::kDonutRatioRoundUp = false`, harness ruling 2026-11-02). A ratio below 0.25 draws
   a full disc (no hole shown, a WARN names it) rather than a hole bigger than the real one.
-- Lines use aspect steps 2^(i/8), 1 to 8, never shorter than the hitbox and at most 9% longer
-  (`Rules::kLineNeverShorter`); above 8 several abutting pieces. Known limit: a line shorter than its width
-  (aspect < 1) draws the 1:1 piece, so it can be more than 9% too long (accepted for M1).
+- Lines use aspect steps 2^((i-8)/4) from 1/4 to 0.84 and 2^((i-8)/8) from 1 to 8 (`LineAspect`). A line is laid end
+  to end: pieces of exactly 8 widths, then one last piece rounded up to the ladder (`Rules::kLineNeverShorter`), so
+  pieces never overlap and the only overshoot is the far end of the last piece (at most 9%, 19% below 1 width, and
+  up to a quarter width for a line shorter than that).
+- Line models are symmetric about the marker (x in [-k, k]) and their texture draws only the forward half, so a line
+  takes its direction from the texture the same way a cone does (M1-FIX-LINES; the live build drew lines behind the
+  GM). `PieceWorldPose` / `MarkerModelToWorld` are the placement the host test pins against `Geo::Contains`.
+- Lanes: `ExceptOne`'s last lane is clamped inside the frame and overlaps the one before it; its marker draws only
+  the strip the others leave uncovered (`CoverLaneDrawnStrip`, `ApplyDrawStrip`), its hitbox stays the whole lane.
+  Lanes laid along the second axis of a set draw in the encounter's `crossLanes` color (yellow) and crossing cells in
+  `cells` (purple), outline only until they burn, so a crossing does not stack six layers of one color.
 - Both layers use the same rounding, so the full fill is exactly the outline.
 - The textures keep a transparent margin (1/16 of the side) at every mip level, so no edge texel is stretched along
   the quad edge (the first build's "lines at the cardinals").
@@ -234,7 +243,8 @@ pieces are re-picked and respawned when their count changes).
 
 ```
 .mech test <shape> <size> <ms> [key=value ...]
-.mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech palette <out color> <in color>
+.mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7>
+.mech palette <out color> <in color> [cross-lane color] [cell color]
 ```
 
 GMs are never valid targets: use `.gm off` (the command reminds you). The test encounter's owner is a hostile Mechanic
@@ -263,7 +273,8 @@ are never touched. Invite the bots you test with.
 A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
 group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
 adds lanes on the other axis and a burning cell at every crossing (for `burn=` ms, ticking every `tick=`, `pct=` per
-tick). The frame is centred on the anchor point, X along the GM's facing.
+tick). The frame is centred on the anchor point, X along the GM's facing. With `cross=1` the second axis draws
+yellow and the cells purple (outline only until they burn) unless `color=` sets one color for everything.
 
 Common keys: `dmg=` flat (0 = telegraph only), `pct=` (20, percent of reference health), `tankpct=`,
 `school=physical|holy|fire|nature|frost|shadow|arcane` (physical), `weak=0/1` (0), `once=1`, `persist=<ms>`,
@@ -277,7 +288,8 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 - `.mech ledger [name]`: per encounter, per-player failure counts by tag; with a name, also that player's last ten
   events.
 - `.mech weakened n`: sets n stacks on the selected player (yourself when none), for the threat check.
-- `.mech palette out in`: the test encounter's get-out and get-in colors for new test mechanics (any two colors).
+- `.mech palette out in [cross] [cell]`: the test encounter's get-out and get-in colors for new test mechanics (any
+  colors), and optionally the second-axis lane and crossing cell colors (default yellow, purple).
 - `.mech clear`: ends the `.mech test` encounters only (markers, mechanics, ledger, the Weakened they stacked), drops
   combat with the test owner and despawns it. A real boss fight on the map keeps its mechanics.
 - `.mech clear all`: ends **every** encounter on the map, real bosses included (the boss's next registration then
@@ -311,10 +323,11 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
-| 91000-91882 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
+| 91000-91898 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
 | | offsets: disc 0, ring 1, timer ring 2, donut 3+j, donut outline 10+j, cone 17+j, cone outline 25+j, |
-| | line 33+i, line outline 58+i (83 per color; +83..+99 spare) |
-| 91900-91999 | spare (91990-91995: the asset script's opt-in diagnostics); the old slice 90500-90699 is free |
+| | line 33+i, line outline 66+i (99 per color; +99 spare) |
+| 91900-91999 | spare (91990-91995: the asset script's opt-in diagnostics; 91996: the line-direction probe for |
+| | `.morph`); the old slice 90500-90699 is free |
 
 The spell and creature rows come from dbc-tools (`apps/dbc-tools/source/npcs/boss_mechanics.py`), the displays and
 models from `apps/dbc-tools/patch_bossmechanics_markers.py`. A dungeon that wants its own combat-log name declares a
@@ -326,7 +339,7 @@ copy of the resolve spell bound to `spell_boss_mechanics_resolve` and passes it 
   `OpenWorld.CandidateRadius` of the owner. Correct, but on a continent with thousands of bots a long-lived mine still
   walks the whole list every map update (a grid search around the anchor would fix it if open-world bosses ever use
   mines).
-- Short wide lines draw more than 9% long (above).
+- A line shorter than a quarter of its width draws a quarter of its width long (above).
 - Combat link: a player hit while already in combat gets a combat reference to the marker that cast the hit and to
   the owner, until the marker despawns (encounter end despawns every marker; the owner is the boss anyway). The resolve
   spell has no initial aggro, so out-of-combat players are never put in combat. `.mech test` caveat: a tester already

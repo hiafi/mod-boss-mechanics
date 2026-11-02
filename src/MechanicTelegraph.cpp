@@ -95,11 +95,10 @@ namespace BossMechanics::Telegraph
             return Position(p.x, p.y, p.z, Geo::Wrap2Pi(p.o));
         }
 
-        // Where a piece sits: `forward` yards along anchor facing + offset, facing that way, lifted.
+        // Where a piece sits: `forward` yards along anchor facing + offset, facing that way (PieceWorldPose), lifted.
         Geo::Pose PiecePose(Geo::Pose const& anchor, VisualPiece const& piece)
         {
-            float const facing = anchor.o + piece.facingOffset;
-            Geo::Pose p = Geo::Advance(anchor, facing, piece.forward);
+            Geo::Pose p = PieceWorldPose(anchor, piece);
             p.z += GetConfig().lift;
             return p;
         }
@@ -136,10 +135,12 @@ namespace BossMechanics::Telegraph
         }
 
         // The drawn shape of a shape kind right now (pose = live anchor pose): the hitbox, except that a shrinking
-        // projectile line drops the part the projectile's tail has already passed (cosmetic, config).
+        // projectile line drops the part the projectile's tail has already passed (cosmetic, config), and a line with
+        // a draw strip (ExceptOne's last lane) draws only that strip.
         Shape DrawnShape(Registry const& reg, ActiveMechanic const& m, Milliseconds now, Geo::Pose& pose)
         {
             Shape shape = reg.EffectiveShape(m, pose);
+            ApplyDrawStrip(shape, pose, m.drawLateral, m.drawWidth);
             if (ShrinksProjectile(m) && now > m.resolveAt)
             {
                 float const half = m.projectile->halfLength > 0.f ? m.projectile->halfLength : shape.width * 0.5f;
@@ -522,10 +523,11 @@ namespace BossMechanics::Telegraph
             float const f = FillFraction(m.createdAt, m.resolveAt, now, Milliseconds(cfg.fillLeadMs));
             uint8 const color = ColorIndex(m);
             Unit* owner = FindUnit(map, m.owner);
+            bool const timer = cfg.fill && m.fillTimer;
             auto pickFor = [&](Shape const& shape)
             {
                 VisualPick pick = PickFill(shape, color, f, live);
-                if (!cfg.fill && !live)
+                if (!timer && !live)
                     for (VisualPiece& piece : pick.pieces)
                         piece.display = 0;         // timer off: the fill only shows the live danger
                 return pick;
@@ -605,7 +607,7 @@ namespace BossMechanics::Telegraph
             ms.liveShown = live;
             // A static mechanic is done once its live state is drawn (or there is nothing to time: timer off); a
             // moving or reshaping one keeps stepping (cheap: an unchanged piece sends nothing).
-            ms.fillFinal = !IsDynamic(m) && (live || !cfg.fill);
+            ms.fillFinal = !IsDynamic(m) && (live || !timer);
         }
     }
 

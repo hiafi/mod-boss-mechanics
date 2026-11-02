@@ -30,7 +30,8 @@ namespace BossMechanics
     // ------------------------------------------------------------------------------------------------------------
     namespace Rules
     {
-        // §7.1: a drawn line is never shorter than its hitbox (up to 9% longer). false = nearest ladder step.
+        // §7.1: a drawn line is never shorter than its hitbox (its last piece up to 9% longer, 19% below aspect 1).
+        // false = nearest ladder step.
         constexpr bool kLineNeverShorter = true;
         // §3.8: a donut draws the nearest ladder ratio <= inner/outer (false, harness ruling 2026-11-02): the drawn
         // safe hole is never bigger than the real one. true = the nearest ratio >= inner/outer (the handoff's text).
@@ -403,6 +404,32 @@ namespace BossMechanics
         return out;
     }
 
+    // The part of a lane its marker draws, across the axis (frame coordinates).
+    struct LaneStrip
+    {
+        float offset = 0.f;     // low edge
+        float width = 0.f;
+    };
+
+    // ExceptOne (CoverLaneOffsets): the strip of lane `index` that the drawn lane before it leaves uncovered. The last
+    // lane is clamped inside the span and so overlaps the one before it; drawing it whole doubles the translucent
+    // layers over the overlap (M1-FIX-COLORS 10.2), so its marker draws only the uncovered strip. Its hitbox stays
+    // the whole lane. When the lane before it is the free lane, nothing else draws the overlap (it is real danger
+    // inside the free lane), so the lane draws whole. Every other lane draws whole.
+    inline LaneStrip CoverLaneDrawnStrip(std::vector<float> const& offsets, float width, std::uint32_t index,
+        std::uint32_t freeIndex)
+    {
+        if (index >= offsets.size())
+            return {};
+        LaneStrip strip{ offsets[index], width };
+        if (index == 0 || index - 1 == freeIndex)
+            return strip;
+        float const prevEnd = offsets[index - 1] + width;
+        if (prevEnd <= strip.offset + 1e-4f || prevEnd >= strip.offset + width - 1e-4f)
+            return strip;
+        return { prevEnd, strip.offset + width - prevEnd };
+    }
+
     // The overlap of an X lane and a Y lane, as a Line along the frame's X axis.
     inline LanePlacement PlaceCrossing(Frame const& f, LaneRect const& xLane, LaneRect const& yLane)
     {
@@ -593,28 +620,49 @@ namespace BossMechanics
         return best;
     }
 
+    // Line ladder aspect k_i (length / width) of step i: 2^((i - 8) / 4) below step 8 (1/4 up to 0.84), 2^((i - 8) / 8)
+    // from step 8 (1 to 8). patch_bossmechanics_markers.py line_aspect computes the same.
     inline float LineAspect(std::uint32_t i)
     {
-        return std::exp2(static_cast<float>(i) / 8.f);
+        float const d = static_cast<float>(i) - static_cast<float>(Ids::kLineUnitStep);
+        return std::exp2(d < 0.f ? d / 4.f : d / 8.f);
     }
 
-    // Line ladder index for aspect r (length / width), per Rules::kLineNeverShorter; clamped to [0, kLineSteps-1].
+    // Line ladder index for aspect r (length / width): the smallest step at least r (Rules::kLineNeverShorter) or the
+    // nearest one in log scale; clamped to [0, kLineSteps-1] (below 1/4 the first step, above 8 the last).
     inline std::uint32_t LineStepFor(float r)
     {
-        if (r <= 1.f)
-            return 0;
-        float const exact = 8.f * std::log2(r);
-        float const step = Rules::kLineNeverShorter ? std::ceil(exact - 1e-4f) : std::round(exact);
-        return static_cast<std::uint32_t>(std::clamp(step, 0.f, static_cast<float>(Ids::kLineSteps - 1)));
+        if (Rules::kLineNeverShorter)
+        {
+            for (std::uint32_t i = 0; i < Ids::kLineSteps; ++i)
+                if (LineAspect(i) >= r * (1.f - 1e-5f))
+                    return i;
+            return Ids::kLineSteps - 1;
+        }
+        std::uint32_t best = 0;
+        float bestErr = 1e9f;
+        float const lr = std::log2(std::max(r, 1e-6f));
+        for (std::uint32_t i = 0; i < Ids::kLineSteps; ++i)
+        {
+            float const err = std::fabs(std::log2(LineAspect(i)) - lr);
+            if (err < bestErr)
+            {
+                bestErr = err;
+                best = i;
+            }
+        }
+        return best;
     }
 
-    // The largest ladder index whose aspect is <= r (a fill piece never draws longer than it should); 0 below 1.
-    inline std::uint32_t LineStepAtMost(float r)
+    // The largest ladder index whose aspect is <= r (a fill piece never draws longer than it should); -1 when even the
+    // first step (1/4) is longer.
+    inline std::int32_t LineStepAtMost(float r)
     {
-        if (r <= 1.f)
-            return 0;
-        float const step = std::floor(8.f * std::log2(r) + 1e-4f);
-        return static_cast<std::uint32_t>(std::clamp(step, 0.f, static_cast<float>(Ids::kLineSteps - 1)));
+        std::int32_t best = -1;
+        for (std::uint32_t i = 0; i < Ids::kLineSteps; ++i)
+            if (LineAspect(i) <= r * (1.f + 1e-5f))
+                best = static_cast<std::int32_t>(i);
+        return best;
     }
 
     // The full-size pieces of one layer. Ladder rounding is the same for both layers (the outline and the full fill
@@ -684,22 +732,61 @@ namespace BossMechanics
             }
             case ShapeType::Line:
             {
+                // End to end (M1-FIX-LINES): full pieces at the top step (exactly kLineMaxAspect widths, so they abut
+                // with no overlap), then one last piece rounded up to cover the rest. The only overshoot is at the far
+                // end (at most one ladder step of the last piece).
                 float const drawn = shape.length - shape.excludeStart;
-                if (drawn <= 0.f || shape.width <= 0.f)
+                float const w = shape.width;
+                if (drawn <= 0.f || w <= 0.f)
                     break;
-                float const ratio = drawn / shape.width;
+                float const full = Ids::kLineMaxAspect * w;
                 std::uint32_t const n = std::max<std::uint32_t>(1,
-                    static_cast<std::uint32_t>(std::ceil(ratio / Ids::kLineMaxAspect - 1e-4f)));
-                float const pieceLen = drawn / n;
-                std::uint32_t const piece = display(outline ? MarkerShape::LineOutline : MarkerShape::Line,
-                    LineStepFor(pieceLen / shape.width));
-                for (std::uint32_t k = 0; k < n; ++k)
-                    pick.pieces.push_back({ piece, shape.width, Geo::DegToRad(shape.facingOffsetDeg),
-                        shape.excludeStart + k * pieceLen });
+                    static_cast<std::uint32_t>(std::ceil(drawn / full - 1e-4f)));
+                MarkerShape const line = outline ? MarkerShape::LineOutline : MarkerShape::Line;
+                float const facing = Geo::DegToRad(shape.facingOffsetDeg);
+                for (std::uint32_t k = 0; k + 1 < n; ++k)
+                    pick.pieces.push_back({ display(line, Ids::kLineSteps - 1), w, facing,
+                        shape.excludeStart + k * full });
+                float const rest = drawn - (n - 1) * full;
+                if (n == 1 && rest < Ids::kLineMinAspect * w * (1.f - 1e-5f))
+                    pick.clamped = true;                    // shorter than the ladder's first step: drawn longer
+                pick.pieces.push_back({ display(line, LineStepFor(rest / w)), w, facing,
+                    shape.excludeStart + (n - 1) * full });
                 break;
             }
         }
         return pick;
+    }
+
+    // Where a marker piece stands (before the telegraph's lift): `forward` yards from the anchor along the anchor's
+    // facing + the piece's facing offset, facing that way. The line hitbox (Geo::ToLineCoords) measures s along the
+    // same direction from the same anchor, so a line piece's model origin sits on the line's centreline at s =
+    // forward - and the piece draws s in [forward, forward + extent].
+    inline Geo::Pose PieceWorldPose(Geo::Pose const& anchor, VisualPiece const& piece)
+    {
+        return Geo::Advance(anchor, anchor.o + piece.facingOffset, piece.forward);
+    }
+
+    // Where the client draws model point (mx, my) of a marker standing at `pose` with object scale `scale`: model +X
+    // along the facing, +Y to its left (the M2 convention; in-game check S5 confirmed it for the cone markers, whose
+    // direction comes from the same texture-to-+X mapping the line markers use since M1-FIX-LINES).
+    inline Geo::Vec3 MarkerModelToWorld(Geo::Pose const& pose, float scale, float mx, float my)
+    {
+        float const c = std::cos(pose.o);
+        float const s = std::sin(pose.o);
+        return { pose.x + scale * (c * mx - s * my), pose.y + scale * (s * mx + c * my), pose.z };
+    }
+
+    // ExceptOne's last lane draws a narrower strip than its hitbox: the drawn shape is `width` wide and its centreline
+    // `lateral` yards to the left of the hitbox's (Geo::ToLineCoords t). width <= 0: draw the hitbox.
+    inline void ApplyDrawStrip(Shape& shape, Geo::Pose& pose, float lateral, float width)
+    {
+        if (shape.type != ShapeType::Line || width <= 0.f)
+            return;
+        float const f = Geo::ShapeFacing(shape, pose);
+        pose.x -= std::sin(f) * lateral;
+        pose.y += std::cos(f) * lateral;
+        shape.width = width;
     }
 
     // The drawn extent of a fill or outline piece along its own axis (yd): radius for discs, rings, donuts, the timer
@@ -734,10 +821,10 @@ namespace BossMechanics
     //   uniform scale keeps the cone's angle);
     // - donut: the timer ring (rim only) shrinks from the outer rim to the drawn hole's rim, its band always on the
     //   danger side (it ends with its inner edge on the hole's edge); active: the filled donut;
-    // - line: the fill runs from the source end at the outline's width: piece k fills once the ones before it are
-    //   full; a partial piece takes the longest ladder step that fits (a display swap, scale = width, so the client
-    //   never blends a length), and while it is shorter than the width it is a square of its length. Piece k + 1
-    //   starts once piece k's drawn end reaches it (outline pieces round up, so neighbours overlap a little).
+    // - line: the fill runs from the source end, always at the outline's full width: each piece takes the longest
+    //   ladder step that fits the filled length inside it (a display swap at scale = width, so the client never
+    //   blends a length), capped at the piece's own step; nothing until the first step (1/4 of the width) fits.
+    //   Outline pieces abut end to end, so piece k + 1 starts only once piece k is full.
     // Pieces smaller than Rules::kFillMinScaleYd are left out (display 0).
     inline VisualPick PickFill(Shape const& shape, std::uint8_t color, float f, bool active)
     {
@@ -774,39 +861,29 @@ namespace BossMechanics
             return pick;
         }
 
-        // Line: every piece shares the outline's step i (aspect k_i) and width w.
-        VisualPiece const first = pick.pieces.front();
-        float const w = first.scale;
-        Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(first.display);
-        std::uint32_t const i = parts.step;
-        float const pieceDrawn = LineAspect(i) * w;
-        float const total = pick.pieces.back().forward - first.forward + pieceDrawn;
+        // Line: every piece is the outline's width w; piece k covers [start_k, start_k + extent_k) from the first.
+        float const w = pick.pieces.front().scale;
+        float const origin = pick.pieces.front().forward;
+        float const total = pick.pieces.back().forward - origin + PieceExtent(pick.pieces.back());
         float const filled = f * total;
-        float prevEnd = 0.f;                                    // drawn end of the piece before, from the source end
         for (VisualPiece& piece : pick.pieces)
         {
-            float const start = piece.forward - first.forward;
-            float const len = std::min(filled - start, pieceDrawn);
-            if (start > prevEnd + 1e-4f)
+            float const len = filled - (piece.forward - origin);
+            if (len >= PieceExtent(piece) - 1e-4f)
+                continue;                                       // full: the outline's own geometry
+            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
+            std::int32_t const step = LineStepAtMost(len / w);
+            if (step < 0)
             {
-                piece.display = 0;                              // the piece before has not reached this one yet
+                piece.display = 0;                              // not even the shortest step fits yet
                 continue;
             }
-            if (len < pieceDrawn - 1e-4f)
-            {
-                if (len < w)
-                {
-                    piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::Line);     // aspect 1, a square
-                    piece.scale = std::max(len, 0.f);
-                    tooSmall(piece);
-                }
-                else
-                    piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::Line,
-                        std::min(i, LineStepAtMost(len / w)));
-            }                                                   // else full: the outline's own geometry
-            if (piece.display)
-                prevEnd = start + PieceExtent(piece);
+            piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::Line,
+                std::min(parts.step, static_cast<std::uint32_t>(step)));
         }
+        if (w < Rules::kFillMinScaleYd)
+            for (VisualPiece& piece : pick.pieces)
+                piece.display = 0;
         return pick;
     }
 }

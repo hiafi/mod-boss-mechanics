@@ -295,6 +295,11 @@ namespace BossMechanics
         std::vector<ObjectGuid> markers;                            // C2 fills (SpawnMarkers)
         std::unordered_map<ObjectGuid, ObjectGuid> carrierMarkers;  // C2: carrier guid -> its marker
         bool telegraph = true;
+        bool fillTimer = true;          // false: outline only until the danger is live (crossing cells)
+        // Line markers only (ExceptOne's last lane): draw a strip drawWidth wide whose centreline is drawLateral yd
+        // to the left of the hitbox's, instead of the hitbox (ApplyDrawStrip). drawWidth 0 = draw the hitbox.
+        float drawLateral = 0.f;
+        float drawWidth = 0.f;
 
         // callbacks (owner scripts; dropped when the encounter ends, never called once the owner left the map)
         std::function<void(Unit* hit)> onHit;
@@ -379,6 +384,10 @@ namespace BossMechanics
         Color getOut = Color::Red;    // D5 palette
         Color getIn = Color::Blue;
         std::optional<uint32> bossStateId;
+        // Lane sets (M1-FIX-LINES): lanes laid along the second axis of a set, and the crossing cells, draw in their
+        // own colors so a crossing does not stack six layers of one color.
+        Color crossLanes = Color::Yellow;
+        Color cells = Color::Purple;
     };
 
     struct Encounter
@@ -388,6 +397,8 @@ namespace BossMechanics
         bool hasBossStateId = false;
         Color getOut = Color::Red;
         Color getIn = Color::Blue;
+        Color crossLanes = Color::Yellow;
+        Color cells = Color::Purple;
         std::unordered_map<ObjectGuid, PlayerLedger> ledger;
         std::vector<FailureEvent> events;   // capped at Rules::kMaxEventsPerEncounter (oldest dropped)
         uint32 groupFailures = 0;           // MissedSoak count

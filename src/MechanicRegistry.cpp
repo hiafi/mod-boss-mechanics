@@ -268,6 +268,8 @@ namespace BossMechanics
         {
             e.getOut = opt->getOut;
             e.getIn = opt->getIn;
+            e.crossLanes = opt->crossLanes;
+            e.cells = opt->cells;
             if (opt->bossStateId)
             {
                 e.bossStateId = *opt->bossStateId;

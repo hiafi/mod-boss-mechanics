@@ -3,7 +3,8 @@
  *
  *   .mech test <shape> <size> <ms> [key=value ...]
  *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7>
- *   .mech palette <get-out color> <get-in color>     (red yellow blue purple orange green teal white black)
+ *   .mech palette <get-out color> <get-in color> [cross-lane color] [cell color]
+ *                                                    (red yellow blue purple orange green teal white black)
  *
  * `.mech test` registers through the public Mechanic:: API, owned by a hostile Mechanic Test Owner (300401) summoned at
  * the GM (one per map, reused; it despawns after 5 minutes without a live mechanic, or on `.mech clear`). GMs are never
@@ -818,14 +819,18 @@ public:
         return true;
     }
 
-    static bool HandlePalette(ChatHandler* handler, std::string getOut, std::string getIn)
+    static bool HandlePalette(ChatHandler* handler, std::string getOut, std::string getIn,
+        Optional<std::string> crossLanes, Optional<std::string> cells)
     {
+        EncounterOptions opt;
         std::optional<Color> out = ParseColor(getOut);
         std::optional<Color> in = ParseColor(getIn);
-        if (!out || !in)
+        std::optional<Color> cross = crossLanes ? ParseColor(*crossLanes) : std::optional<Color>(opt.crossLanes);
+        std::optional<Color> cell = cells ? ParseColor(*cells) : std::optional<Color>(opt.cells);
+        if (!out || !in || !cross || !cell)
         {
-            handler->SendErrorMessage("Usage: .mech palette <get-out color> <get-in color>; colors: red yellow blue "
-                "purple orange green teal white black");
+            handler->SendErrorMessage("Usage: .mech palette <get-out color> <get-in color> [cross-lane color] "
+                "[cell color]; colors: red yellow blue purple orange green teal white black");
             return false;
         }
         Creature* owner = GetOrSummonTestOwner(handler->GetPlayer());
@@ -834,12 +839,13 @@ public:
             handler->SendErrorMessage("Could not summon the Mechanic Test Owner");
             return false;
         }
-        EncounterOptions opt;
         opt.getOut = *out;
         opt.getIn = *in;
+        opt.crossLanes = *cross;
+        opt.cells = *cell;
         Mechanic::BeginEncounter(owner, opt);
-        handler->PSendSysMessage("Test palette: get-out {}, get-in {} (applies to new test mechanics).",
-            ColorName(*out), ColorName(*in));
+        handler->PSendSysMessage("Test palette: get-out {}, get-in {}, cross lanes {}, cells {} (applies to new test "
+            "mechanics).", ColorName(*out), ColorName(*in), ColorName(*cross), ColorName(*cell));
         return true;
     }
 };

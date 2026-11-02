@@ -306,6 +306,46 @@ namespace
                 covered = covered && any;
             }
             CHECK(covered);
+
+            // Drawn strips: the drawn lanes' strips never overlap and cover exactly what their hitboxes cover. The
+            // last lane (clamped, overlapping the one before it) draws only the 4 yd the others leave, unless the
+            // lane before it is the free lane (then the overlap is danger nobody else draws).
+            std::vector<LaneStrip> strips;
+            for (std::uint32_t i = 0; i < cover.size(); ++i)
+                if (i != freeIndex)
+                    strips.push_back(CoverLaneDrawnStrip(cover, 6.f, i, freeIndex));
+            bool disjoint = true;
+            bool same = true;
+            for (float y = 0.05f; y < 40.f; y += 0.1f)
+            {
+                int drawnHere = 0;
+                for (LaneStrip const& st : strips)
+                    if (y > st.offset && y < st.offset + st.width)
+                        ++drawnHere;
+                bool hit = false;
+                for (std::uint32_t i = 0; i < cover.size(); ++i)
+                    if (i != freeIndex && y > cover[i] && y < cover[i] + 6.f)
+                        hit = true;
+                disjoint = disjoint && drawnHere <= 1;
+                same = same && (drawnHere > 0) == hit;
+            }
+            CHECK(disjoint);
+            CHECK(same);
+            LaneStrip const last = CoverLaneDrawnStrip(cover, 6.f, 6, freeIndex);
+            if (freeIndex == 5)
+                CHECK(last.offset == 34.f && last.width == 6.f);
+            else if (freeIndex != 6)
+            {
+                CHECK_NEAR(last.offset, 36.f, 1e-4);
+                CHECK_NEAR(last.width, 4.f, 1e-4);
+            }
+        }
+        // A cover that fits exactly has no overlap: every lane draws whole.
+        {
+            std::uint32_t freeIndex = 0;
+            std::vector<float> const cover = CoverLaneOffsets(36.f, 6.f, []() { return 0.f; }, freeIndex);
+            LaneStrip const st = CoverLaneDrawnStrip(cover, 6.f, 5, freeIndex);
+            CHECK(cover.size() == 6 && st.offset == 30.f && st.width == 6.f);
         }
 
         // Frame placement and crossings: frame at (100, 200), rotated 90 degrees, 40 x 30.
@@ -538,47 +578,70 @@ namespace
         v = PickVisual(rear, 0, MarkerLayer::Fill);
         CHECK_NEAR(v.pieces[0].facingOffset, Geo::kPi, 1e-5);
 
-        // Line: never shorter than the hitbox, at most 9% longer.
+        // Line ladder: quarter octaves from 1/4 below 1, eighth octaves from 1 to 8 (the asset script's line_aspect).
+        CHECK_NEAR(LineAspect(0), 0.25f, 1e-6);
+        CHECK_NEAR(LineAspect(4), 0.5f, 1e-6);
+        CHECK_NEAR(LineAspect(Ids::kLineUnitStep), 1.f, 1e-6);
+        CHECK_NEAR(LineAspect(16), 2.f, 1e-6);
+        CHECK_NEAR(LineAspect(Ids::kLineSteps - 1), Ids::kLineMaxAspect, 1e-5);
+        for (std::uint32_t i = 1; i < Ids::kLineSteps; ++i)
+            CHECK(LineAspect(i) > LineAspect(i - 1) && LineAspect(i) <= LineAspect(i - 1) * 1.1893f);
+        CHECK(LineStepFor(0.1f) == 0 && LineStepFor(0.25f) == 0 && LineStepFor(0.26f) == 1);
+        CHECK(LineStepFor(1.f) == Ids::kLineUnitStep && LineStepFor(8.f) == 32 && LineStepFor(50.f) == 32);
+        CHECK(LineStepAtMost(0.2f) == -1 && LineStepAtMost(0.25f) == 0 && LineStepAtMost(0.99f) == 7);
+        CHECK(LineStepAtMost(1.f) == 8 && LineStepAtMost(3.92f) == 23 && LineStepAtMost(100.f) == 32);
+        // Line: end to end. Every piece but the last is exactly 8 widths (top step) and the next one starts where it
+        // ends; the last piece covers the rest, rounded up by at most one ladder step. Never shorter than the hitbox.
         bool neverShorter = true;
-        bool atMost9 = true;
-        for (float len = 1.f; len <= 128.f; len += 0.37f)
+        bool endToEnd = true;
+        bool lastTight = true;
+        for (float len = 0.8f; len <= 160.f; len += 0.37f)
         {
             Shape l = Shape::Line(len, 3.f);
             VisualPick const p = PickVisual(l, 0, MarkerLayer::Fill);
-            float drawnEnd = 0.f;
-            for (VisualPiece const& piece : p.pieces)
+            for (std::size_t k = 0; k + 1 < p.pieces.size(); ++k)
             {
-                std::uint32_t const i = Step(piece.display);
-                drawnEnd = std::max(drawnEnd, piece.forward + LineAspect(i) * piece.scale);
+                if (Step(p.pieces[k].display) != Ids::kLineSteps - 1)
+                    endToEnd = false;
+                if (std::fabs(p.pieces[k].forward + PieceExtent(p.pieces[k]) - p.pieces[k + 1].forward) > 1e-3f)
+                    endToEnd = false;
             }
-            float const drawnPiece = LineAspect(Step(p.pieces[0].display)) * 3.f;
-            float const hitPiece = len / p.pieces.size();
+            VisualPiece const& last = p.pieces.back();
+            float const rest = len - last.forward;
+            float const drawnEnd = last.forward + PieceExtent(last);
             if (drawnEnd < len - 1e-3f)
                 neverShorter = false;
-            if (hitPiece >= 3.f && drawnPiece > hitPiece * 1.0906f + 1e-3f)
-                atMost9 = false;
+            float const slack = rest >= 3.f ? 1.0906f : 1.1893f;          // one eighth / quarter octave
+            if (rest >= 0.75f && PieceExtent(last) > rest * slack + 1e-3f)
+                lastTight = false;
         }
         CHECK(neverShorter);
-        CHECK(atMost9);
+        CHECK(endToEnd);
+        CHECK(lastTight);
         // Excluded start: the drawn part starts at the exclusion.
         Shape ex = Shape::Line(30.f, 6.f);
         ex.excludeStart = 6.f;
         v = PickVisual(ex, 1, MarkerLayer::Fill);
         CHECK(v.pieces.size() == 1);
         CHECK_NEAR(v.pieces[0].forward, 6.f, 1e-6);
-        CHECK(v.pieces[0].display == D(1, MarkerShape::Line, 16));       // 24/6 = 4 = 2^(16/8)
-        // Aspect exactly 8 is one piece; above 8 several abutting pieces.
+        CHECK(v.pieces[0].display == D(1, MarkerShape::Line, 24));       // 24/6 = 4 = 2^(16/8), step 8 + 16
+        // Aspect exactly 8 is one piece; above 8 full pieces of 8 widths plus the rest.
         v = PickVisual(Shape::Line(16.f, 2.f), 0, MarkerLayer::Fill);
-        CHECK(v.pieces.size() == 1 && v.pieces[0].display == D(0, MarkerShape::Line, 24));
+        CHECK(v.pieces.size() == 1 && v.pieces[0].display == D(0, MarkerShape::Line, 32));
         v = PickVisual(Shape::Line(100.f, 2.f), 0, MarkerLayer::Fill);
-        CHECK(v.pieces.size() == 7);                            // 50 / 8 -> 7 pieces of 14.29 yd
-        CHECK_NEAR(v.pieces[1].forward, 100.f / 7.f, 1e-4);
-        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 23));           // 7.14 -> ceil(8 log2 7.14) = 23
+        CHECK(v.pieces.size() == 7);                            // 6 pieces of 16 yd + 4 yd
+        CHECK_NEAR(v.pieces[1].forward, 16.f, 1e-4);
+        CHECK_NEAR(v.pieces[6].forward, 96.f, 1e-4);
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 32) && v.pieces[5].display == D(0, MarkerShape::Line, 32));
+        CHECK(v.pieces[6].display == D(0, MarkerShape::Line, 16));           // 4 / 2 = 2 = step 8 + 8
         v = PickVisual(Shape::Line(1000.f, 3.f), 0, MarkerLayer::Fill);
         CHECK(v.pieces.size() == 42);
-        // Short wide line: aspect below 1 draws the 1:1 piece.
-        v = PickVisual(Shape::Line(2.f, 6.f), 0, MarkerLayer::Fill);
-        CHECK(v.pieces.size() == 1 && v.pieces[0].display == D(0, MarkerShape::Line));
+        // Short wide line: aspect below 1 draws a piece shorter than wide (not a square any more).
+        v = PickVisual(Shape::Line(2.f, 6.f), 0, MarkerLayer::Fill);     // 1/3 -> 2^(-6/4) = 0.354, step 2
+        CHECK(v.pieces.size() == 1 && v.pieces[0].display == D(0, MarkerShape::Line, 2) && !v.clamped);
+        CHECK_NEAR(PieceExtent(v.pieces[0]), 6.f * std::exp2(-1.5f), 1e-4);
+        v = PickVisual(Shape::Line(1.f, 6.f), 0, MarkerLayer::Fill);     // 1/6: below the ladder, drawn at 1/4
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 0) && v.clamped);
         // Degenerate.
         CHECK(PickVisual(Shape::Line(0.f, 6.f), 0, MarkerLayer::Fill).pieces.empty());
         // The id table: one 100-id block per color, the shape ladders in a fixed order inside it (the asset script's
@@ -587,11 +650,12 @@ namespace
         CHECK(D(2, MarkerShape::Ring) == 91201);
         CHECK(D(1, MarkerShape::Donut, 3) == 91106);
         CHECK(D(0, MarkerShape::Cone, 3) == 91020);
-        CHECK(D(3, MarkerShape::LineOutline, 16) == 91374);
-        CHECK(D(8, MarkerShape::LineOutline, 24) == 91882 && Ids::DISPLAY_LAST == 91882);
-        std::array<std::uint32_t, 10> const offsets = { 0, 1, 2, 3, 10, 17, 25, 33, 58, 83 };
+        CHECK(D(3, MarkerShape::LineOutline, 8) == 91374);
+        CHECK(D(4, MarkerShape::Line, 0) == 91433);
+        CHECK(D(8, MarkerShape::LineOutline, 32) == 91898 && Ids::DISPLAY_LAST == 91898);
+        std::array<std::uint32_t, 10> const offsets = { 0, 1, 2, 3, 10, 17, 25, 33, 66, 99 };
         CHECK(Ids::kMarkerShapeOffsets == offsets);
-        CHECK(Ids::DISPLAY_PER_COLOR == 83 && Ids::DISPLAY_COLOR_STRIDE == 100 && Ids::COLOR_COUNT == 9);
+        CHECK(Ids::DISPLAY_PER_COLOR == 99 && Ids::DISPLAY_COLOR_STRIDE == 100 && Ids::COLOR_COUNT == 9);
         CHECK(Ids::DISPLAY_SLICE_LAST == 91999);
         // Every shipped id decodes back to its (color, shape, step), and the ids are dense inside each color block.
         std::uint32_t expected = 0;
@@ -610,7 +674,7 @@ namespace
                 }
         }
         CHECK(roundTrip);
-        for (std::uint32_t bad : { 0u, 90500u, 90669u, 90999u, 91083u, 91099u, 91883u, 91990u, 92000u })
+        for (std::uint32_t bad : { 0u, 90500u, 90669u, 90999u, 91099u, 91199u, 91899u, 91990u, 91996u, 92000u })
             CHECK(!Ids::DecodeMarkerDisplay(bad).valid);
         // Out-of-range color or step clamps to a shipped display.
         CHECK(D(200, MarkerShape::Disc) == D(8, MarkerShape::Disc));
@@ -631,6 +695,145 @@ namespace
                     CHECK(other.pieces[k].forward == red.pieces[k].forward);
                 }
             }
+        }
+    }
+
+    // Model point (mx, my) of a marker at `pose` / `scale`, from a world point (the inverse of MarkerModelToWorld).
+    std::pair<float, float> WorldToModel(Geo::Pose const& pose, float scale, Geo::Vec3 const& p)
+    {
+        float const dx = p.x - pose.x;
+        float const dy = p.y - pose.y;
+        float const c = std::cos(pose.o);
+        float const s = std::sin(pose.o);
+        return { (c * dx + s * dy) / scale, (-s * dx + c * dy) / scale };
+    }
+
+    // M1-FIX-LINES: the line marker and the line hitbox agree. Each outline piece stands at PieceWorldPose and draws
+    // model x in [0, k] (forward), y in [-1/2, 1/2] at scale = width (MarkerModelToWorld); the hitbox is
+    // Geo::Contains. Every drawn point is inside the hitbox (or in the far-end overshoot of the last piece) and every
+    // hitbox point is drawn, for any anchor facing and facing offset (180 = a backwards line).
+    void TestLinePlacement()
+    {
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<float> u(-1.f, 1.f);
+        struct Case
+        {
+            float length;
+            float width;
+            float exclude;
+            float offsetDeg;
+        };
+        Case const cases[] = { { 30.f, 4.f, 0.f, 0.f }, { 30.f, 4.f, 6.f, 0.f }, { 40.f, 2.f, 0.f, 0.f },
+            { 100.f, 2.f, 5.f, 0.f }, { 2.f, 6.f, 0.f, 0.f }, { 30.f, 3.f, 0.f, 180.f }, { 25.f, 5.f, 3.f, -37.f },
+            { 6.f, 6.f, 0.f, 90.f } };
+        bool drawnInside = true;
+        bool hitboxDrawn = true;
+        for (Case const& cs : cases)
+            for (int trial = 0; trial < 8; ++trial)
+            {
+                Geo::Pose const anchor{ 50.f * u(rng), 50.f * u(rng), 3.f, Geo::kPi * u(rng) };
+                Shape shape = Shape::Line(cs.length, cs.width);
+                shape.excludeStart = cs.exclude;
+                shape.facingOffsetDeg = cs.offsetDeg;
+                VisualPick const pick = PickVisual(shape, 0, MarkerLayer::Outline);
+                float const drawnEnd = pick.pieces.back().forward + PieceExtent(pick.pieces.back());
+                for (VisualPiece const& piece : pick.pieces)
+                {
+                    Geo::Pose const at = PieceWorldPose(anchor, piece);
+                    float const k = LineAspect(Step(piece.display));
+                    for (float mx = 0.f; mx <= k + 1e-6f; mx += k / 16.f)
+                        for (float my = -0.5f; my <= 0.5f + 1e-6f; my += 0.125f)
+                        {
+                            Geo::Vec3 const w = MarkerModelToWorld(at, piece.scale, mx, my);
+                            Geo::LineCoords const c = Geo::ToLineCoords(shape, anchor, w);
+                            if (c.s < cs.exclude - 1e-3f || c.s > drawnEnd + 1e-3f
+                                || std::fabs(c.t) > cs.width * 0.5f + 1e-3f)
+                                drawnInside = false;
+                            if (c.s <= cs.length - 1e-3f && !Geo::Contains(shape, anchor, w))
+                                drawnInside = false;
+                        }
+                }
+                // Every hitbox point lies on some drawn piece.
+                float const f = Geo::ShapeFacing(shape, anchor);
+                for (float sAlong = cs.exclude; sAlong <= cs.length; sAlong += 0.25f)
+                    for (float t = -cs.width * 0.5f; t <= cs.width * 0.5f + 1e-6f; t += cs.width / 8.f)
+                    {
+                        Geo::Vec3 const w{ anchor.x + std::cos(f) * sAlong - std::sin(f) * t,
+                            anchor.y + std::sin(f) * sAlong + std::cos(f) * t, anchor.z };
+                        if (!Geo::Contains(shape, anchor, w))
+                            hitboxDrawn = false;
+                        bool any = false;
+                        for (VisualPiece const& piece : pick.pieces)
+                        {
+                            auto const [mx, my] = WorldToModel(PieceWorldPose(anchor, piece), piece.scale, w);
+                            float const k = LineAspect(Step(piece.display));
+                            if (mx >= -1e-3f && mx <= k + 1e-3f && std::fabs(my) <= 0.5f + 1e-3f)
+                                any = true;
+                        }
+                        hitboxDrawn = hitboxDrawn && any;
+                    }
+            }
+        CHECK(drawnInside);
+        CHECK(hitboxDrawn);
+
+        // The `.mech test line 30 4000 width=4` case, pinned: GM at the origin facing +x. The one outline piece
+        // stands on the GM, faces +x and draws 0..32 yd ahead (aspect 8 at scale 4), where the hitbox is.
+        Geo::Pose const gm{ 0.f, 0.f, 0.f, 0.f };
+        Shape const line = Shape::Line(30.f, 4.f);
+        VisualPick const pick = PickVisual(line, 0, MarkerLayer::Outline);
+        CHECK(pick.pieces.size() == 1);
+        Geo::Pose const at = PieceWorldPose(gm, pick.pieces[0]);
+        CHECK_NEAR(at.x, 0.f, 1e-6);
+        CHECK_NEAR(at.o, 0.f, 1e-6);
+        float const k0 = LineAspect(Step(pick.pieces[0].display));
+        Geo::Vec3 const tip = MarkerModelToWorld(at, pick.pieces[0].scale, k0, 0.f);
+        CHECK_NEAR(tip.x, 32.f, 1e-3);
+        CHECK(Geo::Contains(line, gm, Geo::Vec3{ 15.f, 1.9f, 0.f }));
+        CHECK(!Geo::Contains(line, gm, Geo::Vec3{ -15.f, 0.f, 0.f }));
+        // Rear (facing offset 180): marker and hitbox both behind.
+        Shape rear = line;
+        rear.facingOffsetDeg = 180.f;
+        VisualPick const back = PickVisual(rear, 0, MarkerLayer::Outline);
+        Geo::Vec3 const backTip = MarkerModelToWorld(PieceWorldPose(gm, back.pieces[0]), back.pieces[0].scale,
+            LineAspect(Step(back.pieces[0].display)), 0.f);
+        CHECK_NEAR(backTip.x, -32.f, 1e-3);
+        CHECK(Geo::Contains(rear, gm, Geo::Vec3{ -15.f, 0.f, 0.f }));
+        // A fill piece stands where its outline piece stands (a display swap never moves it).
+        VisualPick const fill = PickFill(line, 0, 0.3f, false);
+        CHECK(fill.pieces[0].forward == pick.pieces[0].forward && fill.pieces[0].facingOffset == 0.f);
+
+        // ExceptOne's last lane: the drawn strip (ApplyDrawStrip) stays inside the lane's hitbox and covers only the
+        // strip. Frame 40 x 40 rotated 30 degrees, lanes of 6 along X: the last lane is [34, 40], drawn [36, 40].
+        Frame fr;
+        fr.x = 10.f;
+        fr.y = -20.f;
+        fr.angle = Geo::DegToRad(30.f);
+        fr.sizeX = 40.f;
+        fr.sizeY = 40.f;
+        for (Axis axis : { Axis::X, Axis::Y })
+        {
+            LanePlacement const lane = PlaceLane(fr, { axis, 34.f, 6.f });
+            LanePlacement const strip = PlaceLane(fr, { axis, 36.f, 4.f });
+            Shape hit = Shape::Line(lane.length, lane.width);
+            float const lateral = Geo::ToLineCoords(hit, lane.pose, { strip.pose.x, strip.pose.y, 0.f }).t;
+            Shape drawnShape = hit;
+            Geo::Pose drawnPose = lane.pose;
+            ApplyDrawStrip(drawnShape, drawnPose, lateral, strip.width);
+            CHECK_NEAR(drawnPose.x, strip.pose.x, 1e-3);
+            CHECK_NEAR(drawnPose.y, strip.pose.y, 1e-3);
+            CHECK(drawnShape.width == 4.f && hit.width == 6.f);
+            bool inside = true;
+            for (float fa = 0.5f; fa < 40.f; fa += 0.5f)
+                for (float fc = 34.1f; fc < 40.f; fc += 0.1f)
+                {
+                    Geo::Pose const q = axis == Axis::X ? FramePoint(fr, fa, fc, 0.f) : FramePoint(fr, fc, fa, 0.f);
+                    Geo::Vec3 const v{ q.x, q.y, 0.f };
+                    if (!Geo::Contains(hit, lane.pose, v))
+                        inside = false;                                     // the hitbox is the whole lane
+                    if (Geo::Contains(drawnShape, drawnPose, v) != (fc >= 36.f - 1e-3f))
+                        inside = false;                                     // the marker only the strip
+                }
+            CHECK(inside);
         }
     }
 
@@ -689,7 +892,7 @@ namespace
         CHECK(outlineId(Shape::Donut(1.f, 12.f), 0) == D(0, MarkerShape::Ring));              // drawn as a disc
         CHECK(outlineId(Shape::Cone(90.f, 20.f), 6) == D(6, MarkerShape::ConeOutline, 3));
         CHECK(outlineId(Shape::Cone(300.f, 20.f), 1) == D(1, MarkerShape::Ring));             // drawn as a disc
-        CHECK(outlineId(Shape::Line(12.f, 3.f), 8) == D(8, MarkerShape::LineOutline, 16));
+        CHECK(outlineId(Shape::Line(12.f, 3.f), 8) == D(8, MarkerShape::LineOutline, 24));
         // Outline rounding promises: a get-out outline is never smaller than its hitbox; a donut hole never bigger.
         for (float len = 0.5f; len <= 200.f; len += 0.73f)
         {
@@ -784,9 +987,12 @@ namespace
                         neverAbove = false;                                 // same anchor point and facing
                     if (shape.type == ShapeType::Line && piece.display)
                     {
-                        // From the source end, without gaps: piece k starts only once piece k-1 reaches its start
-                        // (outline pieces round up, so neighbours overlap a little and both may be partial there).
-                        if (k > 0 && p.pieces[k - 1].forward + PieceExtent(p.pieces[k - 1]) < piece.forward - 1e-3f)
+                        // From the source end, without gaps: piece k starts only once piece k-1 is full (they abut).
+                        if (k > 0 && (p.pieces[k - 1].display != full.pieces[k - 1].display
+                                || p.pieces[k - 1].forward + PieceExtent(p.pieces[k - 1]) < piece.forward - 1e-3f))
+                            slotsInOrder = false;
+                        // Always the outline's full width: only the length grows.
+                        if (piece.scale != o.scale)
                             slotsInOrder = false;
                         if (k == 0 && piece.forward != outline.pieces[0].forward)
                             slotsInOrder = false;
@@ -854,26 +1060,33 @@ namespace
         v = PickFill(Shape::Donut(1.f, 12.f), 0, 0.5f, false);
         CHECK(v.pieces[0].display == D(0, MarkerShape::Disc));
         CHECK_NEAR(v.pieces[0].scale, 6.f, 1e-5);
-        // Line 24 x 3 (aspect 8, one piece, step 24): constant width, ladder steps that fit, a square below 3 yd.
-        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.0625f, false);                            // 1.5 yd: a square
-        CHECK(v.pieces[0].display == D(0, MarkerShape::Line) && v.pieces[0].scale == 1.5f);
+        // Line 24 x 3 (aspect 8, one piece, step 32): always 3 yd wide, only the length grows; nothing below 3/4 yd.
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.01f, false);                              // 0.24 yd: not yet
+        CHECK(v.pieces[0].display == 0);
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.03125f, false);                           // 0.75 yd = 1/4 width
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 0) && v.pieces[0].scale == 3.f);
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.0625f, false);                            // 1.5 yd = 1/2 width
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 4) && v.pieces[0].scale == 3.f);
         v = PickFill(Shape::Line(24.f, 3.f), 0, 0.5f, false);                               // 12 yd = 4 widths
-        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 16) && v.pieces[0].scale == 3.f);
-        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.49f, false);                              // 11.76: step 15
-        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 15));
-        // Line 100 x 2 (7 pieces): at half, pieces 0-2 full, piece 3 partial, 4-6 empty.
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 24) && v.pieces[0].scale == 3.f);
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.49f, false);                              // 11.76: step 23
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 23));
+        // Line 100 x 2 (6 x 16 yd + 4 yd): at half (50 yd), pieces 0-2 full, piece 3 has 2 yd (aspect 1), 4-6 empty.
         VisualPick const o = PickVisual(Shape::Line(100.f, 2.f), 0, MarkerLayer::Outline);
         v = PickFill(Shape::Line(100.f, 2.f), 0, 0.5f, false);
-        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 23) && v.pieces[2].display == D(0, MarkerShape::Line, 23));
-        CHECK(v.pieces[3].display != 0 && Step(v.pieces[3].display) < 23);
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 32) && v.pieces[2].display == D(0, MarkerShape::Line, 32));
+        CHECK(v.pieces[3].display == D(0, MarkerShape::Line, 8));
         CHECK(v.pieces[4].display == 0 && v.pieces[6].display == 0);
         CHECK(o.pieces.size() == 7);
+        // Short wide line 2 x 6 (outline step 2): the fill is 6 yd wide from its first frame.
+        v = PickFill(Shape::Line(2.f, 6.f), 0, 0.8f, false);                                // 1.70 yd: step 0
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 0) && v.pieces[0].scale == 6.f);
         // Excluded start: the fill starts at the exclusion.
         Shape ex = Shape::Line(30.f, 6.f);
         ex.excludeStart = 6.f;
         v = PickFill(ex, 0, 0.5f, false);
         CHECK(v.pieces.size() == 1 && v.pieces[0].forward == 6.f);
-        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 8));                           // 12 yd = 2 widths
+        CHECK(v.pieces[0].display == D(0, MarkerShape::Line, 16));                          // 12 yd = 2 widths
     }
 }
 
@@ -884,6 +1097,7 @@ int main()
     TestTrackedSweep();
     TestMine();
     TestLanes();
+    TestLinePlacement();
     TestWeakened();
     TestReferenceHealth();
     TestSearchRadius();

@@ -26,12 +26,18 @@
  * | +10..+16 | donut (O)                                                  |
  * | +17..+24 | cone (F), angle_j in kConeAngles                           |
  * | +25..+32 | cone (O)                                                   |
- * | +33..+57 | line (F), aspect k_i = 2^(i/8), i 0..24                     |
- * | +58..+82 | line (O)                                                   |
- * | +83..+99 | spare                                                      |
+ * | +33..+65 | line (F), aspect k_i (kLineSteps, LineAspect in MechanicMath.h)  |
+ * | +66..+98 | line (O)                                                   |
+ * | +99      | spare                                                      |
  *
- * 91000-91882 used, 91900-91999 spare (91990-91995: the asset script's opt-in diagnostic displays). The markers used
- * 90500-90699 before the colors fix (M1-FIX-COLORS-REPORT.md); those ids are free again.
+ * Line ladder (M1-FIX-LINES): k_i = 2^((i - 8) / 4) for i 0..7 (1/4 up to 0.84, so a fill or a short line keeps its
+ * full width while it is shorter than wide) and 2^((i - 8) / 8) for i 8..32 (1 to 8). A line model draws x in [0, k]
+ * (model +X = the marker's facing) and is symmetric about its origin, so its direction comes from the texture, the
+ * same way a cone's does.
+ *
+ * 91000-91898 used, 91900-91999 spare (91990-91995: the asset script's opt-in diagnostic displays; 91996: the
+ * line-direction probe, an old-style line model for `.morph`). The markers used 90500-90699 before the colors fix
+ * (M1-FIX-COLORS-REPORT.md); those ids are free again.
  */
 
 #ifndef MOD_BOSS_MECHANICS_IDS_H
@@ -84,9 +90,14 @@ namespace BossMechanics::Ids
     constexpr std::array<float, 7> kDonutRatios = { 0.25f, 0.33f, 0.40f, 0.50f, 0.60f, 0.67f, 0.75f };
     // Cone angle ladder in degrees (j = index).
     constexpr std::array<float, 8> kConeAngles = { 30.f, 45.f, 60.f, 90.f, 120.f, 150.f, 180.f, 270.f };
-    // Line aspect ladder: k_i = 2^(i/8), i = 0..kLineSteps-1 (1 to 8; longer lines draw abutting pieces).
-    constexpr std::uint32_t kLineSteps = 25;
+    // Line aspect ladder (LineAspect in MechanicMath.h): quarter-octave steps from 1/4 below aspect 1, eighth-octave
+    // steps from 1 to 8 (step kLineUnitStep is aspect 1). Longer lines draw abutting pieces of aspect 8.
+    constexpr std::uint32_t kLineSteps = 33;
+    constexpr std::uint32_t kLineUnitStep = 8;
+    constexpr float kLineMinAspect = 0.25f;
     constexpr float kLineMaxAspect = 8.f;
+    // The line-direction probe (patch_bossmechanics_markers.py PROBE_ID): not used by the server.
+    constexpr std::uint32_t DISPLAY_PROBE_LINE = 91996;
 
     // Steps per shape, in id order inside a color block (MarkerShape order).
     constexpr std::array<std::uint32_t, 9> kMarkerShapeSteps = { 1, 1, 1,
@@ -103,11 +114,11 @@ namespace BossMechanics::Ids
         return out;
     }();
 
-    constexpr std::uint32_t DISPLAY_PER_COLOR = kMarkerShapeOffsets.back();    // 83
+    constexpr std::uint32_t DISPLAY_PER_COLOR = kMarkerShapeOffsets.back();    // 99
     constexpr std::uint32_t DISPLAY_LAST =
         DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + DISPLAY_PER_COLOR - 1;
     static_assert(DISPLAY_PER_COLOR <= DISPLAY_COLOR_STRIDE, "a color block overflows its 100 ids");
-    static_assert(DISPLAY_LAST == 91882 && DISPLAY_LAST <= DISPLAY_SLICE_LAST);
+    static_assert(DISPLAY_LAST == 91898 && DISPLAY_LAST <= DISPLAY_SLICE_LAST);
 
     // The display of one shape step in one color (patch_bossmechanics_markers.py display_id). color and step are
     // clamped into range, so every call names a shipped display.
