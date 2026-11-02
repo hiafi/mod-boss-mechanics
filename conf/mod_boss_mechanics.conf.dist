@@ -68,6 +68,38 @@ BossMechanics.Telegraph.Lift = 0.1
 BossMechanics.Telegraph.ShrinkProjectileLines = 0
 
 #
+#    BossMechanics.Telegraph.Fill
+#        Description: Draw the fill timer: a solid copy of the telegraph that grows from nothing into its outline
+#                     over the warning time, full at the resolve. Off, the outline is drawn alone until the danger is
+#                     live (an armed mine, a persistent zone after its resolve), which still shows the full fill.
+#                     Travelling projectile lines never get a fill (the projectile is the timer).
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Telegraph.Fill = 1
+
+#
+#    BossMechanics.Telegraph.FillStepMs
+#        Description: How often the fill is resized, in milliseconds (minimum 50). The client blends each scale
+#                     change in, so the growth looks smooth between steps.
+#        Default:     150
+#
+
+BossMechanics.Telegraph.FillStepMs = 150
+
+#
+#    BossMechanics.Telegraph.FillLeadMs
+#        Description: How far ahead of the clock the fill size is computed, in milliseconds (maximum 2000), so the
+#                     client's scale blend lands the drawn fill on the outline at the resolve instead of after it.
+#                     Raise it if the fill is visibly short of the outline when the hit lands; lower it if it is
+#                     full too early.
+#        Default:     150
+#
+
+BossMechanics.Telegraph.FillLeadMs = 150
+
+#
 #    BossMechanics.MaxActivePerMap
 #        Description: Most mechanics one map may hold at once; registrations above it are refused with a warning.
 #        Default:     256

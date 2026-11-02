@@ -7,12 +7,14 @@
  * Contract, per call:
  * - SpawnMarkers(map, m): once per mechanic, at Registry::Commit (end of the registering statement), only when
  *   m.telegraph. Spawn the marker creatures (Ids::NPC_MECHANIC_MARKER, no summoner) and push their guids into
- *   m.markers; for player-attached markers (Spread/RunOut carriers) also fill m.carrierMarkers. Picks displays with
- *   PickVisual (MechanicMath.h): circle/donut/cone/line from Registry::EffectiveShape, Spread/RunOut a ring of
- *   m.shape.radius on each carrier (Registry::Carriers; RunOut From(Owner): on the owner, plus a small ring on each
- *   target), Stack/Soak a disc, Spot a disc on each spot, a mine a ring until m.mine->armed. Colour: m.colour.
- * - UpdateMarkers(map, m, now): every Tick while the mechanic lives (follow unit anchors and carriers, swap a mine's
- *   ring to a disc when m.mine->armed turns true, optional projectile shrink). C2 throttles to its follow interval.
+ *   m.markers (the outline layer only); for player-attached markers (Spread/RunOut carriers) also fill
+ *   m.carrierMarkers. Picks displays with PickVisual (MechanicMath.h): circle/donut/cone/line from
+ *   Registry::EffectiveShape, Spread/RunOut a ring of m.shape.radius on each carrier (Registry::Carriers; RunOut
+ *   From(Owner): on the owner, plus a small ring on each target), Stack/Soak a disc, Spot a disc on each spot.
+ *   The fill layer (PickFill, the timer) is the telegraph's own state, never in m.markers. Colour: m.colour.
+ * - UpdateMarkers(map, m, now): every Tick while the mechanic lives (follow unit anchors and carriers, step the fill
+ *   timer, show the full fill once a mine arms or a persistent zone resolves, optional projectile shrink). C2
+ *   throttles to its follow and fill intervals.
  * - DespawnMarkers(map, m): when the mechanic finishes, is cancelled or fizzles, and on encounter end. Clear
  *   m.markers / m.carrierMarkers. Must tolerate markers that are already gone.
  * - CastResolve(map, m, pass): one AoE cast of m.damage.ResolveSpell() from a marker (m.ctx.carrier's marker for

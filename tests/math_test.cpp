@@ -454,41 +454,41 @@ namespace
 
     void TestVisualPick()
     {
-        // Circle: disc / ring, colour offset, scale = radius.
-        VisualPick v = PickVisual(Shape::Circle(8.f), 2, MarkerStyle::Disc);
+        // Circle: fill disc / outline ring, colour offset, scale = radius.
+        VisualPick v = PickVisual(Shape::Circle(8.f), 2, MarkerLayer::Fill);
         CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90502 && v.pieces[0].scale == 8.f);
-        v = PickVisual(Shape::Circle(3.f), 3, MarkerStyle::Ring);
+        v = PickVisual(Shape::Circle(3.f), 3, MarkerLayer::Outline);
         CHECK(v.pieces[0].display == 90507);
 
         // Donut (Rules::kDonutRatioRoundUp = false): the nearest ratio <= inner/outer, so the drawn safe hole is never
         // bigger than the real one. 4/12 = 0.333 -> 0.33 (j = 1).
         static_assert(!Rules::kDonutRatioRoundUp);
-        v = PickVisual(Shape::Donut(4.f, 12.f), 0, MarkerStyle::Disc);
+        v = PickVisual(Shape::Donut(4.f, 12.f), 0, MarkerLayer::Fill);
         CHECK(v.pieces[0].display == 90508 + 2 * 1 && !v.clamped);
         CHECK(v.pieces[0].scale == 12.f);
-        v = PickVisual(Shape::Donut(4.5f, 12.f), 0, MarkerStyle::Disc);  // 0.375 -> 0.33, never the larger 0.40
+        v = PickVisual(Shape::Donut(4.5f, 12.f), 0, MarkerLayer::Fill);  // 0.375 -> 0.33, never the larger 0.40
         CHECK(v.pieces[0].display == 90508 + 2 * 1);
-        v = PickVisual(Shape::Donut(6.f, 12.f), 1, MarkerStyle::Disc);    // exactly 0.50 -> j = 3, yellow
+        v = PickVisual(Shape::Donut(6.f, 12.f), 1, MarkerLayer::Fill);    // exactly 0.50 -> j = 3, yellow
         CHECK(v.pieces[0].display == 90508 + 2 * 3 + 1);
         // Below the ladder (ratio < 0.25): the smallest drawn hole would be bigger than the real one, so a full disc
         // (danger drawn everywhere, no hole), never a safe-looking area that hits.
-        v = PickVisual(Shape::Donut(1.f, 12.f), 0, MarkerStyle::Disc);    // 0.083
+        v = PickVisual(Shape::Donut(1.f, 12.f), 0, MarkerLayer::Fill);    // 0.083
         CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90500 && v.clamped && v.filled);
         CHECK(v.pieces[0].scale == 12.f);
-        v = PickVisual(Shape::Donut(2.f, 12.f), 1, MarkerStyle::Disc);    // 0.167, yellow
+        v = PickVisual(Shape::Donut(2.f, 12.f), 1, MarkerLayer::Fill);    // 0.167, yellow
         CHECK(v.pieces[0].display == 90501 && v.filled);
-        v = PickVisual(Shape::Donut(2.9f, 12.f), 2, MarkerStyle::Disc);   // 0.242, blue -> red family like donuts
+        v = PickVisual(Shape::Donut(2.9f, 12.f), 2, MarkerLayer::Fill);   // 0.242, blue -> red family like donuts
         CHECK(v.pieces[0].display == 90500 && v.filled && v.colourFallback);
-        v = PickVisual(Shape::Donut(0.f, 12.f), 0, MarkerStyle::Disc);    // no hole at all
+        v = PickVisual(Shape::Donut(0.f, 12.f), 0, MarkerLayer::Fill);    // no hole at all
         CHECK(v.pieces[0].display == 90500 && v.filled);
-        v = PickVisual(Shape::Donut(3.f, 12.f), 0, MarkerStyle::Disc);    // exactly 0.25: the ladder's first step
+        v = PickVisual(Shape::Donut(3.f, 12.f), 0, MarkerLayer::Fill);    // exactly 0.25: the ladder's first step
         CHECK(v.pieces[0].display == 90508 && !v.clamped && !v.filled);
-        v = PickVisual(Shape::Donut(11.f, 12.f), 0, MarkerStyle::Disc);   // past the ladder -> 0.75, a smaller hole
+        v = PickVisual(Shape::Donut(11.f, 12.f), 0, MarkerLayer::Fill);   // past the ladder -> 0.75, a smaller hole
         CHECK(v.pieces[0].display == 90508 + 2 * 6 && !v.clamped);
         for (int inner = 1; inner < 120; ++inner)                         // drawn ratio <= real ratio on the ladder
         {
             float const ratio = inner / 120.f;
-            v = PickVisual(Shape::Donut(inner / 10.f, 12.f), 0, MarkerStyle::Disc);
+            v = PickVisual(Shape::Donut(inner / 10.f, 12.f), 0, MarkerLayer::Fill);
             if (v.filled)
             {
                 CHECK(ratio < Ids::kDonutRatios.front() && v.pieces[0].display == 90500);
@@ -497,24 +497,24 @@ namespace
             float const drawn = Ids::kDonutRatios[(v.pieces[0].display - 90508) / 2];
             CHECK(drawn <= ratio + 1e-4f);
         }
-        v = PickVisual(Shape::Donut(4.f, 12.f), 2, MarkerStyle::Disc);    // blue asked: red/yellow only
+        v = PickVisual(Shape::Donut(4.f, 12.f), 2, MarkerLayer::Fill);    // blue asked: red/yellow only
         CHECK(v.colourFallback && v.pieces[0].display == 90508 + 2 * 1);
 
         // Cone: nearest larger angle, scale = length, facing offset carried.
-        v = PickVisual(Shape::Cone(90.f, 20.f), 0, MarkerStyle::Disc);
+        v = PickVisual(Shape::Cone(90.f, 20.f), 0, MarkerLayer::Fill);
         CHECK(v.pieces[0].display == 90522 + 2 * 3 && v.pieces[0].scale == 20.f);
-        v = PickVisual(Shape::Cone(100.f, 20.f), 1, MarkerStyle::Disc);
+        v = PickVisual(Shape::Cone(100.f, 20.f), 1, MarkerLayer::Fill);
         CHECK(v.pieces[0].display == 90522 + 2 * 4 + 1);
-        v = PickVisual(Shape::Cone(10.f, 20.f), 0, MarkerStyle::Disc);
+        v = PickVisual(Shape::Cone(10.f, 20.f), 0, MarkerLayer::Fill);
         CHECK(v.pieces[0].display == 90522);
-        v = PickVisual(Shape::Cone(270.f, 20.f), 0, MarkerStyle::Disc);   // the widest cone on the ladder
+        v = PickVisual(Shape::Cone(270.f, 20.f), 0, MarkerLayer::Fill);   // the widest cone on the ladder
         CHECK(v.pieces[0].display == 90522 + 2 * 7 && !v.clamped && !v.filled);
-        v = PickVisual(Shape::Cone(300.f, 20.f), 1, MarkerStyle::Disc);   // wider: a full disc of the length
+        v = PickVisual(Shape::Cone(300.f, 20.f), 1, MarkerLayer::Fill);   // wider: a full disc of the length
         CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90501 && v.clamped && v.filled);
         CHECK(v.pieces[0].scale == 20.f && v.pieces[0].facingOffset == 0.f && v.pieces[0].forward == 0.f);
         for (float a = 1.f; a <= 360.f; a += 1.f)                         // drawn cone angle >= hitbox angle, or disc
         {
-            v = PickVisual(Shape::Cone(a, 20.f), 0, MarkerStyle::Disc);
+            v = PickVisual(Shape::Cone(a, 20.f), 0, MarkerLayer::Fill);
             if (v.filled)
                 CHECK(a > 270.f && v.pieces[0].display == 90500);
             else
@@ -522,7 +522,7 @@ namespace
         }
         Shape rear = Shape::Cone(90.f, 8.f);
         rear.facingOffsetDeg = 180.f;
-        v = PickVisual(rear, 0, MarkerStyle::Disc);
+        v = PickVisual(rear, 0, MarkerLayer::Fill);
         CHECK_NEAR(v.pieces[0].facingOffset, Geo::kPi, 1e-5);
 
         // Line: never shorter than the hitbox, at most 9% longer.
@@ -531,7 +531,7 @@ namespace
         for (float len = 1.f; len <= 128.f; len += 0.37f)
         {
             Shape l = Shape::Line(len, 3.f);
-            VisualPick const p = PickVisual(l, 0, MarkerStyle::Disc);
+            VisualPick const p = PickVisual(l, 0, MarkerLayer::Fill);
             float drawnEnd = 0.f;
             for (VisualPiece const& piece : p.pieces)
             {
@@ -550,26 +550,268 @@ namespace
         // Excluded start: the drawn part starts at the exclusion.
         Shape ex = Shape::Line(30.f, 6.f);
         ex.excludeStart = 6.f;
-        v = PickVisual(ex, 1, MarkerStyle::Disc);
+        v = PickVisual(ex, 1, MarkerLayer::Fill);
         CHECK(v.pieces.size() == 1);
         CHECK_NEAR(v.pieces[0].forward, 6.f, 1e-6);
         CHECK(v.pieces[0].display == 90538 + 2 * 16 + 1);       // 24/6 = 4 = 2^(16/8)
-        // Aspect exactly 32 is one piece; above 32 several abutting pieces.
-        v = PickVisual(Shape::Line(64.f, 2.f), 0, MarkerStyle::Disc);
-        CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90538 + 2 * 40);
-        v = PickVisual(Shape::Line(100.f, 2.f), 0, MarkerStyle::Disc);
-        CHECK(v.pieces.size() == 2);
-        CHECK_NEAR(v.pieces[1].forward, 50.f, 1e-4);
-        CHECK(v.pieces[0].display == 90538 + 2 * 38);           // 25 -> ceil(8 log2 25) = 38
-        v = PickVisual(Shape::Line(1000.f, 3.f), 0, MarkerStyle::Disc);
-        CHECK(v.pieces.size() == 11);
+        // Aspect exactly 8 is one piece; above 8 several abutting pieces.
+        v = PickVisual(Shape::Line(16.f, 2.f), 0, MarkerLayer::Fill);
+        CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90538 + 2 * 24);
+        v = PickVisual(Shape::Line(100.f, 2.f), 0, MarkerLayer::Fill);
+        CHECK(v.pieces.size() == 7);                            // 50 / 8 -> 7 pieces of 14.29 yd
+        CHECK_NEAR(v.pieces[1].forward, 100.f / 7.f, 1e-4);
+        CHECK(v.pieces[0].display == 90538 + 2 * 23);           // 7.14 -> ceil(8 log2 7.14) = 23
+        v = PickVisual(Shape::Line(1000.f, 3.f), 0, MarkerLayer::Fill);
+        CHECK(v.pieces.size() == 42);
         // Short wide line: aspect below 1 draws the 1:1 piece.
-        v = PickVisual(Shape::Line(2.f, 6.f), 0, MarkerStyle::Disc);
+        v = PickVisual(Shape::Line(2.f, 6.f), 0, MarkerLayer::Fill);
         CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90538);
         // Degenerate.
-        CHECK(PickVisual(Shape::Line(0.f, 6.f), 0, MarkerStyle::Disc).pieces.empty());
-        // The last display id is the top of the line block.
-        CHECK(90538 + 2 * 40 + 1 == Ids::DISPLAY_LAST);
+        CHECK(PickVisual(Shape::Line(0.f, 6.f), 0, MarkerLayer::Fill).pieces.empty());
+        // The id table is dense: fill lines end where outline lines start, the timer ring is the last block.
+        CHECK(90538 + 2 * 24 + 1 + 1 == Ids::DISPLAY_LINE_OUTLINE_BASE);
+        CHECK(Ids::DISPLAY_LINE_OUTLINE_BASE + 2 * 24 + 1 + 1 == Ids::DISPLAY_CONE_OUTLINE_BASE);
+        CHECK(Ids::DISPLAY_CONE_OUTLINE_BASE + 2 * 7 + 1 + 1 == Ids::DISPLAY_DONUT_OUTLINE_BASE);
+        CHECK(Ids::DISPLAY_DONUT_OUTLINE_BASE + 2 * 6 + 1 + 1 == Ids::DISPLAY_TIMER_RING_BASE);
+        CHECK(Ids::DISPLAY_TIMER_RING_BASE + 1 == Ids::DISPLAY_LAST);
+        CHECK(Ids::DISPLAY_LAST + 1 == Ids::DISPLAY_SPARE_FIRST && Ids::DISPLAY_SPARE_LAST == 90699);
+    }
+
+    // Every shape the tests sweep: (shape, colour).
+    std::vector<std::pair<Shape, std::uint8_t>> FillShapes()
+    {
+        std::vector<std::pair<Shape, std::uint8_t>> out;
+        for (float r : { 0.5f, 2.f, 5.f, 10.f, 40.f })
+            out.push_back({ Shape::Circle(r), static_cast<std::uint8_t>(static_cast<int>(r) % 4) });
+        for (float inner : { 0.f, 2.f, 3.f, 4.5f, 6.f, 9.f, 11.f })
+            out.push_back({ Shape::Donut(inner, 12.f), 1 });
+        for (float a : { 10.f, 60.f, 90.f, 100.f, 270.f, 300.f })
+            out.push_back({ Shape::Cone(a, 20.f), 0 });
+        for (float len : { 0.3f, 2.f, 3.f, 7.f, 24.f, 25.f, 40.f, 100.f, 1000.f })
+            out.push_back({ Shape::Line(len, 3.f), 1 });
+        Shape ex = Shape::Line(30.f, 6.f);
+        ex.excludeStart = 6.f;
+        out.push_back({ ex, 0 });
+        Shape rear = Shape::Cone(90.f, 8.f);
+        rear.facingOffsetDeg = 180.f;
+        out.push_back({ rear, 0 });
+        return out;
+    }
+
+    bool IsLine(std::uint32_t display)
+    {
+        return display >= Ids::DISPLAY_LINE_BASE && display < Ids::DISPLAY_CONE_OUTLINE_BASE;
+    }
+
+    void TestLayers()
+    {
+        // Outline and fill draw the same geometry: same piece count, scale, facing and placement; only the ids differ.
+        for (auto const& [shape, colour] : FillShapes())
+        {
+            VisualPick const o = PickVisual(shape, colour, MarkerLayer::Outline);
+            VisualPick const f = PickVisual(shape, colour, MarkerLayer::Fill);
+            CHECK(o.pieces.size() == f.pieces.size());
+            CHECK(o.clamped == f.clamped && o.filled == f.filled && o.colourFallback == f.colourFallback);
+            for (std::size_t k = 0; k < std::min(o.pieces.size(), f.pieces.size()); ++k)
+            {
+                CHECK(o.pieces[k].scale == f.pieces[k].scale);
+                CHECK(o.pieces[k].forward == f.pieces[k].forward);
+                CHECK(o.pieces[k].facingOffset == f.pieces[k].facingOffset);
+                CHECK_NEAR(PieceExtent(o.pieces[k]), PieceExtent(f.pieces[k]), 1e-5);
+                CHECK(o.pieces[k].display != f.pieces[k].display);
+            }
+        }
+        // The outline ids, shape by shape.
+        CHECK(PickVisual(Shape::Circle(8.f), 2, MarkerLayer::Outline).pieces[0].display == 90506);
+        CHECK(PickVisual(Shape::Donut(4.f, 12.f), 1, MarkerLayer::Outline).pieces[0].display == 90654 + 2 * 1 + 1);
+        CHECK(PickVisual(Shape::Donut(1.f, 12.f), 0, MarkerLayer::Outline).pieces[0].display == 90504);  // filled
+        CHECK(PickVisual(Shape::Cone(90.f, 20.f), 0, MarkerLayer::Outline).pieces[0].display == 90638 + 2 * 3);
+        CHECK(PickVisual(Shape::Cone(300.f, 20.f), 1, MarkerLayer::Outline).pieces[0].display == 90505);  // filled
+        CHECK(PickVisual(Shape::Line(12.f, 3.f), 1, MarkerLayer::Outline).pieces[0].display == 90588 + 2 * 16 + 1);
+        // Outline rounding promises: a get-out outline is never smaller than its hitbox; a donut hole never bigger.
+        for (float len = 0.5f; len <= 200.f; len += 0.73f)
+        {
+            VisualPick const o = PickVisual(Shape::Line(len, 2.5f), 0, MarkerLayer::Outline);
+            CHECK(o.pieces.back().forward + PieceExtent(o.pieces.back()) >= len - 1e-3f);
+        }
+        for (int inner = 30; inner < 120; ++inner)
+        {
+            VisualPick const o = PickVisual(Shape::Donut(inner / 10.f, 12.f), 0, MarkerLayer::Outline);
+            float const drawn = Ids::kDonutRatios[(o.pieces[0].display - Ids::DISPLAY_DONUT_OUTLINE_BASE) / 2];
+            CHECK(drawn <= inner / 120.f + 1e-4f);
+        }
+    }
+
+    void TestFillFraction()
+    {
+        Ms const created(1000);
+        Ms const resolve(4000);
+        CHECK_NEAR(FillFraction(created, resolve, created, Ms(0)), 0.f, 1e-6);
+        CHECK_NEAR(FillFraction(created, resolve, Ms(2500), Ms(0)), 0.5f, 1e-6);
+        CHECK_NEAR(FillFraction(created, resolve, resolve, Ms(0)), 1.f, 1e-6);
+        CHECK_NEAR(FillFraction(created, resolve, Ms(500), Ms(0)), 0.f, 1e-6);        // clamped below
+        CHECK_NEAR(FillFraction(created, resolve, Ms(9000), Ms(0)), 1.f, 1e-6);       // and above
+        CHECK_NEAR(FillFraction(created, resolve, Ms(3850), Ms(150)), 1.f, 1e-6);     // full `lead` early
+        CHECK_NEAR(FillFraction(created, resolve, Ms(3849), Ms(150)), 2999.f / 3000.f, 1e-5);
+        CHECK(FillFraction(created, created, created, Ms(0)) == 1.f);                  // no warning: full at once
+        float prev = -1.f;
+        for (std::int64_t t = 0; t <= 5000; t += 37)
+        {
+            float const f = FillFraction(created, resolve, Ms(t), Ms(150));
+            CHECK(f >= prev);
+            prev = f;
+        }
+
+        // The schedule the telegraph runs: one step every FillStepMs from the spawn. With the lead at least one step,
+        // the last step before the resolve already asks for the full size, so the fill is full at (not after) the
+        // resolve as far as the server goes.
+        for (std::int64_t warn : { 400, 1000, 2500, 3000, 7777 })
+            for (std::int64_t step : { 50, 100, 150, 200 })
+            {
+                Ms const c(0);
+                Ms const r(warn);
+                float last = 0.f;
+                bool monotonic = true;
+                for (std::int64_t t = 0; t < warn; t += step)
+                {
+                    float const f = FillFraction(c, r, Ms(t), Ms(step));
+                    if (f < last)
+                        monotonic = false;
+                    last = f;
+                }
+                CHECK(monotonic);
+                CHECK(last == 1.f);
+            }
+    }
+
+    void TestFillPick()
+    {
+        for (auto const& [shape, colour] : FillShapes())
+        {
+            VisualPick const outline = PickVisual(shape, colour, MarkerLayer::Outline);
+            VisualPick const full = PickVisual(shape, colour, MarkerLayer::Fill);
+            bool const donutRing = shape.type == ShapeType::Donut && !full.filled;
+
+            // Live danger: exactly the full fill.
+            VisualPick const live = PickFill(shape, colour, 0.3f, true);
+            CHECK(live.pieces.size() == full.pieces.size());
+            for (std::size_t k = 0; k < live.pieces.size(); ++k)
+                CHECK(live.pieces[k].display == full.pieces[k].display && live.pieces[k].scale == full.pieces[k].scale);
+
+            float prevTotal = -1.f;
+            float prevRing = 1e9f;
+            bool monotonic = true;
+            bool neverAbove = true;
+            bool slotsInOrder = true;
+            for (int step = 0; step <= 200; ++step)
+            {
+                float const f = step / 200.f;
+                VisualPick const p = PickFill(shape, colour, f, false);
+                CHECK(p.pieces.size() == outline.pieces.size());
+                float total = 0.f;
+                for (std::size_t k = 0; k < p.pieces.size(); ++k)
+                {
+                    VisualPiece const& piece = p.pieces[k];
+                    VisualPiece const& o = outline.pieces[k];
+                    float const extent = PieceExtent(piece);
+                    if (extent > PieceExtent(o) + 1e-4f)
+                        neverAbove = false;
+                    if (piece.display && piece.scale > o.scale + 1e-5f)     // a line never wider than its outline
+                        neverAbove = false;
+                    if (piece.display && (piece.forward != o.forward || piece.facingOffset != o.facingOffset))
+                        neverAbove = false;                                 // same anchor point and facing
+                    if (shape.type == ShapeType::Line && piece.display)
+                    {
+                        // From the source end, without gaps: piece k starts only once piece k-1 reaches its start
+                        // (outline pieces round up, so neighbours overlap a little and both may be partial there).
+                        if (k > 0 && p.pieces[k - 1].forward + PieceExtent(p.pieces[k - 1]) < piece.forward - 1e-3f)
+                            slotsInOrder = false;
+                        if (k == 0 && piece.forward != outline.pieces[0].forward)
+                            slotsInOrder = false;
+                        if (!IsLine(piece.display))
+                            slotsInOrder = false;
+                    }
+                    if (piece.display && piece.scale < Rules::kFillMinScaleYd)
+                        neverAbove = false;                                 // no near-zero creature
+                    total += extent;
+                }
+                if (donutRing)
+                {
+                    VisualPiece const& ring = p.pieces[0];
+                    CHECK(ring.display == Ids::DISPLAY_TIMER_RING_BASE + colour % 2);
+                    // shrinks from the outer rim; its band never enters the drawn hole
+                    float const hole = Ids::kDonutRatios[(full.pieces[0].display - Ids::DISPLAY_DONUT_BASE) / 2]
+                        * shape.radius;
+                    CHECK(ring.scale <= shape.radius + 1e-5f);
+                    CHECK(ring.scale * (1.f - Ids::kTimerRingBandFrac) >= hole - 1e-4f);
+                    if (ring.scale > prevRing + 1e-6f)
+                        monotonic = false;
+                    prevRing = ring.scale;
+                    if (step == 0)
+                        CHECK_NEAR(ring.scale, shape.radius, 1e-5);
+                    if (step == 200)
+                        CHECK_NEAR(ring.scale * (1.f - Ids::kTimerRingBandFrac), hole, 1e-4);
+                    continue;
+                }
+                if (total < prevTotal - 1e-5f)
+                    monotonic = false;
+                prevTotal = total;
+                if (step == 0)
+                    CHECK(total == 0.f);                                    // nothing drawn at the start
+                if (step == 200)
+                {
+                    // Full at f = 1: the outline's own geometry, in the fill displays.
+                    for (std::size_t k = 0; k < p.pieces.size(); ++k)
+                    {
+                        CHECK(p.pieces[k].display == full.pieces[k].display);
+                        CHECK_NEAR(p.pieces[k].scale, full.pieces[k].scale, 1e-5);
+                    }
+                }
+            }
+            CHECK(monotonic);
+            CHECK(neverAbove);
+            CHECK(slotsInOrder);
+        }
+
+        // Circle: linear in f from the centre.
+        VisualPick v = PickFill(Shape::Circle(10.f), 0, 0.25f, false);
+        CHECK(v.pieces.size() == 1 && v.pieces[0].display == 90500);
+        CHECK_NEAR(v.pieces[0].scale, 2.5f, 1e-5);
+        CHECK(PickFill(Shape::Circle(10.f), 0, 0.005f, false).pieces[0].display == 0);      // 0.05 yd: not yet
+        // Cone: grows from the apex, same angle display, facing kept.
+        v = PickFill(Shape::Cone(90.f, 20.f), 1, 0.5f, false);
+        CHECK(v.pieces[0].display == 90522 + 2 * 3 + 1);
+        CHECK_NEAR(v.pieces[0].scale, 10.f, 1e-5);
+        // Donut 4/12 (drawn 0.33): the ring ends with its inner edge on the 3.96 yd drawn hole.
+        v = PickFill(Shape::Donut(4.f, 12.f), 0, 1.f, false);
+        CHECK(v.pieces[0].display == 90668);
+        CHECK_NEAR(v.pieces[0].scale, 0.33f * 12.f / 0.96f, 1e-4);
+        v = PickFill(Shape::Donut(4.f, 12.f), 0, 1.f, true);                                // live: filled donut
+        CHECK(v.pieces[0].display == 90508 + 2);
+        // A donut drawn as a disc fills like a circle.
+        v = PickFill(Shape::Donut(1.f, 12.f), 0, 0.5f, false);
+        CHECK(v.pieces[0].display == 90500);
+        CHECK_NEAR(v.pieces[0].scale, 6.f, 1e-5);
+        // Line 24 x 3 (aspect 8, one piece, step 24): constant width, ladder steps that fit, a square below 3 yd.
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.0625f, false);                            // 1.5 yd: a square
+        CHECK(v.pieces[0].display == 90538 && v.pieces[0].scale == 1.5f);
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.5f, false);                               // 12 yd = 4 widths
+        CHECK(v.pieces[0].display == 90538 + 2 * 16 && v.pieces[0].scale == 3.f);
+        v = PickFill(Shape::Line(24.f, 3.f), 0, 0.49f, false);                              // 11.76: step 15
+        CHECK(v.pieces[0].display == 90538 + 2 * 15);
+        // Line 100 x 2 (7 pieces): at half, pieces 0-2 full, piece 3 partial, 4-6 empty.
+        VisualPick const o = PickVisual(Shape::Line(100.f, 2.f), 0, MarkerLayer::Outline);
+        v = PickFill(Shape::Line(100.f, 2.f), 0, 0.5f, false);
+        CHECK(v.pieces[0].display == 90538 + 2 * 23 && v.pieces[2].display == 90538 + 2 * 23);
+        CHECK(v.pieces[3].display != 0 && v.pieces[3].display < 90538 + 2 * 23);
+        CHECK(v.pieces[4].display == 0 && v.pieces[6].display == 0);
+        CHECK(o.pieces.size() == 7);
+        // Excluded start: the fill starts at the exclusion.
+        Shape ex = Shape::Line(30.f, 6.f);
+        ex.excludeStart = 6.f;
+        v = PickFill(ex, 0, 0.5f, false);
+        CHECK(v.pieces.size() == 1 && v.pieces[0].forward == 6.f);
+        CHECK(v.pieces[0].display == 90538 + 2 * 8);                                        // 12 yd = 2 widths
     }
 }
 
@@ -584,5 +826,8 @@ int main()
     TestReferenceHealth();
     TestSearchRadius();
     TestVisualPick();
+    TestLayers();
+    TestFillFraction();
+    TestFillPick();
     return Report("math_test");
 }

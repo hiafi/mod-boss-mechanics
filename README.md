@@ -20,7 +20,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicMath.h` | Pure timing and numbers: projectile, mine, lanes, threat, damage, visual pick, `Rules::` |
 | `src/MechanicProviders.h/.cpp` | Reference health, content key and role providers (stubs) |
 | `src/EngineBridge.h` | The seam between the registry and the engine glue |
-| `src/MechanicTelegraph.h/.cpp` | Marker creatures: spawn, size, follow, mine ring-to-disc swap, despawn |
+| `src/MechanicTelegraph.h/.cpp` | Marker creatures: outline + fill layers, spawn, size, fill timer, follow, despawn |
 | `src/MechanicResolve.cpp` | `spell_boss_mechanics_resolve` and the `EngineBridge` implementation (resolve cast) |
 | `src/MechanicWeakened.h/.cpp` | Weakened stacks and threat compensator, `spell_boss_mechanics_weakened` |
 | `src/MechanicMarkerAI.h/.cpp` | `npc_boss_mechanic_marker`: passive marker / test owner AI |
@@ -149,26 +149,62 @@ battlegrounds use the whole map.
 
 One Mechanic Marker (300400) per marker piece, summoned with no summoner (so no `JustSummoned` and no zone combat),
 passive, never evading, faction/level/phase copied from the owner, gravity off, `Telegraph.Lift` above the anchor.
-Display and size come from the ladder pick: `SetDisplayId` first, then `SetObjectScale` (scale = radius / length /
-width; the marker models are 1 yd at scale 1).
+Display and size come from the ladder pick (scale = radius / length / width; the marker shapes are 1 yd at scale 1)
+and are set **before** the creature enters the map: `SummonMarker` builds the TempSummon itself instead of calling
+`Map::SummonCreature`, whose `AddToMap` sends the create packet with the template display at scale 1. The client
+blends every scale change in, so a marker resized after the create visibly grew from 1 yd (the first build's bug).
+
+Every telegraph draws two layers:
+
+| Layer | Look | Size |
+| --- | --- | --- |
+| Outline | rim (0.9) + faint interior (0.2) | the full hitbox from the first frame; never resized by the timer |
+| Fill | rim (0.9) + solid interior (0.35) | the timer: grows into the outline over the warning, full at the resolve |
+
+The fill is stepped every `Telegraph.FillStepMs` (150 ms) from the registration to the resolve, computed
+`Telegraph.FillLeadMs` (150 ms) ahead so the client's scale blend lands it on the outline at the resolve, not after;
+it is never bigger than the outline. Per shape:
+
+- Circle, Stack/Soak/Spot discs, Spread/RunOut rings: a disc grows from the centre.
+- Cone: grows from the apex (uniform scale keeps the angle).
+- Donut: a rim-only timer ring (90668+c) shrinks from the outer rim to the drawn hole, its band always on the danger
+  side; once live (a persistent donut), the filled donut.
+- Line: grows from the source end (after `ExcludeSourceEnd`) at the outline's width: ladder display swaps at
+  scale = width, so the length never blends; a square of its length while shorter than the width; a multi-piece
+  line fills piece by piece.
+- Travelling projectile lines: no fill (the projectile is the timer).
+- Mines: the fill grows while the mine arms and is full while it is armed (the old ring-then-disc, now with a timer).
+- Persistent zones: full fill from the resolve to the end (no regrowth per tick).
+- RunOut `From(Owner)`: the owner's ring gets the fill; the small pointer rings on the targets do not.
+
+`Telegraph.Fill = 0` drops the timer: the outline is drawn alone until the danger is live (an armed mine, a persistent
+zone after its resolve), which still shows the full fill.
+
+Cost: two creatures per drawn piece (outline + fill), so a circle, cone, donut or one-piece line is 2 markers, a
+Spread on 5 players 10, an n-piece line 2n; projectile lines and the RunOut pointer rings stay single.
+`MaxActivePerMap` (256) caps mechanics, not markers: 256 one-piece mechanics are about 512 marker creatures. Fill
+resizes send one value update per fill marker per step (~7 per second), like a moving creature.
 
 - Cone angles round up to the ladder (30, 45, 60, 90, 120, 150, 180, 270); a cone wider than 270 degrees draws a full
   disc of its length (the hitbox stays the cone; a WARN names it).
 - Donut ratios round **down** to the ladder (0.25, 0.33, 0.40, 0.50, 0.60, 0.67, 0.75): the drawn safe hole is never
   bigger than the real one (`Rules::kDonutRatioRoundUp = false`, harness ruling 2026-11-02). A ratio below 0.25 draws
   a full disc (no hole shown, a WARN names it) rather than a hole bigger than the real one.
-- Lines use aspect steps 2^(i/8), 1 to 32, never shorter than the hitbox and at most 9% longer
-  (`Rules::kLineNeverShorter`); above 32 several abutting pieces. Known limit: a line shorter than its width
+- Lines use aspect steps 2^(i/8), 1 to 8, never shorter than the hitbox and at most 9% longer
+  (`Rules::kLineNeverShorter`); above 8 several abutting pieces. Known limit: a line shorter than its width
   (aspect < 1) draws the 1:1 piece, so it can be more than 9% too long (accepted for M1).
-- The resolve caster is the mechanic's first marker (the carrier's marker for Spread/RunOut, the owner's ring for
-  RunOut `From(Owner)`); a mechanic with no
-  marker (`NoTelegraph`, Bait) casts from a hidden marker summoned for that cast only.
+- Both layers use the same rounding, so the full fill is exactly the outline.
+- The textures keep a transparent margin (1/16 of the side) at every mip level, so no edge texel is stretched along
+  the quad edge (the first build's "lines at the cardinals").
+- The resolve caster is the mechanic's first outline marker (the carrier's ring for Spread/RunOut, the owner's ring
+  for RunOut `From(Owner)`); a mechanic with no marker (`NoTelegraph`, Bait) casts from a hidden marker summoned for
+  that cast only.
 
 ### Follow modes (`BossMechanics.Telegraph.FollowMode`)
 
-Markers on a unit anchor, on a `Line(from, to)` with a unit end, and on Spread/RunOut carriers are moved every
-`FollowIntervalMs` when the target moved more than 0.25 yd or turned more than 2 degrees. The hitbox always reads the
-live anchor; the marker trails by up to one interval.
+Markers (both layers) on a unit anchor, on a `Line(from, to)` with a unit end, and on Spread/RunOut carriers are moved
+every `FollowIntervalMs` when the target moved more than 0.25 yd or turned more than 2 degrees. The hitbox always reads
+the live anchor; the marker trails by up to one interval.
 
 | Mode | How | Notes |
 | --- | --- | --- |
@@ -244,6 +280,9 @@ the shape are listed back as ignored.
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
 | `BossMechanics.Telegraph.Lift` | 0.1 | marker height above the anchor (yd) |
 | `BossMechanics.Telegraph.ShrinkProjectileLines` | 0 | shorten projectile markers behind the projectile |
+| `BossMechanics.Telegraph.Fill` | 1 | 0: no fill timer (the fill still shows an armed mine / a live zone) |
+| `BossMechanics.Telegraph.FillStepMs` | 150 | fill resize interval (min 50) |
+| `BossMechanics.Telegraph.FillLeadMs` | 150 | fill computed this far ahead (client scale blend; max 2000) |
 | `BossMechanics.MaxActivePerMap` | 256 | registrations above it are refused with a warning |
 | `BossMechanics.OpenWorld.CandidateRadius` | 100 | open world: farther from the owner never takes part (0 = map) |
 
@@ -255,7 +294,9 @@ the shape are listed back as ignored.
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
-| 90500-90619 | Marker displays: disc 90500+c, ring 90504+c, donut 90508+2j+c, cone 90522+2j+c, line 90538+2i+c |
+| 90500-90669 | Marker displays, fill: disc 90500+c, donut 90508+2j+c, cone 90522+2j+c, line 90538+2i+c |
+| | outline: ring 90504+c, line 90588+2i+c, cone 90638+2j+c, donut 90654+2j+c; timer ring 90668+c |
+| 90670-90699 | spare (90690-90695: the asset script's opt-in diagnostic displays) |
 
 The spell and creature rows come from dbc-tools (`apps/dbc-tools/source/npcs/boss_mechanics.py`), the displays and
 models from `apps/dbc-tools/patch_bossmechanics_markers.py`. A dungeon that wants its own combat-log name declares a
@@ -291,6 +332,7 @@ copy of the resolve spell bound to `spell_boss_mechanics_resolve` and passes it 
 | S2 | Blend 2 paints over the floor (not additive glow) | try blend 3 (alpha key) |
 | S3 | Marker on the floor: no z-fighting, not hidden by bumps | raise `Telegraph.Lift`; else flag 0x8 |
 | S4 | `circle 2`, `circle 10`, `circle 40` match 2/10/40 yd (`.gps` at the edge) | fix the model radius |
+| S8 | The outline appears at full size at once; the fill grows and meets it as the hit lands | `Telegraph.FillLeadMs` |
 | S5 | `cone 20 3000` points where the GM faces | flip the texture orientation |
 | S6 | No blob shadow, nameplate, name or selection circle on markers | CreatureModelData flags; unit flags |
 | S7 | `circle 5 8000 anchor=target` on a moving bot is smooth; a cone turns with it | `FollowMode` 1, then 2 |
