@@ -2,8 +2,9 @@
  * mod-boss-mechanics: the `.mech` GM command (STAGE-M1-HANDOFF §3.10). SEC_GAMEMASTER, in game only.
  *
  *   .mech test <shape> <size> <ms> [key=value ...]
- *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7>
- *   .mech palette <red|yellow> <blue|purple>
+ *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
+ *   .mech palette <get-out color> <get-in color> [cross-lane color] [cell color]
+ *                                                    (red yellow blue purple orange green teal white black)
  *
  * `.mech test` registers through the public Mechanic:: API, owned by a hostile Mechanic Test Owner (300401) summoned at
  * the GM (one per map, reused; it despawns after 5 minutes without a live mechanic, or on `.mech clear`). GMs are never
@@ -21,6 +22,7 @@
 #include "GameTime.h"
 #include "Map.h"
 #include "MechanicMarkerAI.h"
+#include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -44,16 +46,11 @@ namespace
     constexpr Milliseconds kDefaultBurn = Milliseconds(6000);
 
     // ---- parsing ---------------------------------------------------------------------------------------------------
-    std::optional<Colour> ParseColour(std::string_view s)
+    std::optional<Color> ParseColor(std::string_view s)
     {
-        if (s == "red")
-            return Colour::Red;
-        if (s == "yellow")
-            return Colour::Yellow;
-        if (s == "blue")
-            return Colour::Blue;
-        if (s == "purple")
-            return Colour::Purple;
+        for (uint8 i = 0; i < Ids::COLOR_COUNT; ++i)
+            if (s == ColorName(static_cast<Color>(i)))
+                return static_cast<Color>(i);
         return std::nullopt;
     }
 
@@ -166,6 +163,7 @@ namespace
         Milliseconds pause{ 0 };
         Milliseconds grace{ 500 };
         uint8 cap = 0;
+        uint32 capGroup = 0;
         Milliseconds life{ 0 };
         uint32 count = 3;
         uint8 spreadCount = 0;
@@ -188,7 +186,7 @@ namespace
         bool once = false;
         Milliseconds persist{ 0 };
         Milliseconds tick{ 1000 };
-        std::optional<Colour> colour;
+        std::optional<Color> color;
         bool tele = true;
 
         // anchor: a point (the selected unit's position, the GM's facing) or a unit
@@ -231,8 +229,8 @@ namespace
             ref.Weakened();
         if (allowPersist && spec.persist > Milliseconds(0))
             ref.Persistent(spec.persist, spec.tick);
-        if (spec.colour)
-            ref.Colour(*spec.colour);
+        if (spec.color)
+            ref.Color(*spec.color);
         if (!spec.tele)
             ref.NoTelegraph();
         ref.Tag(spec.tag);
@@ -302,7 +300,7 @@ namespace
         {
             MechanicRef ref = Mechanic::Mine(owner, here, spec.size, spec.warn, spec.grace);
             if (spec.cap)
-                ref.Cap(1, spec.cap);
+                ref.Cap(spec.capGroup, spec.cap);
             if (spec.life > Milliseconds(0))
                 ref.Lifetime(spec.life);
             ApplyCommon(ref, spec, true, false);
@@ -466,6 +464,7 @@ public:
             { "ledger",   HandleLedger,   SEC_GAMEMASTER, Console::No },
             { "weakened", HandleWeakened, SEC_GAMEMASTER, Console::No },
             { "palette",  HandlePalette,  SEC_GAMEMASTER, Console::No },
+            { "markers",  HandleMarkers,  SEC_GAMEMASTER, Console::No },     // [range]
         };
         static ChatCommandTable commandTable =
         {
@@ -530,6 +529,7 @@ public:
         {
             spec.grace = opt.Ms("grace", Milliseconds(500));
             spec.cap = static_cast<uint8>(std::clamp<int32>(opt.Int("cap", 0), 0, 255));
+            spec.capGroup = static_cast<uint32>(std::max<int32>(opt.Int("group", 0), 0));
             spec.life = opt.Ms("life", Milliseconds(0));
         }
         if (s == "lanes")
@@ -584,11 +584,13 @@ public:
         }
         spec.persist = opt.Ms("persist", Milliseconds(0));
         spec.tick = opt.Ms("tick", Milliseconds(1000));
-        if (opt.Has("colour"))
+        for (char const* key : { "color", "colour" })     // colour=: a silent alias
         {
-            spec.colour = ParseColour(opt.Str("colour", ""));
-            if (!spec.colour)
-                opt.MarkBad("colour");
+            if (!opt.Has(key))
+                continue;
+            spec.color = ParseColor(opt.Str(key, ""));
+            if (!spec.color)
+                opt.MarkBad(key);
         }
         spec.tele = opt.Bool("tele", true);
         uint32 const repeat = static_cast<uint32>(std::clamp<int32>(opt.Int("repeat", 1), 1, kMaxRepeat));
@@ -742,12 +744,25 @@ public:
             {
                 ++shown;
                 handler->PSendSysMessage("#{} {} {} {} tag {} | resolve {:+} ms, expire {:+} ms | {} markers{}{}{}",
-                    m.id, KindName(m.kind), DescribeShape(m.shape), ColourName(m.colour), m.tag,
+                    m.id, KindName(m.kind), DescribeShape(m.shape), ColorName(m.color), m.tag,
                     (m.resolveAt - now).count(), (m.expireAt - now).count(), m.markers.size(),
                     m.projectile ? " projectile" : "", m.mine ? (m.mine->armed ? " mine(armed)" : " mine") : "",
                     m.persist ? " persistent" : "");
             });
         handler->PSendSysMessage("{} active mechanic(s) on this map.", shown);
+        return true;
+    }
+
+    // Every live marker within range (default 100 yd) of the GM, one line each: the server's side of what is drawn.
+    static bool HandleMarkers(ChatHandler* handler, Optional<float> range)
+    {
+        Player* gm = handler->GetPlayer();
+        float const r = range && *range > 0.f ? *range : 100.f;
+        std::vector<std::string> const lines = Telegraph::DescribeMarkers(gm->GetMap(), gm->GetPosition(), r);
+        for (std::string const& line : lines)
+            handler->PSendSysMessage("{}", line);
+        handler->PSendSysMessage("{} marker(s) within {:.0f} yd. GM at {:.2f} {:.2f} {:.2f} o {:.3f}.", lines.size(),
+            r, gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation());
         return true;
     }
 
@@ -819,14 +834,18 @@ public:
         return true;
     }
 
-    static bool HandlePalette(ChatHandler* handler, std::string getOut, std::string getIn)
+    static bool HandlePalette(ChatHandler* handler, std::string getOut, std::string getIn,
+        Optional<std::string> crossLanes, Optional<std::string> cells)
     {
-        std::optional<Colour> out = ParseColour(getOut);
-        std::optional<Colour> in = ParseColour(getIn);
-        if (!out || !in || (*out != Colour::Red && *out != Colour::Yellow)
-            || (*in != Colour::Blue && *in != Colour::Purple))
+        EncounterOptions opt;
+        std::optional<Color> out = ParseColor(getOut);
+        std::optional<Color> in = ParseColor(getIn);
+        std::optional<Color> cross = crossLanes ? ParseColor(*crossLanes) : std::optional<Color>(opt.crossLanes);
+        std::optional<Color> cell = cells ? ParseColor(*cells) : std::optional<Color>(opt.cells);
+        if (!out || !in || !cross || !cell)
         {
-            handler->SendErrorMessage("Usage: .mech palette <red|yellow> <blue|purple>");
+            handler->SendErrorMessage("Usage: .mech palette <get-out color> <get-in color> [cross-lane color] "
+                "[cell color]; colors: red yellow blue purple orange green teal white black");
             return false;
         }
         Creature* owner = GetOrSummonTestOwner(handler->GetPlayer());
@@ -835,12 +854,13 @@ public:
             handler->SendErrorMessage("Could not summon the Mechanic Test Owner");
             return false;
         }
-        EncounterOptions opt;
         opt.getOut = *out;
         opt.getIn = *in;
+        opt.crossLanes = *cross;
+        opt.cells = *cell;
         Mechanic::BeginEncounter(owner, opt);
-        handler->PSendSysMessage("Test palette: get-out {}, get-in {} (applies to new test mechanics).",
-            ColourName(*out), ColourName(*in));
+        handler->PSendSysMessage("Test palette: get-out {}, get-in {}, cross lanes {}, cells {} (applies to new test "
+            "mechanics).", ColorName(*out), ColorName(*in), ColorName(*cross), ColorName(*cell));
         return true;
     }
 };

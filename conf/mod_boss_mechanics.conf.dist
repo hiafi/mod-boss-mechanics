@@ -52,20 +52,109 @@ BossMechanics.Telegraph.FollowIntervalMs = 200
 
 #
 #    BossMechanics.Telegraph.Lift
-#        Description: Height of a marker above its anchor, in yards (raise it if markers z-fight with the floor).
-#        Default:     0.1
+#        Description: Height of a marker above the highest ground sampled under it, in yards (GroundSnap = 1), or
+#                     above its anchor (GroundSnap = 0). Raise it if markers z-fight with the floor.
+#        Default:     0.3
 #
 
-BossMechanics.Telegraph.Lift = 0.1
+BossMechanics.Telegraph.Lift = 0.3
 
 #
-#    BossMechanics.Telegraph.ShrinkProjectileLines
-#        Description: Shorten a projectile line's marker behind the projectile (cosmetic).
-#        Default:     0 - Disabled
+#    BossMechanics.Telegraph.GroundSnap
+#        Description: Place each marker on the ground under it instead of at its anchor's height. Off by default:
+#                     the marker skins project their texture onto the ground, so a marker at the anchor's height
+#                     already drapes over rolling terrain, and indoors the snap can lift a marker onto furniture
+#                     (the highest sample), where a small projected fill no longer reaches the floor. With the
+#                     snap, each marker samples the walkable floor under its footprint (terrain, buildings,
+#                     bridges) about every GroundSampleYd and stands Lift above the highest sample; a static line
+#                     spanning more than MaxPieceSpreadYd of height is cut into shorter end-to-end pieces, each at
+#                     its own height.
+#                     Only floors within the shape's height tolerance of the anchor count, searched from just above
+#                     the anchor, so a bridge or ceiling overhead or a lower floor never captures a marker. Moving
+#                     markers (on units, on Spread/RunOut carriers) sample a few points on every follow step.
+#        Default:     0 - Disabled (markers at the anchor's height + Lift)
 #                     1 - Enabled
 #
 
-BossMechanics.Telegraph.ShrinkProjectileLines = 0
+BossMechanics.Telegraph.GroundSnap = 0
+
+#
+#    BossMechanics.Telegraph.GroundSampleYd
+#        Description: Ground sample spacing under a marker, in yards (minimum 0.5). Smaller follows the ground more
+#                     closely and costs more height queries; big markers sample more coarsely on their own (at most
+#                     about 160 points per marker piece).
+#        Default:     2
+#
+
+BossMechanics.Telegraph.GroundSampleYd = 2
+
+#
+#    BossMechanics.Telegraph.MaxPieceSpreadYd
+#        Description: A static line marker whose ground rises and falls by more than this many yards under one piece
+#                     is cut into shorter end-to-end pieces, down to one line width (at least 2 yd), so each piece sits
+#                     close to its own ground. Discs, rings, cones and donuts are never cut (they stand at their
+#                     highest sample).
+#        Default:     0.75
+#
+
+BossMechanics.Telegraph.MaxPieceSpreadYd = 0.75
+
+#
+#    BossMechanics.Telegraph.ShrinkProjectileLines
+#        Description: Shorten a projectile line's marker behind the projectile (cosmetic). The drawn start moves
+#                     in steps of the line width (at least 1 yd); each step swaps the marker's model, which the client
+#                     redraws with a brief flicker.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Telegraph.ShrinkProjectileLines = 1
+
+#
+#    BossMechanics.Telegraph.Fill
+#        Description: Draw the fill timer: a solid copy of the telegraph that grows from nothing into its outline
+#                     over the warning time, full at the resolve. Off, the outline is drawn alone until the danger is
+#                     live (a persistent zone after its resolve), which still shows the full fill. An armed mine
+#                     draws its dashed ring either way.
+#                     Travelling projectile lines never get a fill (the projectile is the timer).
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Telegraph.Fill = 1
+
+#
+#    BossMechanics.Telegraph.FillStepMs
+#        Description: The longest fill step: how often the fill is resized at most, in milliseconds (minimum 50).
+#                     The client blends each scale change in over a short time, so a big fill stepped slowly moves
+#                     in visible jumps; FillStepYd shortens the step for those. Keep FillLeadMs at least this long,
+#                     so the last step before the hit already asks for the full fill.
+#        Default:     150
+#
+
+BossMechanics.Telegraph.FillStepMs = 150
+
+#
+#    BossMechanics.Telegraph.FillStepYd
+#        Description: Pace the fill by distance: each mechanic steps its fill often enough that the fill's leading
+#                     edge (a line's far end, a disc's rim, a cone's arc) moves at most this many yards per step,
+#                     never more often than every 50 ms and never less often than FillStepMs. A 30 yd line over 4 s
+#                     steps every 50 ms; a 5 yd circle over 4 s every FillStepMs. 0 steps every FillStepMs.
+#        Default:     0.4
+#
+
+BossMechanics.Telegraph.FillStepYd = 0.4
+
+#
+#    BossMechanics.Telegraph.FillLeadMs
+#        Description: How far ahead of the clock the fill size is computed, in milliseconds (maximum 2000), so the
+#                     client's scale blend lands the drawn fill on the outline at the resolve instead of after it.
+#                     Raise it if the fill is visibly short of the outline when the hit lands; lower it if it is
+#                     full too early.
+#        Default:     150
+#
+
+BossMechanics.Telegraph.FillLeadMs = 150
 
 #
 #    BossMechanics.MaxActivePerMap

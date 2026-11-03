@@ -127,9 +127,10 @@ namespace BossMechanics
         MechanicRef& From(MeasuredFrom from);           // RunOut
         MechanicRef& TankExempt();                      // shape kinds; a cone Zone becomes a Frontal
         // telegraph and bookkeeping
-        MechanicRef& Colour(BossMechanics::Colour colour);
+        MechanicRef& Color(BossMechanics::Color color);
         MechanicRef& Tag(uint32 tag);
         MechanicRef& NoTelegraph();
+        MechanicRef& NoFillTimer();                     // outline only until the danger is live (no growing fill)
         MechanicRef& OnHit(std::function<void(Unit* hit)> fn);
         MechanicRef& OnResolve(std::function<void(ResolveResult const&)> fn);
 
@@ -157,16 +158,23 @@ namespace BossMechanics
         LaneBuilder& Lanes(Axis axis, LaneSpec const& spec, Milliseconds warn);
         // Lanes of `width` covering the frame across `axis`, all but one random lane (Bloodlines).
         LaneBuilder& ExceptOne(float width, Milliseconds warn, Axis axis = Axis::X);
-        // A persistent cell at every crossing of an X lane and a Y lane of this set (L10).
+        // A persistent cell at every crossing of an X lane and a Y lane of this set (L10). Cells draw in the
+        // encounter's `cells` color and show only their outline until they burn (NoFillTimer). Lanes laid along the
+        // set's second axis draw in its `crossLanes` color.
         LaneBuilder& BurnCrossings(Milliseconds duration, Milliseconds tick, float pct);
-        // Options on every lane and cell made so far (damage, Weakened, tag, colour...).
+        // Options on every lane and cell made so far (damage, Weakened, tag, color...).
         LaneBuilder& Each(std::function<void(MechanicRef&)> const& fn);
 
         uint32 Id() const { return _laneSet; }
         std::vector<MechanicHandle> Handles() const;
 
     private:
-        uint32 AddLine(LanePlacement const& place, Milliseconds warn, Milliseconds resolveAt);
+        // `drawn`: the part the marker draws when it is narrower than the lane (ExceptOne's last lane).
+        uint32 AddLine(LanePlacement const& place, Milliseconds warn, Milliseconds resolveAt,
+            LanePlacement const* drawn = nullptr);
+        // Lanes [firstNew, end) of this set run along `axis`: when the set already has lanes on the other axis, they
+        // take the encounter's crossLanes color.
+        void ColorSecondAxis(Axis axis, std::size_t firstNew);
 
         Map* _map = nullptr;
         ObjectGuid _owner;
@@ -195,7 +203,8 @@ namespace Mechanic
         BossMechanics::TankExempt exempt = BossMechanics::TankExempt::No);
     MechanicRef Line(Unit* owner, Anchor const& from, Anchor const& to, float width, Milliseconds warn);
     MechanicRef Line(Unit* owner, Anchor const& from, float facing, float length, float width, Milliseconds warn);
-    // Arms after `arm` (ring -> disc); armed, a player inside for `grace` (or anyone inside at arming) detonates it.
+    // Arms after `arm` (outline + growing fill, then the dashed ring); armed, a player inside for `grace` (or anyone
+    // inside at arming) detonates it.
     MechanicRef Mine(Unit* owner, Position const& pos, float r, Milliseconds arm, Milliseconds grace);
     BossMechanics::LaneBuilder RoomFrame(Unit* owner, BossMechanics::RoomFrame const& frame);
 

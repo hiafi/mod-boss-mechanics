@@ -50,13 +50,21 @@ namespace BossMechanics
         Spot
     };
 
-    enum class Colour : uint8
+    // Telegraph colors: the index is the marker display's color block (Ids::MarkerDisplay), so the order is the asset
+    // script's COLORS. Every marker shape exists in every color.
+    enum class Color : uint8
     {
         Red,
         Yellow,
         Blue,
-        Purple
+        Purple,
+        Orange,
+        Green,
+        Teal,
+        White,      // reads poorly on snow
+        Black       // darkens the floor: reads poorly on dark floors
     };
+    static_assert(static_cast<uint8>(Color::Black) + 1 == Ids::COLOR_COUNT, "Color must match the marker palette");
 
     enum class Family : uint8
     {
@@ -98,7 +106,7 @@ namespace BossMechanics
     Family FamilyOf(Kind kind);
     char const* KindName(Kind kind);
     char const* ShapeName(ShapeType type);
-    char const* ColourName(Colour colour);
+    char const* ColorName(Color color);
 
     // ----------------------------------------------------------------------------------------------------------------
     // Anchors and per-kind state
@@ -252,7 +260,7 @@ namespace BossMechanics
         std::optional<Anchor> to;       // Line(from, to): direction and length follow to - from
         Shape shape;
         Family family = Family::GetOut;
-        Colour colour = Colour::Red;
+        Color color = Color::Red;
 
         Milliseconds createdAt{ 0 };
         Milliseconds resolveAt{ 0 };    // mines: armAt; HoldStill: window start
@@ -287,6 +295,11 @@ namespace BossMechanics
         std::vector<ObjectGuid> markers;                            // C2 fills (SpawnMarkers)
         std::unordered_map<ObjectGuid, ObjectGuid> carrierMarkers;  // C2: carrier guid -> its marker
         bool telegraph = true;
+        bool fillTimer = true;          // false: outline only until the danger is live (crossing cells)
+        // Line markers only (ExceptOne's last lane): draw a strip drawWidth wide whose centreline is drawLateral yd
+        // to the left of the hitbox's, instead of the hitbox (ApplyDrawStrip). drawWidth 0 = draw the hitbox.
+        float drawLateral = 0.f;
+        float drawWidth = 0.f;
 
         // callbacks (owner scripts; dropped when the encounter ends, never called once the owner left the map)
         std::function<void(Unit* hit)> onHit;
@@ -368,9 +381,13 @@ namespace BossMechanics
 
     struct EncounterOptions
     {
-        Colour getOut = Colour::Red;    // D5 palette
-        Colour getIn = Colour::Blue;
+        Color getOut = Color::Red;    // D5 palette
+        Color getIn = Color::Blue;
         std::optional<uint32> bossStateId;
+        // Lane sets (M1-FIX-LINES): lanes laid along the second axis of a set, and the crossing cells, draw in their
+        // own colors so a crossing does not stack six layers of one color.
+        Color crossLanes = Color::Yellow;
+        Color cells = Color::Purple;
     };
 
     struct Encounter
@@ -378,8 +395,10 @@ namespace BossMechanics
         ObjectGuid owner;
         uint32 bossStateId = 0;
         bool hasBossStateId = false;
-        Colour getOut = Colour::Red;
-        Colour getIn = Colour::Blue;
+        Color getOut = Color::Red;
+        Color getIn = Color::Blue;
+        Color crossLanes = Color::Yellow;
+        Color cells = Color::Purple;
         std::unordered_map<ObjectGuid, PlayerLedger> ledger;
         std::vector<FailureEvent> events;   // capped at Rules::kMaxEventsPerEncounter (oldest dropped)
         uint32 groupFailures = 0;           // MissedSoak count
@@ -507,7 +526,7 @@ namespace BossMechanics
         std::vector<Player*> CandidatePlayers(ActiveMechanic const& m) const;
         // `.mech test` encounters: only the GMs who ran it and their group members. Every other encounter: true.
         bool IsInTestScope(ActiveMechanic const& m, Player const* player) const;
-        Colour DefaultColour(Encounter const& e, Family f) const;
+        Color DefaultColor(Encounter const& e, Family f) const;
 
         void Step(ActiveMechanic& m, Milliseconds now);
         void StepShape(ActiveMechanic& m, Milliseconds now);

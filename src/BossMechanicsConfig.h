@@ -30,8 +30,15 @@ namespace BossMechanics
         std::vector<ReferenceHealthRow> referenceHealthRows;
         FollowMode followMode = FollowMode::SplineStep;         // BossMechanics.Telegraph.FollowMode
         uint32 followIntervalMs = 200;                          // BossMechanics.Telegraph.FollowIntervalMs
-        float lift = 0.1f;                                      // BossMechanics.Telegraph.Lift
-        bool shrinkProjectileLines = false;                     // BossMechanics.Telegraph.ShrinkProjectileLines
+        float lift = 0.3f;                                      // BossMechanics.Telegraph.Lift
+        bool groundSnap = false;                                // BossMechanics.Telegraph.GroundSnap
+        float groundSampleYd = 2.f;                             // BossMechanics.Telegraph.GroundSampleYd
+        float maxPieceSpreadYd = 0.75f;                         // BossMechanics.Telegraph.MaxPieceSpreadYd
+        bool shrinkProjectileLines = true;                      // BossMechanics.Telegraph.ShrinkProjectileLines
+        bool fill = true;                                       // BossMechanics.Telegraph.Fill
+        uint32 fillStepMs = 150;                                // BossMechanics.Telegraph.FillStepMs (longest step)
+        float fillStepYd = 0.4f;                                // BossMechanics.Telegraph.FillStepYd (0 = fixed step)
+        uint32 fillLeadMs = 150;                                // BossMechanics.Telegraph.FillLeadMs
         uint32 maxActivePerMap = 256;                           // BossMechanics.MaxActivePerMap
         float openWorldCandidateRadius = 100.f;                 // BossMechanics.OpenWorld.CandidateRadius (0 = map)
 

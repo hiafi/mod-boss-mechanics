@@ -10,21 +10,45 @@
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
  *
- * Display ids (CreatureDisplayInfo id = CreatureModelData id; colour index c: red 0, yellow 1,
- * blue 2, purple 3; get-out shapes ship red and yellow only):
+ * Display ids (CreatureDisplayInfo id = CreatureModelData id), one block of 100 ids per color in each range:
  *
- * | 90500-90503 | disc (filled, rim)                       | 90500 + c          |
- * | 90504-90507 | ring (rim, faint fill)                   | 90504 + c          |
- * | 90508-90521 | donut, ratio rho in kDonutRatios         | 90508 + 2j + c     |
- * | 90522-90537 | cone, angle in kConeAngles               | 90522 + 2j + c     |
- * | 90538-90619 | line, aspect k_i = 2^(i/8), i = 0..40    | 90538 + 2i + c     |
- * | 90620-90649 | spare                                    |                    |
+ *     id = 91000 + 100 * c + offset(shape) + step           discs, rings, the timer ring, donuts, cones
+ *     id = 92000 + 100 * c + i                               line (F), i = 0..56
+ *     id = 93000 + 100 * c + i                               line (O)                (MarkerDisplay below)
+ *
+ * c = color index (Color in MechanicRegistry.h: red 0, yellow 1, blue 2, purple 3, orange 4, green 5, teal 6,
+ * white 7, black 8). Every shape exists in every color. Every telegraph draws two layers (MechanicTelegraph.h):
+ * O = outline (rim + faint interior, static, the full hitbox), F = fill (rim + solid interior, the timer that grows
+ * into the outline). Inside one color's 91000 block:
+ *
+ * | +0       | disc (F)                                                   |
+ * | +1       | ring (O; also player get-out radii)                        |
+ * | +2       | timer ring (rim only): a donut's timer                     |
+ * | +3..+9   | donut (F), ratio rho_j in kDonutRatios                     |
+ * | +10..+16 | donut (O)                                                  |
+ * | +17..+24 | cone (F), angle_j in kConeAngles                           |
+ * | +25..+32 | cone (O)                                                   |
+ * | +33      | dashed ring (rim dashes only): an armed mine               |
+ * | +34..+99 | spare (+33..+98 were the lines before M1-FIX-LINE-FILL)    |
+ *
+ * Line ladder (M1-FIX-LINE-FILL): k_i = 2^((i - 8) / 4) for i 0..7 (1/4 up to 0.84) and 2^((i - 8) / 8) for i 8..56
+ * (1 to 64), the same for both layers (LineAspect in MechanicMath.h); +57..+99 of each line block are spare. A line
+ * model is one quad, symmetric about its origin (x in [-k, k]; the client draws a model centred on its bounds), with
+ * the source quad's UVs: v grows with +X and the line texture is transparent on rows v < 1/2, so the line runs
+ * x in [0, k] from the marker forward (model +X = the marker's facing). Its far end is the quad's edge; its start is
+ * the texture's edge at v = 1/2, soft by half a texel of the active mip. Every aspect shares one texture. (The
+ * two-quad model of M1-FIX-LINE-FILL drew only part of the line in game and was reverted in round 4b.)
+ *
+ * 91000-91833 used, 91834-91999 spare (91990-91995: the asset script's opt-in diagnostic displays), 92000-92856 and
+ * 93000-93856 used, the rest of 92000-93999 spare. The markers used 90500-90699 before the colors fix
+ * (M1-FIX-COLORS-REPORT.md); those ids are free again.
  */
 
 #ifndef MOD_BOSS_MECHANICS_IDS_H
 #define MOD_BOSS_MECHANICS_IDS_H
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace BossMechanics::Ids
@@ -44,26 +68,138 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t NPC_MECHANIC_MARKER = 300400;
     constexpr std::uint32_t NPC_MECHANIC_TEST_OWNER = 300401;
 
-    // Displays
-    constexpr std::uint32_t DISPLAY_DISC_BASE = 90500;          // + c (4 colours)
-    constexpr std::uint32_t DISPLAY_RING_BASE = 90504;          // + c (4 colours)
-    constexpr std::uint32_t DISPLAY_DONUT_BASE = 90508;         // + 2j + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_CONE_BASE = 90522;          // + 2j + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_LINE_BASE = 90538;          // + 2i + c (red, yellow)
-    constexpr std::uint32_t DISPLAY_LAST = 90619;
-    constexpr std::uint32_t DISPLAY_SPARE_FIRST = 90620;
-    constexpr std::uint32_t DISPLAY_SPARE_LAST = 90649;
+    // Displays: a table of shape ladders inside one 100-id block per color (see the table above); the two line
+    // ladders have their own ranges.
+    enum class MarkerShape : std::uint8_t
+    {
+        Disc,           // F
+        Ring,           // O
+        TimerRing,      // a donut's timer, rim only
+        Donut,          // F, step = kDonutRatios index
+        DonutOutline,   // O
+        Cone,           // F, step = kConeAngles index
+        ConeOutline,    // O
+        DashedRing,     // an armed mine: rim dashes, no interior
+        Line,           // F, step = line ladder index
+        LineOutline     // O
+    };
 
-    constexpr std::uint8_t COLOUR_COUNT_ALL = 4;                // disc, ring
-    constexpr std::uint8_t COLOUR_COUNT_GET_OUT = 2;            // donut, cone, line
+    constexpr std::uint8_t COLOR_COUNT = 9;
+    constexpr std::uint32_t DISPLAY_FIRST = 91000;
+    constexpr std::uint32_t DISPLAY_COLOR_STRIDE = 100;
+    constexpr std::uint32_t DISPLAY_LINE_FIRST = 92000;             // line (F); the outline ladder follows it
+    constexpr std::uint32_t DISPLAY_LINE_OUTLINE_FIRST = 93000;
+    constexpr std::uint32_t DISPLAY_SLICE_LAST = 93999;
+
+    // The timer ring's band, as a fraction of its radius (patch_bossmechanics_markers.py TIMER_RIM_FRAC).
+    constexpr float kTimerRingBandFrac = 0.04f;
 
     // Donut inner/outer ratio ladder (j = index).
     constexpr std::array<float, 7> kDonutRatios = { 0.25f, 0.33f, 0.40f, 0.50f, 0.60f, 0.67f, 0.75f };
     // Cone angle ladder in degrees (j = index).
     constexpr std::array<float, 8> kConeAngles = { 30.f, 45.f, 60.f, 90.f, 120.f, 150.f, 180.f, 270.f };
-    // Line aspect ladder: k_i = 2^(i/8), i = 0..kLineSteps-1 (1 to 32).
-    constexpr std::uint32_t kLineSteps = 41;
-    constexpr float kLineMaxAspect = 32.f;
+    // Line aspect ladder (LineAspect in MechanicMath.h): quarter-octave steps from 1/4 below aspect 1, eighth-octave
+    // steps from 1 to 64 (step kLineUnitStep is aspect 1). Longer lines draw abutting pieces of aspect 64.
+    constexpr std::uint32_t kLineSteps = 57;
+    constexpr std::uint32_t kLineUnitStep = 8;
+    constexpr float kLineMinAspect = 0.25f;
+    constexpr float kLineMaxAspect = 64.f;
+
+    // Steps per shape (MarkerShape order).
+    constexpr std::array<std::uint32_t, 10> kMarkerShapeSteps = { 1, 1, 1,
+        static_cast<std::uint32_t>(kDonutRatios.size()), static_cast<std::uint32_t>(kDonutRatios.size()),
+        static_cast<std::uint32_t>(kConeAngles.size()), static_cast<std::uint32_t>(kConeAngles.size()), 1,
+        kLineSteps, kLineSteps };
+
+    constexpr bool IsLineShape(MarkerShape shape)
+    {
+        return shape == MarkerShape::Line || shape == MarkerShape::LineOutline;
+    }
+
+    // First offset of each non-line shape inside a 91000 color block: the running sum of the steps before it (the
+    // line entries hold the block's end).
+    constexpr std::array<std::uint32_t, 9> kMarkerShapeOffsets = []
+    {
+        std::array<std::uint32_t, 9> out{};
+        for (std::size_t i = 0; i + 1 < out.size(); ++i)
+            out[i + 1] = out[i] + kMarkerShapeSteps[i];
+        return out;
+    }();
+
+    constexpr std::uint32_t DISPLAY_PER_COLOR = kMarkerShapeOffsets.back();    // 34
+    constexpr std::uint32_t DISPLAY_SHAPES_LAST =
+        DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + DISPLAY_PER_COLOR - 1;
+    constexpr std::uint32_t DISPLAY_LAST =
+        DISPLAY_LINE_OUTLINE_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + kLineSteps - 1;
+    static_assert(DISPLAY_PER_COLOR <= DISPLAY_COLOR_STRIDE && kLineSteps <= DISPLAY_COLOR_STRIDE,
+        "a color block overflows its 100 ids");
+    static_assert(DISPLAY_SHAPES_LAST == 91833 && DISPLAY_SHAPES_LAST < DISPLAY_LINE_FIRST);
+    static_assert(DISPLAY_LINE_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + kLineSteps - 1 == 92856
+        && 92856 < DISPLAY_LINE_OUTLINE_FIRST);
+    static_assert(DISPLAY_LAST == 93856 && DISPLAY_LAST <= DISPLAY_SLICE_LAST);
+
+    // The armed-mine dashed ring of the red block (+33), pinned for the asset script's tests.
+    static_assert(DISPLAY_FIRST + 33 == 91033 && kMarkerShapeSteps.size() == 10);
+
+    // The display of one shape step in one color (patch_bossmechanics_markers.py display_id). color and step are
+    // clamped into range, so every call names a shipped display.
+    constexpr std::uint32_t MarkerDisplay(std::uint8_t color, MarkerShape shape, std::uint32_t step = 0)
+    {
+        std::size_t const s = static_cast<std::size_t>(shape);
+        std::uint32_t const c = color < COLOR_COUNT ? color : COLOR_COUNT - 1;
+        std::uint32_t const k = step < kMarkerShapeSteps[s] ? step : kMarkerShapeSteps[s] - 1;
+        if (IsLineShape(shape))
+            return (shape == MarkerShape::Line ? DISPLAY_LINE_FIRST : DISPLAY_LINE_OUTLINE_FIRST)
+                + DISPLAY_COLOR_STRIDE * c + k;
+        return DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * c + kMarkerShapeOffsets[s] + k;
+    }
+
+    struct MarkerDisplayParts
+    {
+        bool valid = false;
+        std::uint8_t color = 0;
+        MarkerShape shape = MarkerShape::Disc;
+        std::uint32_t step = 0;
+    };
+
+    // The inverse of MarkerDisplay; valid = false for any id that is not a shipped marker display.
+    constexpr MarkerDisplayParts DecodeMarkerDisplay(std::uint32_t display)
+    {
+        MarkerDisplayParts out;
+        std::uint32_t first = DISPLAY_FIRST;
+        std::uint32_t perColor = DISPLAY_PER_COLOR;
+        if (display >= DISPLAY_LINE_OUTLINE_FIRST)
+        {
+            first = DISPLAY_LINE_OUTLINE_FIRST;
+            perColor = kLineSteps;
+            out.shape = MarkerShape::LineOutline;
+        }
+        else if (display >= DISPLAY_LINE_FIRST)
+        {
+            first = DISPLAY_LINE_FIRST;
+            perColor = kLineSteps;
+            out.shape = MarkerShape::Line;
+        }
+        if (display < first || display >= first + DISPLAY_COLOR_STRIDE * COLOR_COUNT)
+            return out;
+        std::uint32_t const rel = display - first;
+        std::uint32_t const offset = rel % DISPLAY_COLOR_STRIDE;
+        if (offset >= perColor)
+            return out;
+        out.valid = true;
+        out.color = static_cast<std::uint8_t>(rel / DISPLAY_COLOR_STRIDE);
+        if (first != DISPLAY_FIRST)
+        {
+            out.step = offset;
+            return out;
+        }
+        std::size_t s = 0;
+        while (offset >= kMarkerShapeOffsets[s + 1])
+            ++s;
+        out.shape = static_cast<MarkerShape>(s);
+        out.step = offset - kMarkerShapeOffsets[s];
+        return out;
+    }
 }
 
 #endif

@@ -450,10 +450,10 @@ namespace BossMechanics
         return *this;
     }
 
-    MechanicRef& MechanicRef::Colour(BossMechanics::Colour colour)
+    MechanicRef& MechanicRef::Color(BossMechanics::Color color)
     {
-        if (ActiveMechanic* m = Edit("Colour", true, true))
-            m->colour = colour;
+        if (ActiveMechanic* m = Edit("Color", true, true))
+            m->color = color;
         return *this;
     }
 
@@ -469,6 +469,14 @@ namespace BossMechanics
         ActiveMechanic const* cur = Get();
         if (ActiveMechanic* m = Edit("NoTelegraph", cur && !cur->committed))
             m->telegraph = false;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::NoFillTimer()
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("NoFillTimer", cur != nullptr, true))
+            m->fillTimer = false;
         return *this;
     }
 
@@ -518,20 +526,49 @@ namespace BossMechanics
         return out;
     }
 
-    uint32 LaneBuilder::AddLine(LanePlacement const& place, Milliseconds warn, Milliseconds resolveAt)
+    uint32 LaneBuilder::AddLine(LanePlacement const& place, Milliseconds warn, Milliseconds resolveAt,
+        LanePlacement const* drawn)
     {
         Position const at(place.pose.x, place.pose.y, place.pose.z, place.pose.o);
-        MechanicRef ref = Register(_map, _owner, Kind::Zone, Anchor(at), Shape::Line(place.length, place.width), warn,
-            [this, resolveAt](ActiveMechanic& m)
+        Shape const shape = Shape::Line(place.length, place.width);
+        float lateral = 0.f;
+        float drawWidth = 0.f;
+        if (drawn && std::fabs(drawn->width - place.width) > 1e-4f)
+        {
+            lateral = Geo::ToLineCoords(shape, place.pose, { drawn->pose.x, drawn->pose.y, drawn->pose.z }).t;
+            drawWidth = drawn->width;
+        }
+        MechanicRef ref = Register(_map, _owner, Kind::Zone, Anchor(at), shape, warn,
+            [this, resolveAt, lateral, drawWidth](ActiveMechanic& m)
             {
                 m.laneSet = _laneSet;
                 if (resolveAt > Milliseconds(0))
                     m.resolveAt = resolveAt;
+                m.drawLateral = lateral;
+                m.drawWidth = drawWidth;
             }, false);
         uint32 const id = ref.Id();
         if (id)
             _created.push_back(id);
         return id;
+    }
+
+    void LaneBuilder::ColorSecondAxis(Axis axis, std::size_t firstNew)
+    {
+        Registry* reg = _map ? Registry::Get(_map) : nullptr;
+        LaneSet const* ls = reg ? reg->FindLaneSet(_laneSet) : nullptr;
+        Encounter const* e = reg ? reg->FindEncounter(_owner) : nullptr;
+        if (!ls || !e)
+            return;
+        bool otherAxis = false;
+        for (std::size_t i = 0; i < std::min(firstNew, ls->rects.size()); ++i)
+            if (ls->rects[i].axis != axis)
+                otherAxis = true;
+        if (!otherAxis)
+            return;
+        for (std::size_t i = firstNew; i < ls->lanes.size(); ++i)
+            if (ActiveMechanic* m = reg->FindMutable(ls->lanes[i]))
+                m->color = e->crossLanes;
     }
 
     LaneBuilder& LaneBuilder::Lanes(Axis axis, LaneSpec const& spec, Milliseconds warn)
@@ -546,6 +583,7 @@ namespace BossMechanics
             return *this;
         }
         Frame const frame = ls->frame.ToFrame();
+        std::size_t const firstNew = ls->lanes.size();
         bool fellBack = false;
         std::vector<float> const offsets = RandomLaneOffsets(FrameSpanAcross(frame, axis), spec.count, spec.width,
             std::max(0.f, spec.minGap), []() { return frand(0.f, 1.f); }, &fellBack);
@@ -564,6 +602,7 @@ namespace BossMechanics
                 set->rects.push_back(rect);
             }
         }
+        ColorSecondAxis(axis, firstNew);
         return *this;
     }
 
@@ -579,6 +618,7 @@ namespace BossMechanics
             return *this;
         }
         Frame const frame = ls->frame.ToFrame();
+        std::size_t const firstNew = ls->lanes.size();
         uint32 freeIndex = 0;
         std::vector<float> const offsets = CoverLaneOffsets(FrameSpanAcross(frame, axis), width,
             []() { return frand(0.f, 1.f); }, freeIndex);
@@ -591,7 +631,11 @@ namespace BossMechanics
                     set->freeLanes.push_back(rect);
                 continue;
             }
-            uint32 const id = AddLine(PlaceLane(frame, rect), warn, Milliseconds(0));
+            // The last lane is clamped inside the frame and overlaps the one before it: its marker draws only the
+            // strip the others leave uncovered (the hitbox stays the whole lane).
+            LaneStrip const strip = CoverLaneDrawnStrip(offsets, width, static_cast<uint32>(i), freeIndex);
+            LanePlacement const drawn = PlaceLane(frame, { axis, strip.offset, strip.width });
+            uint32 const id = AddLine(PlaceLane(frame, rect), warn, Milliseconds(0), &drawn);
             if (!id)
                 continue;
             if (LaneSet* set = reg->FindLaneSetMutable(_laneSet))
@@ -600,6 +644,7 @@ namespace BossMechanics
                 set->rects.push_back(rect);
             }
         }
+        ColorSecondAxis(axis, firstNew);
         return *this;
     }
 
@@ -630,7 +675,9 @@ namespace BossMechanics
                 if (!id)
                     continue;
                 MechanicRef cell(_map, id, false);
-                cell.Persistent(duration, tick).Damage(pct);
+                cell.Persistent(duration, tick).Damage(pct).NoFillTimer();
+                if (Encounter const* e = reg->FindEncounter(_owner))
+                    cell.Color(e->cells);
                 if (LaneSet* set = reg->FindLaneSetMutable(_laneSet))
                     set->cells.push_back(id);
                 ++made;
