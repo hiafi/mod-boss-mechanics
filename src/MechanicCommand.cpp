@@ -5,12 +5,22 @@
  *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
  *   .mech palette <get-out color> <get-in color> [cross-lane color] [cell color]
  *                                                    (red yellow blue purple orange green teal white black)
+ *   .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0]
+ *                 [seed=]
+ *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
+ *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
  * `.mech test` registers through the public Mechanic:: API, owned by a hostile Mechanic Test Owner (300401) summoned at
  * the GM (one per map, reused; it despawns after 5 minutes without a live mechanic, or on `.mech clear`). GMs are never
  * valid targets: test with `.gm off`. Only the GMs who ran `.mech test` and their group members can be targeted or hit
  * (Registry::IsInTestScope). `.mech clear` ends the test encounters only; `.mech clear all` every encounter on the
  * map. Shapes, keys and defaults: README.md, section ".mech".
+ *
+ * `at=member` (common key) lands each repeat on a random alive member of the GM's group, picked when that repeat
+ * registers; `seed=` seeds every pick the command makes itself (scatter, member, barrage shapes). `.mech barrage` and
+ * `.mech minefield` are scripted series of `.mech test` registrations for the bot acceptance runs (the barrage's shot
+ * geometry is MechanicBarrage.h). Delayed registrations run from the test owner's scheduler, so `.mech clear` (which
+ * despawns the owner) also ends a barrage.
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -20,7 +30,10 @@
 #include "CommandScript.h"
 #include "Creature.h"
 #include "GameTime.h"
+#include "Group.h"
 #include "Map.h"
+#include "MechanicBarrage.h"
+#include "MechanicBotReportHook.h"
 #include "MechanicMarkerAI.h"
 #include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
@@ -30,7 +43,9 @@
 #include "StringConvert.h"
 #include "TemporarySummon.h"
 #include "Tokenize.h"
+#include <algorithm>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -44,6 +59,13 @@ namespace
 {
     constexpr uint32 kMaxRepeat = 50;
     constexpr Milliseconds kDefaultBurn = Milliseconds(6000);
+    constexpr uint32 kMaxBarrageShots = 600;
+    constexpr uint32 kMaxMines = 100;
+    constexpr Milliseconds kMineLife = Milliseconds(120000);    // `.mech minefield`
+    constexpr uint32 kFirstMinefieldGroup = 1000;               // cap groups above the hand-typed `group=` values
+
+    // The dice of one command. Delayed registrations share it, so they keep drawing from the same seeded sequence.
+    using RngPtr = std::shared_ptr<Barrage::Rng>;
 
     // ---- parsing ---------------------------------------------------------------------------------------------------
     std::optional<Color> ParseColor(std::string_view s)
@@ -144,6 +166,29 @@ namespace
         std::vector<std::string> _bad;
     };
 
+    // Splits `tokens[from..]` into key=value options; false (error sent) on a token that is not one.
+    bool CollectOptions(ChatHandler* handler, std::vector<std::string_view> const& tokens, std::size_t from,
+        Options& opt)
+    {
+        for (std::size_t i = from; i < tokens.size(); ++i)
+        {
+            if (!opt.Add(tokens[i]))
+            {
+                handler->SendErrorMessage("Not a key=value option: '{}'", tokens[i]);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // `seed=<n>` (0 and up), else a fresh random seed; the commands print it so a run can be repeated.
+    RngPtr MakeRng(Options& opt)
+    {
+        uint32 const seed = opt.Has("seed") ? static_cast<uint32>(std::max<int32>(opt.Int("seed", 0), 0))
+            : urand(1, 0x7FFFFFFF);
+        return std::make_shared<Barrage::Rng>(seed);
+    }
+
     // Everything one `.mech test` registration needs, resolved to plain values and guids so a delayed repeat can run
     // from the test owner's scheduler without holding a unit pointer.
     struct TestSpec
@@ -176,6 +221,11 @@ namespace
         Milliseconds burn = kDefaultBurn;
         uint8 need = 2;
         bool fromOwner = false;
+
+        // landing: at=member picks a group member when the repeat registers; scatter offsets a point anchor
+        bool atMember = false;
+        bool includeGm = false;
+        float scatter = 0.f;
 
         // common keys
         int32 dmg = -1;
@@ -381,6 +431,98 @@ namespace
         return ids;
     }
 
+    // ---- landing on group members ----------------------------------------------------------------------------------
+    // The alive members of the GM's group on the owner's map, in guid order (a seeded pick stays reproducible). The
+    // GM is included only with `self=1`; other GMs never are (they are never valid targets).
+    std::vector<Player*> GroupMembers(Creature* owner, ObjectGuid gmGuid, bool includeGm)
+    {
+        std::vector<Player*> out;
+        Player* gm = ObjectAccessor::FindConnectedPlayer(gmGuid);
+        if (!gm || !gm->IsInWorld())
+            return out;
+        Map* map = owner->GetMap();
+        auto usable = [map](Player* p)
+        {
+            return p && p->IsInWorld() && p->GetMap() == map && p->IsAlive();
+        };
+        if (includeGm && usable(gm))
+            out.push_back(gm);
+        if (Group* group = gm->GetGroup())
+            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            {
+                Player* p = ref->GetSource();
+                if (p && p != gm && usable(p) && !p->IsGameMaster())
+                    out.push_back(p);
+            }
+        std::sort(out.begin(), out.end(), [](Player const* a, Player const* b)
+        {
+            return a->GetGUID() < b->GetGUID();
+        });
+        return out;
+    }
+
+    Player* PickMember(Creature* owner, TestSpec const& spec, Barrage::Rng& rng)
+    {
+        std::vector<Player*> const members = GroupMembers(owner, spec.gm, spec.includeGm);
+        return members.empty() ? nullptr : members[rng.Index(static_cast<uint32>(members.size()))];
+    }
+
+    constexpr char const* kNoMemberMessage = "no alive member of your group on this map (self=1 includes you)";
+
+    // One repeat of `.mech test`: resolves `at=member` and `scatter=` now (so a delayed repeat follows the bots), then
+    // registers.
+    std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Barrage::Rng& rng, std::string& err)
+    {
+        if (spec.atMember)
+        {
+            Player* member = PickMember(owner, spec, rng);
+            if (!member)
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            spec.point = member->GetPosition();
+            spec.point.SetOrientation(spec.facing);
+            spec.target = member->GetGUID();
+        }
+        if (spec.scatter > 0.f && !spec.unitAnchor)
+        {
+            float const ang = rng.Float(0.f, 2.f * Geo::kPi);
+            float const dist = spec.scatter * std::sqrt(rng.Float(0.f, 1.f));
+            spec.point.Relocate(spec.point.GetPositionX() + dist * std::cos(ang),
+                spec.point.GetPositionY() + dist * std::sin(ang), spec.point.GetPositionZ());
+        }
+        return RegisterTest(owner, spec, err);
+    }
+
+    // One `.mech barrage` shot: a random member, a random kind of the list, the shot's geometry around that member.
+    void RegisterBarrageShot(Creature* owner, TestSpec spec, std::vector<Barrage::Kind> const& kinds,
+        Barrage::Rng& rng, std::string& err)
+    {
+        Player* member = PickMember(owner, spec, rng);
+        if (!member)
+        {
+            err = kNoMemberMessage;
+            return;
+        }
+        Barrage::Kind const kind = kinds[rng.Index(static_cast<uint32>(kinds.size()))];
+        Barrage::Shot const shot = Barrage::MakeShot(kind, { member->GetPositionX(), member->GetPositionY(),
+            member->GetPositionZ() }, rng);
+        spec.atMember = false;
+        spec.shape = Barrage::ShapeName(kind);
+        spec.size = shot.size;
+        spec.inner = shot.inner;
+        spec.angle = shot.angleDeg;
+        spec.width = shot.width;
+        if (shot.speed > 0.f)
+            spec.speed = shot.speed;
+        spec.facing = shot.pose.o;
+        spec.point = Position(shot.pose.x, shot.pose.y, shot.pose.z, shot.pose.o);
+        spec.target = member->GetGUID();
+        spec.tag = Barrage::TagOf(kind);
+        RegisterTest(owner, spec, err);
+    }
+
     // ---- the test owner --------------------------------------------------------------------------------------------
     std::vector<ObjectGuid> TestOwners(Map* map)
     {
@@ -465,6 +607,9 @@ public:
             { "weakened", HandleWeakened, SEC_GAMEMASTER, Console::No },
             { "palette",  HandlePalette,  SEC_GAMEMASTER, Console::No },
             { "markers",  HandleMarkers,  SEC_GAMEMASTER, Console::No },     // [range]
+            { "barrage",  HandleBarrage,  SEC_GAMEMASTER, Console::No },
+            { "minefield", HandleMinefield, SEC_GAMEMASTER, Console::No },
+            { "bots",     HandleBots,     SEC_GAMEMASTER, Console::No },     // [all]
         };
         static ChatCommandTable commandTable =
         {
@@ -497,14 +642,8 @@ public:
         spec.warn = Milliseconds(*ms);
 
         Options opt;
-        for (std::size_t i = 3; i < tokens.size(); ++i)
-        {
-            if (!opt.Add(tokens[i]))
-            {
-                handler->SendErrorMessage("Not a key=value option: '{}'", tokens[i]);
-                return false;
-            }
-        }
+        if (!CollectOptions(handler, tokens, 3, opt))
+            return false;
 
         std::string const& s = spec.shape;
         // shape keys (read only for their shape, so a stray key shows up as unused)
@@ -595,7 +734,16 @@ public:
         spec.tele = opt.Bool("tele", true);
         uint32 const repeat = static_cast<uint32>(std::clamp<int32>(opt.Int("repeat", 1), 1, kMaxRepeat));
         Milliseconds const every = opt.Ms("every", Milliseconds(1000));
-        float const scatter = std::max(0.f, opt.Float("scatter", 0.f));
+        spec.scatter = std::max(0.f, opt.Float("scatter", 0.f));
+        std::string const at = opt.Str("at", "");
+        if (at == "member")
+        {
+            spec.atMember = true;
+            spec.includeGm = opt.Bool("self", false);
+        }
+        else if (!at.empty())
+            opt.MarkBad("at");
+        RngPtr const rng = MakeRng(opt);
 
         // anchor
         Unit* selected = handler->getSelectedUnit();       // the GM when nothing is selected
@@ -604,7 +752,8 @@ public:
         spec.point = selected->GetPosition();
         spec.point.SetOrientation(spec.facing);
         spec.target = selected->GetGUID();
-        std::string const anchorKind = opt.Str("anchor", s == "stack" && selected != gm ? "target" : "point");
+        std::string const anchorKind = opt.Str("anchor",
+            s == "stack" && selected != gm && !spec.atMember ? "target" : "point");
         if (anchorKind == "me")
         {
             spec.unitAnchor = true;
@@ -622,6 +771,11 @@ public:
         }
         else if (anchorKind != "point")
             opt.MarkBad("anchor");
+        if (spec.atMember && anchorKind != "point")
+        {
+            handler->SendErrorMessage("at=member lands on a point; leave anchor= out or use anchor=point");
+            return false;
+        }
 
         std::string const bad = opt.Bad();
         if (!bad.empty())
@@ -638,6 +792,12 @@ public:
             return false;
         }
 
+        if (spec.atMember && GroupMembers(owner, spec.gm, spec.includeGm).empty())
+        {
+            handler->SendErrorMessage("at=member: {}", kNoMemberMessage);
+            return false;
+        }
+
         MarkerAI* ai = dynamic_cast<MarkerAI*>(owner->AI());
         std::vector<uint32> made;
         std::string err;
@@ -645,30 +805,23 @@ public:
         {
             TestSpec one = spec;
             one.tag = k + 1;
-            if (scatter > 0.f && !one.unitAnchor)
-            {
-                float const ang = frand(0.f, 2.f * Geo::kPi);
-                float const dist = scatter * std::sqrt(frand(0.f, 1.f));
-                one.point.Relocate(one.point.GetPositionX() + dist * std::cos(ang),
-                    one.point.GetPositionY() + dist * std::sin(ang), one.point.GetPositionZ());
-            }
             Milliseconds const delay = every * k;
             if (k == 0 || delay == Milliseconds(0))
             {
-                std::vector<uint32> const ids = RegisterTest(owner, one, err);
+                std::vector<uint32> const ids = RegisterRepeat(owner, one, *rng, err);
                 made.insert(made.end(), ids.begin(), ids.end());
             }
             else if (ai)
-                ai->ScheduleTest(delay, [one](Creature* testOwner)
+                ai->ScheduleTest(delay, [one, rng](Creature* testOwner)
                 {
                     std::string ignored;
-                    RegisterTest(testOwner, one, ignored);
+                    RegisterRepeat(testOwner, one, *rng, ignored);
                 });
             else
             {
                 // No MarkerAI on the test owner (ScriptName missing): register now with the delay in the warning.
                 one.warn += delay;
-                std::vector<uint32> const ids = RegisterTest(owner, one, err);
+                std::vector<uint32> const ids = RegisterRepeat(owner, one, *rng, err);
                 made.insert(made.end(), ids.begin(), ids.end());
             }
         }
@@ -684,12 +837,226 @@ public:
         handler->PSendSysMessage("Mechanic test {} {:.1f}: registered #{}{}; resolves in {} ms.", s, spec.size, list,
             repeat > 1 ? Acore::StringFormat(" (+{} repeats every {} ms)", repeat - 1, every.count()) : "",
             spec.warn.count());
+        if (spec.atMember || spec.scatter > 0.f)
+            handler->PSendSysMessage("Landing on {} (seed {}; seed= repeats the picks).",
+                spec.atMember ? "random members of your group, picked as each repeat registers" : "scattered points",
+                rng->Seed());
         std::string const unused = opt.Unused();
         if (!unused.empty())
             handler->PSendSysMessage("Ignored keys for {}: {}", s, unused);
         if (gm->IsGameMaster())
             handler->PSendSysMessage("Reminder: GMs are never hit; use .gm off to test on yourself.");
         return true;
+    }
+
+    // `.mech barrage`: a scheduled series of single Zones, each on a random group member, for the bot acceptance run
+    // (every shot threatens its member, see MechanicBarrage.h). The first shot registers now, the rest from the test
+    // owner's scheduler, so `.mech clear` ends the series. Hits land in `.mech ledger` under the tag 1 + shape
+    // (1 circle, 2 donut, 3 cone, 4 line, 5 projectile).
+    static bool HandleBarrage(ChatHandler* handler, Tail args)
+    {
+        Player* gm = handler->GetPlayer();
+        std::vector<std::string_view> const tokens = Acore::Tokenize(args, ' ', false);
+        Options opt;
+        if (!CollectOptions(handler, tokens, 0, opt))
+            return false;
+
+        uint32 const secs = static_cast<uint32>(std::clamp<int32>(opt.Int("secs", 30), 1, 600));
+        Milliseconds const every = Milliseconds(std::clamp<int32>(opt.Int("every", 900), 100, 60000));
+        Milliseconds const warn = Milliseconds(std::clamp<int32>(opt.Int("warn", 2000), 0, 60000));
+        int32 const dmg = std::max<int32>(opt.Int("dmg", 1), 0);
+        bool const self = opt.Bool("self", false);
+        std::vector<Barrage::Kind> kinds;
+        std::string const shapeList = opt.Str("shapes", "circle,donut,cone,line,projectile");
+        for (std::string_view const name : Acore::Tokenize(shapeList, ',', false))
+        {
+            bool known = false;
+            for (uint32 i = 0; i < Barrage::kKindCount; ++i)
+            {
+                Barrage::Kind const kind = static_cast<Barrage::Kind>(i);
+                if (name == Barrage::ShapeName(kind))
+                {
+                    known = true;
+                    if (std::find(kinds.begin(), kinds.end(), kind) == kinds.end())
+                        kinds.push_back(kind);
+                }
+            }
+            if (!known)
+                opt.MarkBad("shapes");
+        }
+        if (kinds.empty())
+            opt.MarkBad("shapes");
+        RngPtr const rng = MakeRng(opt);
+        std::string const bad = opt.Bad();
+        if (!bad.empty())
+        {
+            handler->SendErrorMessage("Bad value for: {} (shapes: circle donut cone line projectile, comma separated)",
+                bad);
+            return false;
+        }
+
+        TestSpec base;
+        base.gm = gm->GetGUID();
+        base.facing = gm->GetOrientation();
+        base.warn = warn;
+        base.dmg = dmg;
+        base.atMember = true;       // the shot picks its member itself (RegisterBarrageShot)
+        base.includeGm = self;
+        uint32 const shots = std::min<uint32>(kMaxBarrageShots,
+            static_cast<uint32>((Milliseconds(secs * 1000) + every - Milliseconds(1)) / every));
+
+        Creature* owner = GetOrSummonTestOwner(gm);
+        if (!owner)
+        {
+            handler->SendErrorMessage("Could not summon the Mechanic Test Owner ({})", Ids::NPC_MECHANIC_TEST_OWNER);
+            return false;
+        }
+        MarkerAI* ai = dynamic_cast<MarkerAI*>(owner->AI());
+        if (!ai)
+        {
+            handler->SendErrorMessage("The Mechanic Test Owner has no MarkerAI (ScriptName npc_boss_mechanic_marker "
+                "missing), so it cannot schedule a series");
+            return false;
+        }
+        if (GroupMembers(owner, base.gm, base.includeGm).empty())
+        {
+            handler->SendErrorMessage("{}", kNoMemberMessage);
+            return false;
+        }
+
+        std::string err;
+        RegisterBarrageShot(owner, base, kinds, *rng, err);
+        if (!err.empty())
+        {
+            handler->SendErrorMessage("Nothing registered: {}", err);
+            return false;
+        }
+        for (uint32 k = 1; k < shots; ++k)
+            ai->ScheduleTest(every * k, [base, kinds, rng](Creature* testOwner)
+            {
+                std::string ignored;
+                RegisterBarrageShot(testOwner, base, kinds, *rng, ignored);
+            });
+
+        std::string names;
+        for (Barrage::Kind kind : kinds)
+            names += std::string(names.empty() ? "" : ",") + Barrage::ShapeName(kind);
+        handler->PSendSysMessage("Mechanic barrage: {} shot(s) over {} s, one every {} ms on a random group member, "
+            "{} ms warning, shapes {}, {} damage each, seed {}.", shots, secs, every.count(), warn.count(), names,
+            dmg, rng->Seed());
+        handler->PSendSysMessage("Check .mech ledger (tags 1 circle, 2 donut, 3 cone, 4 line, 5 projectile); "
+            ".mech clear stops it.");
+        std::string const unused = opt.Unused();
+        if (!unused.empty())
+            handler->PSendSysMessage("Ignored keys for barrage: {}", unused);
+        if (gm->IsGameMaster())
+            handler->PSendSysMessage("Reminder: GMs are never hit; use .gm off to test on yourself.");
+        return true;
+    }
+
+    // `.mech minefield`: `count` mines at random points within `spread` yd of the selected unit (else the GM), one cap
+    // group with cap = count so none of them fizzles each other, life 120 s.
+    static bool HandleMinefield(ChatHandler* handler, Tail args)
+    {
+        static uint32 nextGroup = kFirstMinefieldGroup;
+
+        Player* gm = handler->GetPlayer();
+        std::vector<std::string_view> const tokens = Acore::Tokenize(args, ' ', false);
+        Options opt;
+        if (!CollectOptions(handler, tokens, 0, opt))
+            return false;
+
+        uint32 const count = static_cast<uint32>(std::clamp<int32>(opt.Int("count", 10), 1, kMaxMines));
+        float const radius = opt.Float("radius", 3.f);
+        float const spread = opt.Float("spread", 15.f);
+        Milliseconds const arm = opt.Ms("arm", Milliseconds(3000));
+        Milliseconds const grace = opt.Ms("grace", Milliseconds(500));
+        int32 const dmg = std::max<int32>(opt.Int("dmg", 1), 0);
+        RngPtr const rng = MakeRng(opt);
+        if (radius <= 0.f || radius > 30.f)
+            opt.MarkBad("radius");
+        if (spread <= 0.f || spread > 100.f)
+            opt.MarkBad("spread");
+        std::string const bad = opt.Bad();
+        if (!bad.empty())
+        {
+            handler->SendErrorMessage("Bad value for: {} (radius 0-30, spread 0-100)", bad);
+            return false;
+        }
+
+        Creature* owner = GetOrSummonTestOwner(gm);
+        if (!owner)
+        {
+            handler->SendErrorMessage("Could not summon the Mechanic Test Owner ({})", Ids::NPC_MECHANIC_TEST_OWNER);
+            return false;
+        }
+
+        Unit* centre = handler->getSelectedUnit();      // the GM when nothing is selected
+        TestSpec spec;
+        spec.shape = "mine";
+        spec.size = radius;
+        spec.warn = arm;
+        spec.grace = grace;
+        spec.cap = static_cast<uint8>(count);
+        spec.capGroup = nextGroup++;
+        spec.life = kMineLife;
+        spec.dmg = dmg;
+        spec.gm = gm->GetGUID();
+        spec.facing = gm->GetOrientation();
+
+        std::vector<uint32> made;
+        std::string err;
+        for (uint32 k = 0; k < count; ++k)
+        {
+            float const ang = rng->Float(0.f, 2.f * Geo::kPi);
+            float const dist = spread * std::sqrt(rng->Float(0.f, 1.f));
+            float const x = centre->GetPositionX() + dist * std::cos(ang);
+            float const y = centre->GetPositionY() + dist * std::sin(ang);
+            float z = centre->GetPositionZ();
+            // Put the mine on the floor under that point; keep the centre's height where there is none nearby.
+            float const ground = owner->GetMap()->GetHeight(owner->GetPhaseMask(), x, y, z + 2.f, true, 10.f);
+            if (ground > INVALID_HEIGHT && std::fabs(ground - z) <= 5.f)
+                z = ground;
+            spec.point = Position(x, y, z, spec.facing);
+            spec.tag = k + 1;
+            std::vector<uint32> const ids = RegisterTest(owner, spec, err);
+            made.insert(made.end(), ids.begin(), ids.end());
+        }
+        if (made.empty())
+        {
+            handler->SendErrorMessage("Nothing registered: {}", err);
+            return false;
+        }
+        handler->PSendSysMessage("Mechanic minefield: {} mine(s) r={:.1f} within {:.0f} yd of {}, arm {} ms, grace {} "
+            "ms, life {} s, cap group {}, {} damage, seed {}. .mech clear removes them.", made.size(), radius, spread,
+            centre == gm ? "you" : centre->GetName(), arm.count(), grace.count(), kMineLife.count() / 1000,
+            spec.capGroup, dmg, rng->Seed());
+        std::string const unused = opt.Unused();
+        if (!unused.empty())
+            handler->PSendSysMessage("Ignored keys for minefield: {}", unused);
+        if (gm->IsGameMaster())
+            handler->PSendSysMessage("Reminder: GMs are never hit; use .gm off to test on yourself.");
+        return true;
+    }
+
+    // `.mech bots [all]`: per-bot state of the boss-mechanics strategy. The report is the playerbots glue's
+    // (MechanicBotReport.cpp registers it through SetBotReport); a build without it says so.
+    static bool HandleBots(ChatHandler* handler, Optional<std::string> scope)
+    {
+        bool const all = scope && *scope == "all";
+        if (scope && !all)
+        {
+            handler->SendErrorMessage("Usage: .mech bots [all]");
+            return false;
+        }
+        BotReportFn const report = GetBotReport();
+        if (!report)
+        {
+            handler->PSendSysMessage("Bot support not compiled into this build (mod-playerbots was not present when "
+                "the module was built), so there is nothing to report.");
+            return true;
+        }
+        return report(handler, handler->GetPlayer(), all);
     }
 
     // `.mech clear`: the `.mech test` encounters only (a real boss fight keeps its mechanics, palette, boss state
