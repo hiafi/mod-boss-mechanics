@@ -203,7 +203,8 @@ namespace Mechanic
         BossMechanics::TankExempt exempt = BossMechanics::TankExempt::No);
     MechanicRef Line(Unit* owner, Anchor const& from, Anchor const& to, float width, Milliseconds warn);
     MechanicRef Line(Unit* owner, Anchor const& from, float facing, float length, float width, Milliseconds warn);
-    // Arms after `arm` (ring -> disc); armed, a player inside for `grace` (or anyone inside at arming) detonates it.
+    // Arms after `arm` (outline + growing fill, then the dashed ring); armed, a player inside for `grace` (or anyone
+    // inside at arming) detonates it.
     MechanicRef Mine(Unit* owner, Position const& pos, float r, Milliseconds arm, Milliseconds grace);
     BossMechanics::LaneBuilder RoomFrame(Unit* owner, BossMechanics::RoomFrame const& frame);
 

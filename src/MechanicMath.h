@@ -621,7 +621,7 @@ namespace BossMechanics
     }
 
     // Line ladder aspect k_i (length / width) of step i: 2^((i - 8) / 4) below step 8 (1/4 up to 0.84), 2^((i - 8) / 8)
-    // from step 8 (1 to 8). patch_bossmechanics_markers.py line_aspect computes the same.
+    // from step 8 (1 to 64). patch_bossmechanics_markers.py line_aspect computes the same.
     inline float LineAspect(std::uint32_t i)
     {
         float const d = static_cast<float>(i) - static_cast<float>(Ids::kLineUnitStep);
@@ -629,7 +629,7 @@ namespace BossMechanics
     }
 
     // Line ladder index for aspect r (length / width): the smallest step at least r (Rules::kLineNeverShorter) or the
-    // nearest one in log scale; clamped to [0, kLineSteps-1] (below 1/4 the first step, above 8 the last).
+    // nearest one in log scale; clamped to [0, kLineSteps-1] (below 1/4 the first step, above 64 the last).
     inline std::uint32_t LineStepFor(float r)
     {
         if (Rules::kLineNeverShorter)
@@ -651,17 +651,6 @@ namespace BossMechanics
                 best = i;
             }
         }
-        return best;
-    }
-
-    // The largest ladder index whose aspect is <= r (a fill piece never draws longer than it should); -1 when even the
-    // first step (1/4) is longer.
-    inline std::int32_t LineStepAtMost(float r)
-    {
-        std::int32_t best = -1;
-        for (std::uint32_t i = 0; i < Ids::kLineSteps; ++i)
-            if (LineAspect(i) <= r * (1.f + 1e-5f))
-                best = static_cast<std::int32_t>(i);
         return best;
     }
 
@@ -732,9 +721,9 @@ namespace BossMechanics
             }
             case ShapeType::Line:
             {
-                // End to end (M1-FIX-LINES): full pieces at the top step (exactly kLineMaxAspect widths, so they abut
-                // with no overlap), then one last piece rounded up to cover the rest. The only overshoot is at the far
-                // end (at most one ladder step of the last piece).
+                // End to end (M1-FIX-LINES): full pieces at the top step (exactly kLineMaxAspect = 64 widths, so they
+                // abut with no overlap), then one last piece rounded up to cover the rest. The only overshoot is at
+                // the far end (at most one ladder step of the last piece). Most lines are one piece.
                 float const drawn = shape.length - shape.excludeStart;
                 float const w = shape.width;
                 if (drawn <= 0.f || w <= 0.f)
@@ -754,6 +743,21 @@ namespace BossMechanics
                     shape.excludeStart + (n - 1) * full });
                 break;
             }
+        }
+        return pick;
+    }
+
+    // An armed mine's outline (M1-FIX-LINE-FILL): the outline pieces with every ring swapped for the dashed ring, so an
+    // armed mine (no fill: the danger waits for a player) reads differently from an incoming hit (a solid fill). Mines
+    // are circles; any other piece is kept as it is.
+    inline VisualPick PickArmedMine(Shape const& shape, std::uint8_t color)
+    {
+        VisualPick pick = PickVisual(shape, color, MarkerLayer::Outline);
+        for (VisualPiece& piece : pick.pieces)
+        {
+            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
+            if (parts.valid && parts.shape == Ids::MarkerShape::Ring)
+                piece.display = Ids::MarkerDisplay(parts.color, Ids::MarkerShape::DashedRing);
         }
         return pick;
     }
@@ -794,7 +798,7 @@ namespace BossMechanics
     inline float PieceExtent(VisualPiece const& piece)
     {
         Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
-        if (parts.valid && (parts.shape == Ids::MarkerShape::Line || parts.shape == Ids::MarkerShape::LineOutline))
+        if (parts.valid && Ids::IsLineShape(parts.shape))
             return LineAspect(parts.step) * piece.scale;
         return piece.display ? piece.scale : 0.f;
     }
@@ -816,19 +820,19 @@ namespace BossMechanics
 
     // The fill layer at timer fraction f. One entry per full-size fill piece (same order, so slot k always belongs
     // to piece k); display 0 = nothing drawn in that slot yet. `active` (the danger is live: resolved, an armed mine,
-    // a running persistent zone) returns the full fill. Never bigger than the outline at any f:
+    // a running persistent zone) returns the full fill. Never bigger than the outline at any f, and never a display
+    // other than the full fill's (a live marker only ever changes scale, which the client blends smoothly):
     // - circle, cone, a donut or cone drawn as a disc: one piece, scale f * full (grows from the centre / the apex;
     //   uniform scale keeps the cone's angle);
     // - donut: the timer ring (rim only) shrinks from the outer rim to the drawn hole's rim, its band always on the
     //   danger side (it ends with its inner edge on the hole's edge); active: the filled donut;
-    // - line: the fill runs from the source end, always at the outline's full width: each piece takes the longest
-    //   ladder step that fits the filled length inside it (a display swap at scale = width, so the client never
-    //   blends a length), capped at the piece's own step; nothing until the first step (1/4 of the width) fits.
-    //   Outline pieces abut end to end, so piece k + 1 starts only once piece k is full.
+    // - line (M1-FIX-LINE-FILL): a copy of the whole drawn line scaled by f about its source end (the first piece's
+    //   start, after ExcludeSourceEnd), on its axis, the way a cone grows from its apex: every piece at scale f * w,
+    //   piece k standing f * (start_k - source) from the source. It starts as a sliver at the source and grows longer
+    //   and wider together; the line is convex, so the copy stays inside the outline.
     // Pieces smaller than Rules::kFillMinScaleYd are left out (display 0).
     inline VisualPick PickFill(Shape const& shape, std::uint8_t color, float f, bool active)
     {
-        using Ids::MarkerShape;
         VisualPick pick = PickVisual(shape, color, MarkerLayer::Fill);
         if (active || pick.pieces.empty())
             return pick;
@@ -845,45 +849,20 @@ namespace BossMechanics
             Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
             float const outer = shape.radius;
             float const end = std::min(outer, Ids::kDonutRatios[parts.step] * outer / (1.f - Ids::kTimerRingBandFrac));
-            piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::TimerRing);
+            piece.display = Ids::MarkerDisplay(parts.color, Ids::MarkerShape::TimerRing);
             piece.scale = outer + f * (end - outer);
             tooSmall(piece);
             return pick;
         }
 
-        if (shape.type != ShapeType::Line)
-        {
-            for (VisualPiece& piece : pick.pieces)
-            {
-                piece.scale *= f;
-                tooSmall(piece);
-            }
-            return pick;
-        }
-
-        // Line: every piece is the outline's width w; piece k covers [start_k, start_k + extent_k) from the first.
-        float const w = pick.pieces.front().scale;
-        float const origin = pick.pieces.front().forward;
-        float const total = pick.pieces.back().forward - origin + PieceExtent(pick.pieces.back());
-        float const filled = f * total;
+        // Uniform scale about the source end: for circles and cones forward is 0 (the centre / the apex).
+        float const source = pick.pieces.front().forward;
         for (VisualPiece& piece : pick.pieces)
         {
-            float const len = filled - (piece.forward - origin);
-            if (len >= PieceExtent(piece) - 1e-4f)
-                continue;                                       // full: the outline's own geometry
-            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
-            std::int32_t const step = LineStepAtMost(len / w);
-            if (step < 0)
-            {
-                piece.display = 0;                              // not even the shortest step fits yet
-                continue;
-            }
-            piece.display = Ids::MarkerDisplay(parts.color, MarkerShape::Line,
-                std::min(parts.step, static_cast<std::uint32_t>(step)));
+            piece.scale *= f;
+            piece.forward = source + f * (piece.forward - source);
+            tooSmall(piece);
         }
-        if (w < Rules::kFillMinScaleYd)
-            for (VisualPiece& piece : pick.pieces)
-                piece.display = 0;
         return pick;
     }
 }

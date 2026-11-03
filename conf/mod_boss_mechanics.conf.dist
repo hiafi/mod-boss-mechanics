@@ -71,7 +71,8 @@ BossMechanics.Telegraph.ShrinkProjectileLines = 0
 #    BossMechanics.Telegraph.Fill
 #        Description: Draw the fill timer: a solid copy of the telegraph that grows from nothing into its outline
 #                     over the warning time, full at the resolve. Off, the outline is drawn alone until the danger is
-#                     live (an armed mine, a persistent zone after its resolve), which still shows the full fill.
+#                     live (a persistent zone after its resolve), which still shows the full fill. An armed mine
+#                     draws its dashed ring either way.
 #                     Travelling projectile lines never get a fill (the projectile is the timer).
 #        Default:     1 - Enabled
 #                     0 - Disabled

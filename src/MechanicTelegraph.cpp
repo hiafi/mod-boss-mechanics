@@ -164,6 +164,20 @@ namespace BossMechanics::Telegraph
             return m.mine ? m.mine->armed : now >= m.resolveAt;
         }
 
+        // An armed mine draws the dashed ring and no fill (PickArmedMine): a solid fill means a hit is coming, the
+        // dashed ring that the mine waits for a player.
+        bool ArmedMine(ActiveMechanic const& m)
+        {
+            return m.mine && m.mine->armed;
+        }
+
+        // The outline pieces of a shape kind: the hitbox's outline, or an armed mine's dashed ring.
+        VisualPick OutlinePick(ActiveMechanic const& m, Shape const& shape)
+        {
+            return ArmedMine(m) ? PickArmedMine(shape, ColorIndex(m)) : PickVisual(shape, ColorIndex(m),
+                MarkerLayer::Outline);
+        }
+
         // Spread: every carrier's ring gets a fill. RunOut From(Owner): only the owner's ring (the hitbox); the small
         // rings on the targets are pointers, not hitboxes.
         bool IsFillHost(ActiveMechanic const& m, ObjectGuid const& host)
@@ -215,7 +229,9 @@ namespace BossMechanics::Telegraph
 
         // Display and size of a live marker. SetDisplayId(display, scale) sets both in one go (it resets the scale
         // otherwise); a scale-only change is one field. Either goes out in the next update packet; the client blends
-        // a scale change in over a short time (no animation in the model does it) and swaps a display at once.
+        // a scale change in over a short time (no animation in the model does it) and re-instances the model on a
+        // display swap, which flickers: a fill marker only ever changes scale while its timer runs (PickFill). The
+        // only swaps left are an outline whose shape changed (a shrinking projectile line) and a mine arming.
         void ApplyPiece(Creature* marker, MarkerState& s, VisualPiece const& piece)
         {
             if (piece.display != s.piece.display)
@@ -225,7 +241,7 @@ namespace BossMechanics::Telegraph
             }
             else if (piece.scale != s.piece.scale)
                 marker->SetObjectScale(piece.scale);
-            s.piece = piece;       // a new forward / facing offset is applied by the next follow move
+            s.piece = piece;       // a new forward / facing offset: the caller moves the marker (MoveMarker)
         }
 
         void DespawnMarker(Map* map, TelegraphState& state, ObjectGuid guid)
@@ -236,7 +252,10 @@ namespace BossMechanics::Telegraph
             state.markers.erase(guid);
         }
 
-        void MoveMarker(Creature* marker, MarkerState& s, Geo::Pose const& target, Unit* followUnit)
+        // Moves a marker toward `target` (a spline over `intervalMs`, the time until the next move; 0 = the follow
+        // interval).
+        void MoveMarker(Creature* marker, MarkerState& s, Geo::Pose const& target, Unit* followUnit,
+            uint32 intervalMs = 0)
         {
             ModuleConfig const& cfg = GetConfig();
             float const dist = std::hypot(Geo::Dist2d(s.sent.x, s.sent.y, target.x, target.y), target.z - s.sent.z);
@@ -264,7 +283,8 @@ namespace BossMechanics::Telegraph
                 case FollowMode::SplineStep:
                 default:
                 {
-                    float const interval = static_cast<float>(cfg.followIntervalMs) / 1000.f;
+                    uint32 const ms = intervalMs ? intervalMs : cfg.followIntervalMs;
+                    float const interval = static_cast<float>(ms) / 1000.f;
                     Movement::MoveSplineInit init(marker);
                     init.MoveTo(target.x, target.y, target.z, false, true);
                     init.SetFacing(Geo::Wrap2Pi(target.o));
@@ -298,7 +318,7 @@ namespace BossMechanics::Telegraph
         {
             Geo::Pose pose;
             Shape const shape = DrawnShape(reg, m, now, pose);
-            VisualPick const pick = PickVisual(shape, ColorIndex(m), MarkerLayer::Outline);
+            VisualPick const pick = OutlinePick(m, shape);
             bool const facingMatters = shape.type == ShapeType::Cone || shape.type == ShapeType::Line;
             Unit* owner = FindUnit(map, m.owner);
             if (spawning)
@@ -484,7 +504,9 @@ namespace BossMechanics::Telegraph
             MoveFillSlots(map, state, state.mechanics[m.id], pose, anchorUnit);
         }
 
-        // One fill slot: spawn, resize / swap, or despawn its marker so it draws `piece` (display 0: nothing).
+        // One fill slot: spawn, resize, or despawn its marker so it draws `piece` (display 0: nothing). A line fill
+        // piece past the first also moves along the line as the fill grows (PickFill scales its distance from the
+        // source); the spline takes one fill step, so it arrives with the next one.
         void SyncFillSlot(Map* map, TelegraphState& state, ActiveMechanic const& m, Unit const* owner, ObjectGuid& slot,
             Geo::Pose const& anchor, VisualPiece const& piece, bool facingMatters, ObjectGuid follow)
         {
@@ -501,7 +523,23 @@ namespace BossMechanics::Telegraph
                     slot = spawned->GetGUID();
                 return;
             }
+            bool const moved = piece.forward != it->second.piece.forward;
             ApplyPiece(marker, it->second, piece);
+            if (moved)
+                MoveMarker(marker, it->second, PiecePose(anchor, piece), nullptr, GetConfig().fillStepMs);
+        }
+
+        // An armed mine's outline swaps to the dashed ring (one display swap when it arms; nothing after).
+        void SyncArmedMineOutline(Map* map, TelegraphState& state, ActiveMechanic const& m, Shape const& shape)
+        {
+            VisualPick const pick = OutlinePick(m, shape);
+            for (std::size_t i = 0; i < m.markers.size() && i < pick.pieces.size(); ++i)
+            {
+                Creature* marker = map->GetCreature(m.markers[i]);
+                auto it = state.markers.find(m.markers[i]);
+                if (marker && it != state.markers.end())
+                    ApplyPiece(marker, it->second, pick.pieces[i]);
+            }
         }
 
         void ResizeFillSlots(Map* map, TelegraphState& state, MechanicState& ms, std::size_t n)
@@ -513,8 +551,9 @@ namespace BossMechanics::Telegraph
         }
 
         // One fill step: the timer fraction from createdAt to resolveAt (BossMechanics.Telegraph.FillLeadMs early),
-        // or the full fill once the danger is live. Spawns a fill piece the first step it is big enough, so no client
-        // ever sees it at another size than the one the step picked.
+        // or the full fill once the danger is live (an armed mine: no fill, its outline turns into the dashed ring).
+        // Spawns a fill piece the first step it is big enough, so no client ever sees it at another size than the one
+        // the step picked.
         void StepFill(Map* map, TelegraphState& state, Registry const& reg, ActiveMechanic& m, MechanicState& ms,
             Milliseconds now)
         {
@@ -527,9 +566,9 @@ namespace BossMechanics::Telegraph
             auto pickFor = [&](Shape const& shape)
             {
                 VisualPick pick = PickFill(shape, color, f, live);
-                if (!timer && !live)
+                if ((!timer && !live) || ArmedMine(m))
                     for (VisualPiece& piece : pick.pieces)
-                        piece.display = 0;         // timer off: the fill only shows the live danger
+                        piece.display = 0;         // timer off: the fill only shows the live danger; armed mine: none
                 return pick;
             };
 
@@ -542,6 +581,8 @@ namespace BossMechanics::Telegraph
                     Shape const shape = DrawnShape(reg, m, now, pose);
                     VisualPick const pick = pickFor(shape);
                     bool const facingMatters = shape.type == ShapeType::Cone || shape.type == ShapeType::Line;
+                    if (ArmedMine(m))
+                        SyncArmedMineOutline(map, state, m, shape);
                     ResizeFillSlots(map, state, ms, pick.pieces.size());
                     for (std::size_t k = 0; k < pick.pieces.size(); ++k)
                         SyncFillSlot(map, state, m, owner, ms.fill[k], pose, pick.pieces[k], facingMatters,

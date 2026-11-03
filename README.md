@@ -68,7 +68,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `BeginEncounter(owner, opt)` / `EndEncounter(owner)` | Palette (out, in, cross lanes, cells), boss state id |
 | `Zone(owner, Shapes::Circle/Donut/Cone/Line/LineFacing(...), warn)` | Any shape on a point or unit anchor |
 | `Circle`, `Donut`, `Cone(owner, source, angle, len, warn, exempt)`, `Line` | Zone shortcuts |
-| `Mine(owner, pos, r, arm, grace)` | Ring while arming, disc when armed; a player inside for `grace` detonates it |
+| `Mine(owner, pos, r, arm, grace)` | Ring + fill while arming, dashed ring once armed; `grace` inside detonates it |
 | `RoomFrame(owner, frame)` -> `LaneBuilder` | `.Lanes`, `.ExceptOne`, `.BurnCrossings`, `.Each` (`BossMechanics.h`) |
 | `Spread(owner, r, warn)`, `RunOut(owner, target, r, warn)` | Circle on each carrier; hits the other players inside |
 | `Stack(owner, at, r, warn)`, `Soak(owner, at, r, count, warn)` | Get-in circles; results to `onResolve` |
@@ -96,7 +96,7 @@ Blood Craze, Vengeance-style talents), like a boss ability would.
 
 | Kind | Server resolve (M1) | Marker | Failure |
 | --- | --- | --- | --- |
-| Zone | resolve spell on everyone eligible inside | the shape's pieces; a mine: ring, then disc | Hit |
+| Zone | resolve spell on everyone eligible inside | the shape's pieces; a mine: ring, then dashed ring | Hit |
 | Frontal | as Zone, the owner's victim is skipped | cone | Hit |
 | Spread | a circle on each carrier hits every other player inside | ring on each carrier | Hit |
 | RunOut | as Spread on one target; `From(Owner)`: hit within r of the owner | ring on the target (*) | Hit |
@@ -184,17 +184,21 @@ it is never bigger than the outline. Per shape:
 - Cone: grows from the apex (uniform scale keeps the angle).
 - Donut: a rim-only timer ring shrinks from the outer rim to the drawn hole, its band always on the danger
   side; once live (a persistent donut), the filled donut.
-- Line: grows from the source end (after `ExcludeSourceEnd`), always at the outline's full width: ladder display
-  swaps at scale = width, so the length never blends; it first shows at a quarter of the width long; a multi-piece
-  line fills piece by piece (each piece once the one before it is full).
+- Line: a copy of the whole drawn line scaled by the timer fraction about its source end (after `ExcludeSourceEnd`, or
+  a lane's drawn strip start), on its axis, the way a cone grows from its apex: a sliver at the source that grows
+  longer and wider together until it is the outline. Scale only, in the full fill's own display, so the client blends
+  it smoothly; nothing swaps a display while the timer runs (M1-FIX-LINE-FILL: the old per-step display swaps
+  re-instanced the model and flickered). A multi-piece line (aspect above 64) scales each piece and moves piece k to
+  f x its start from the source every step (a spline over one step).
 - Travelling projectile lines: no fill (the projectile is the timer).
-- Mines: the fill grows while the mine arms and is full while it is armed (the old ring-then-disc, now with a timer).
+- Mines: the fill grows while the mine arms. Once armed the fill goes and the outline swaps to a dashed ring (one
+  display swap), so an armed mine (waiting for a player) reads differently from an incoming hit (a solid fill).
 - Persistent zones: full fill from the resolve to the end (no regrowth per tick).
 - `NoFillTimer()` (lane crossing cells): outline only until the danger is live, then the full fill.
 - RunOut `From(Owner)`: the owner's ring gets the fill; the small pointer rings on the targets do not.
 
-`Telegraph.Fill = 0` drops the timer: the outline is drawn alone until the danger is live (an armed mine, a persistent
-zone after its resolve), which still shows the full fill.
+`Telegraph.Fill = 0` drops the timer: the outline is drawn alone until the danger is live (a persistent zone after its
+resolve), which still shows the full fill. An armed mine draws its dashed ring either way.
 
 Cost: two creatures per drawn piece (outline + fill), so a circle, cone, donut or one-piece line is 2 markers, a
 Spread on 5 players 10, an n-piece line 2n; projectile lines and the RunOut pointer rings stay single.
@@ -206,13 +210,16 @@ resizes send one value update per fill marker per step (~7 per second), like a m
 - Donut ratios round **down** to the ladder (0.25, 0.33, 0.40, 0.50, 0.60, 0.67, 0.75): the drawn safe hole is never
   bigger than the real one (`Rules::kDonutRatioRoundUp = false`, harness ruling 2026-11-02). A ratio below 0.25 draws
   a full disc (no hole shown, a WARN names it) rather than a hole bigger than the real one.
-- Lines use aspect steps 2^((i-8)/4) from 1/4 to 0.84 and 2^((i-8)/8) from 1 to 8 (`LineAspect`). A line is laid end
-  to end: pieces of exactly 8 widths, then one last piece rounded up to the ladder (`Rules::kLineNeverShorter`), so
-  pieces never overlap and the only overshoot is the far end of the last piece (at most 9%, 19% below 1 width, and
-  up to a quarter width for a line shorter than that).
-- Line models are symmetric about the marker (x in [-k, k]) and their texture draws only the forward half, so a line
-  takes its direction from the texture the same way a cone does (M1-FIX-LINES; the live build drew lines behind the
-  GM). `PieceWorldPose` / `MarkerModelToWorld` are the placement the host test pins against `Geo::Contains`.
+- Lines use aspect steps 2^((i-8)/4) from 1/4 to 0.84 and 2^((i-8)/8) from 1 to 64 (`LineAspect`, 57 steps, the same
+  for both layers). Most lines are one piece; a longer one is laid end to end: pieces of exactly 64 widths, then one
+  last piece rounded up to the ladder (`Rules::kLineNeverShorter`), so pieces never overlap and the only overshoot is
+  the far end of the last piece (at most 9%, 19% below 1 width, and up to a quarter width for a line shorter than
+  that).
+- Line models are symmetric about the marker (the client draws a model centred on its bounds) and made of two quads:
+  the back half x in [-k, 0] samples a transparent part of the texture, the front half x in [0, k] a body band that is
+  the same all along its length. So a line runs from the marker forward, both its ends are hard geometric edges (no
+  texture edge to blur behind a joint) and every aspect shares one texture (M1-FIX-LINE-FILL).
+  `PieceWorldPose` / `MarkerModelToWorld` are the placement the host test pins against `Geo::Contains`.
 - Lanes: `ExceptOne`'s last lane is clamped inside the frame and overlaps the one before it; its marker draws only
   the strip the others leave uncovered (`CoverLaneDrawnStrip`, `ApplyDrawStrip`), its hitbox stays the whole lane.
   Lanes laid along the second axis of a set draw in the encounter's `crossLanes` color (yellow) and crossing cells in
@@ -309,7 +316,7 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
 | `BossMechanics.Telegraph.Lift` | 0.1 | marker height above the anchor (yd) |
 | `BossMechanics.Telegraph.ShrinkProjectileLines` | 0 | shorten projectile markers behind the projectile |
-| `BossMechanics.Telegraph.Fill` | 1 | 0: no fill timer (the fill still shows an armed mine / a live zone) |
+| `BossMechanics.Telegraph.Fill` | 1 | 0: no fill timer (the fill still shows a live zone; mines unchanged) |
 | `BossMechanics.Telegraph.FillStepMs` | 150 | fill resize interval (min 50) |
 | `BossMechanics.Telegraph.FillLeadMs` | 150 | fill computed this far ahead (client scale blend; max 2000) |
 | `BossMechanics.MaxActivePerMap` | 256 | registrations above it are refused with a warning |
@@ -323,11 +330,12 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
-| 91000-91898 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
+| 91000-91833 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
 | | offsets: disc 0, ring 1, timer ring 2, donut 3+j, donut outline 10+j, cone 17+j, cone outline 25+j, |
-| | line 33+i, line outline 66+i (99 per color; +99 spare) |
-| 91900-91999 | spare (91990-91995: the asset script's opt-in diagnostics; 91996: the line-direction probe for |
-| | `.morph`); the old slice 90500-90699 is free |
+| | dashed ring 33 (34 per color; +34..+99 spare) |
+| 92000-92856 | Line (fill) displays: 92000 + 100c + i, i = 0..56 (+57..+99 spare) |
+| 93000-93856 | Line (outline) displays: 93000 + 100c + i |
+| rest of 91000-93999 | spare (91990-91995: the asset script's opt-in diagnostics); the old slice 90500-90699 is free |
 
 The spell and creature rows come from dbc-tools (`apps/dbc-tools/source/npcs/boss_mechanics.py`), the displays and
 models from `apps/dbc-tools/patch_bossmechanics_markers.py`. A dungeon that wants its own combat-log name declares a

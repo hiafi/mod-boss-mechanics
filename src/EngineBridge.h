@@ -47,7 +47,7 @@ namespace BossMechanics
         virtual ~EngineBridge() = default;
 
         virtual void SpawnMarkers(Map* map, ActiveMechanic& m) = 0;                         // fills m.markers
-        virtual void UpdateMarkers(Map* map, ActiveMechanic& m, Milliseconds now) = 0;      // follow, mine swap
+        virtual void UpdateMarkers(Map* map, ActiveMechanic& m, Milliseconds now) = 0;      // follow, fill, mine
         virtual void DespawnMarkers(Map* map, ActiveMechanic& m) = 0;
         virtual void CastResolve(Map* map, ActiveMechanic& m, uint32 pass) = 0;             // one AoE cast, filtered
         virtual void AddWeakenedStack(Player* player) = 0;

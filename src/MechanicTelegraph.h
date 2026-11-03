@@ -11,14 +11,16 @@
  * - Outline (m.markers / m.carrierMarkers): rim + faint interior, the full hitbox from the first frame, never resized
  *   by the timer. The resolve casts from these.
  * - Fill (MechanicState::fill / carrierFill): the timer, stepped every BossMechanics.Telegraph.FillStepMs from
- *   createdAt to resolveAt (FillLeadMs early) and full while the danger is live (an armed mine, a persistent zone).
+ *   createdAt to resolveAt (FillLeadMs early) and full while the danger is live (a resolved or persistent zone).
  *   Circle / cone: grows from the centre / apex. Donut: a rim-only ring shrinks from the outer rim to the hole; live,
- *   the filled donut. Line: grows from the source end at constant width (ladder display swaps). Travelling projectile
- *   lines get no fill (the projectile is the timer). Telegraph.Fill = 0: the fill only shows the live state.
+ *   the filled donut. Line: a scaled copy of the whole line grows from the source end, longer and wider together
+ *   (scale only, no display swap while the timer runs). Travelling projectile lines get no fill (the projectile is
+ *   the timer). Telegraph.Fill = 0: the fill only shows the live state.
  *
  * What each kind draws:
- * - Zone/Frontal: the hitbox's pieces (circle, donut, cone, line pieces) in both layers; a mine fills while it arms
- *   and is full once armed; a unit anchor (or a Line(from, to) with a unit end) is followed every FollowIntervalMs.
+ * - Zone/Frontal: the hitbox's pieces (circle, donut, cone, line pieces) in both layers; a mine fills while it arms;
+ *   once armed its fill goes and its outline turns into the dashed ring (PickArmedMine); a unit anchor (or a
+ *   Line(from, to) with a unit end) is followed every FollowIntervalMs.
  * - Spread/RunOut: a ring of the radius on each carrier (+ its fill), following it; self-trigger carriers are
  *   resynced on every follow step. RunOut From(Owner): one ring of the radius on the owner (the danger is "within r
  *   of the owner", + its fill) plus a small ring (Rules::kRunOutTargetMarkerRadiusYd, no fill) on each target, so
