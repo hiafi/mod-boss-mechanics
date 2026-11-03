@@ -30,8 +30,6 @@ namespace BossMechanics
         EngineBridge* sBridge = nullptr;
         std::atomic<bool> sWarnedNoBridge{ false };
 
-        constexpr Milliseconds kForever{ std::numeric_limits<int64>::max() / 4 };
-
         Geo::Vec3 ToVec(Position const& p)
         {
             return { p.GetPositionX(), p.GetPositionY(), p.GetPositionZ() };
@@ -40,19 +38,6 @@ namespace BossMechanics
         Geo::Pose ToPose(Position const& p)
         {
             return { p.GetPositionX(), p.GetPositionY(), p.GetPositionZ(), p.GetOrientation() };
-        }
-
-        ProjectileParams ParamsOf(ActiveMechanic const& m)
-        {
-            ProjectileParams p;
-            if (!m.projectile)
-                return p;
-            p.length = m.shape.length;
-            p.speed = m.projectile->speed;
-            p.halfLength = m.projectile->halfLength > 0.f ? m.projectile->halfLength : m.shape.width * 0.5f;
-            p.outAndBack = m.projectile->outAndBack;
-            p.pause = m.projectile->returnPause;
-            return p;
         }
 
         ResolveResult BaseResult(ActiveMechanic const& m, uint32 pass)
@@ -71,6 +56,19 @@ namespace BossMechanics
                 LOG_ERROR("module.bossmechanics", "mod-boss-mechanics: no engine bridge installed; markers and "
                     "resolve casts are skipped");
         }
+    }
+
+    ProjectileParams ProjectileParamsOf(ActiveMechanic const& m)
+    {
+        ProjectileParams p;
+        if (!m.projectile)
+            return p;
+        p.length = m.shape.length;
+        p.speed = m.projectile->speed;
+        p.halfLength = m.projectile->halfLength > 0.f ? m.projectile->halfLength : m.shape.width * 0.5f;
+        p.outAndBack = m.projectile->outAndBack;
+        p.pause = m.projectile->returnPause;
+        return p;
     }
 
     void SetEngineBridge(EngineBridge* bridge)
@@ -195,7 +193,9 @@ namespace BossMechanics
     // ----------------------------------------------------------------------------------------------------------------
     Registry* Registry::Get(Map const* map)
     {
-        return map ? map->CustomData.Get<Registry>(kKey) : nullptr;
+        // DataMap looks up by std::string: build the key once, not per call (bots read this every tick).
+        static std::string const key(kKey);
+        return map ? map->CustomData.Get<Registry>(key) : nullptr;
     }
 
     Registry& Registry::GetOrCreate(Map* map)
@@ -250,6 +250,7 @@ namespace BossMechanics
         ls.id = id;
         ls.owner = owner;
         ls.frame = frame;
+        BumpRevision();
         return ls;
     }
 
@@ -263,7 +264,10 @@ namespace BossMechanics
         auto [it, inserted] = _encounters.try_emplace(owner);
         Encounter& e = it->second;
         if (inserted)
+        {
             e.owner = owner;
+            BumpRevision();
+        }
         if (opt)
         {
             e.getOut = opt->getOut;
@@ -301,18 +305,20 @@ namespace BossMechanics
         m.lastPose = ToPose(m.anchor.point);
         m.lastPose = AnchorPose(m);
         uint32 const id = m.id;
+        BumpRevision();
         return &_mechanics.emplace(id, std::move(m)).first->second;
     }
 
-    void Registry::FinalizeTiming(ActiveMechanic& m) const
+    void Registry::FinalizeTiming(ActiveMechanic& m)
     {
+        BumpRevision();
         if (m.mine)
         {
             m.mine->armAt = m.resolveAt;
             m.expireAt = m.mine->lifetime > Milliseconds(0) ? m.resolveAt + m.mine->lifetime : kForever;
         }
         else if (m.projectile)
-            m.expireAt = m.resolveAt + ProjectileDuration(ParamsOf(m));
+            m.expireAt = m.resolveAt + ProjectileDuration(ProjectileParamsOf(m));
         else if (m.persist)
         {
             m.persist->until = m.resolveAt + m.persist->duration;
@@ -376,19 +382,26 @@ namespace BossMechanics
                 continue;
             old->fizzled = true;
             old->finished = true;
+            BumpRevision();
         }
     }
 
     void Registry::Cancel(uint32 id)
     {
         if (ActiveMechanic* m = FindMutable(id))
+        {
             m->cancelled = true;
+            BumpRevision();
+        }
     }
 
     void Registry::Detonate(uint32 id)
     {
         if (ActiveMechanic* m = FindMutable(id))
+        {
             m->detonateRequested = true;
+            BumpRevision();
+        }
     }
 
     void Registry::Reserve(uint32 id, Reservation r)
@@ -425,6 +438,7 @@ namespace BossMechanics
                 e->onFailure = nullptr;
             }
             _pendingEnds.push_back(owner);
+            BumpRevision();
             return;
         }
         FinishEncounter(owner);
@@ -439,6 +453,7 @@ namespace BossMechanics
         bool const hadEncounter = _encounters.count(owner) != 0;
         if (!hadEncounter && ids.empty())
             return;
+        BumpRevision();
 
         EngineBridge* bridge = GetEngineBridge();
         for (uint32 id : ids)
@@ -759,7 +774,7 @@ namespace BossMechanics
             Geo::Pose pose;
             Shape const shape = EffectiveShape(m, pose);
             float const s = Geo::ToLineCoords(shape, pose, ToVec(p)).s;
-            out = ProjectileHotWindows(ParamsOf(m), s);
+            out = ProjectileHotWindows(ProjectileParamsOf(m), s);
             for (HotWindow& w : out)
             {
                 w.from += m.resolveAt;
@@ -1057,6 +1072,8 @@ namespace BossMechanics
         for (auto const& [id, m] : _mechanics)
             if (m.cancelled || m.finished)
                 dead.push_back(id);
+        if (!dead.empty())
+            BumpRevision();
         for (uint32 id : dead)
         {
             auto it = _mechanics.find(id);
@@ -1082,7 +1099,10 @@ namespace BossMechanics
             if (alive)
                 ++it;
             else
+            {
                 it = _laneSets.erase(it);
+                BumpRevision();
+            }
         }
 
         _ticking = false;
@@ -1192,7 +1212,7 @@ namespace BossMechanics
             return;
 
         Projectile& pr = *m.projectile;
-        ProjectileParams const params = ParamsOf(m);
+        ProjectileParams const params = ProjectileParamsOf(m);
         Milliseconds const elapsed = now - m.resolveAt;
         Geo::Pose pose;
         Shape const shape = EffectiveShape(m, pose);
@@ -1275,7 +1295,10 @@ namespace BossMechanics
             for (Player* p : CandidatePlayers(m))
                 if (IsEligible(m, p) && Geo::Contains(shape, pose, ToVec(p->GetPosition())))
                     inside.push_back(p->GetGUID());
+            bool const wasArmed = mine.armed;
             detonate = mine.Update(now, inside) == MineState::Step::Detonate;
+            if (!wasArmed && mine.armed)
+                BumpRevision();     // bots: hot at the arming moment only -> hot until it expires
         }
         if (!detonate)
             return;

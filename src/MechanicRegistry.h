@@ -21,6 +21,7 @@
 #include "ObjectGuid.h"
 #include "Position.h"
 #include <functional>
+#include <limits>
 #include <list>
 #include <map>
 #include <optional>
@@ -324,6 +325,10 @@ namespace BossMechanics
         bool IsActive(Milliseconds now) const { return !cancelled && !finished && now < expireAt; }
     };
 
+    // A computed projectile's timing parameters (default params when m has no projectile). The registry's sweep and
+    // hot windows and the bots' view (M2) all use this, so they agree.
+    ProjectileParams ProjectileParamsOf(ActiveMechanic const& m);
+
     // ----------------------------------------------------------------------------------------------------------------
     // Failures and encounters
     // ----------------------------------------------------------------------------------------------------------------
@@ -419,6 +424,9 @@ namespace BossMechanics
     {
     public:
         static constexpr char const* kKey = "mod-boss-mechanics";
+        // "Never": a mine without a lifetime expires at this time; a persistent zone without ticks schedules its next
+        // tick here. Bots map it to Solver::kForever.
+        static constexpr Milliseconds kForever{ std::numeric_limits<int64>::max() / 4 };
 
         explicit Registry(Map* map) : _map(map) { }
 
@@ -426,6 +434,12 @@ namespace BossMechanics
         static Registry& GetOrCreate(Map* map);
 
         Map* GetMap() const { return _map; }
+
+        // Changes whenever what bots see may have changed: Add, Commit, a timing change, Cancel, Detonate, a mine
+        // arming, any prune or fizzle, encounter start and end, a lane set added. Bots compare it with the revision
+        // they last planned for (M2 handoff §3.4, §3.6). Never 0, so a fresh bot state (seenRevision 0) always
+        // differs.
+        uint32 Revision() const { return _revision; }
 
         // ---- writes (scripts, command, hooks) ----
         // Registers a mechanic (assigns id and createdAt, applies the encounter palette). nullptr when refused
@@ -435,7 +449,7 @@ namespace BossMechanics
         // markers; timing is recomputed on every call. Called by MechanicRef at the end of the statement, by
         // LaneBuilder, and by Tick for anything still uncommitted.
         void Commit(uint32 id);
-        void FinalizeTiming(ActiveMechanic& m) const;
+        void FinalizeTiming(ActiveMechanic& m);    // also bumps the revision
         void Cancel(uint32 id);         // no damage; pruned (markers despawned) on the next Tick
         void Detonate(uint32 id);       // resolve on the next Tick (mines: then spent)
         Encounter& BeginEncounter(ObjectGuid owner, EncounterOptions const* opt = nullptr);
@@ -553,10 +567,16 @@ namespace BossMechanics
         void PickTargets(ActiveMechanic& m);
         void Remove(ActiveMechanic& m);     // despawn markers + fizzle callback; caller erases
         void FinishEncounter(ObjectGuid owner);
+        void BumpRevision()
+        {
+            if (++_revision == 0)
+                _revision = 1;
+        }
 
         Map* _map;                      // the map that owns this registry (CustomData): always outlives it
         uint32 _nextId = 1;
         uint32 _nextLaneSetId = 1;
+        uint32 _revision = 1;
         bool _ticking = false;
         std::map<uint32, ActiveMechanic> _mechanics;
         std::map<uint32, LaneSet> _laneSets;
@@ -565,6 +585,11 @@ namespace BossMechanics
         std::vector<ObjectGuid> _deferredEnds;     // DeferEndEncounter: ended at the start of the next Tick
         std::vector<uint32> _deferredBossStates;    // DeferEndEncountersForBossState: checked at the next Tick
     };
+
+    // M2 bot waker (handoff §3.6): called by OnMapUpdate right after `reg.Tick(now)`, on the map's update thread, for
+    // every map with a registry. The playerbots glue installs it at startup; nullptr (the default) = no call.
+    using BotAfterTickFn = void (*)(Map* map, Registry& reg, Milliseconds now);
+    void SetBotAfterTick(BotAfterTickFn fn);
 }
 
 #endif
