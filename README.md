@@ -27,6 +27,20 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicMarkerAI.h/.cpp` | `npc_boss_mechanic_marker`: passive marker / test owner AI |
 | `src/MechanicHooks.cpp` | Config load, map tick, encounter end, Weakened on map leave |
 | `src/MechanicCommand.cpp` | `.mech` |
+| `src/MechanicBarrage.h` | Pure shot geometry and seeded dice of `.mech barrage` (host-tested) |
+| `src/MechanicBotReportHook.h` | `SetBotReport(fn)`: how `.mech bots` reaches the playerbots glue |
+| `src/MechanicSolver.h` | Pure bot solver: hazards, hot windows, signed distance, candidates, path check, `Solve` |
+| `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
+| `src/MechanicBotView.h/.cpp` | Registry -> solver input for one bot; navmesh path oracle (no playerbots types) |
+| `src/MechanicBotGuard.h` | `BOSS_MECHANICS_WITH_BOTS`: 1 only with mod-playerbots enabled |
+| `src/MechanicBotState.h` | Per-bot state and its playerbots value (`boss mechanic state`) |
+| `src/MechanicBotBrain.h/.cpp` | Per-bot update: view, mode machine, solve, leaveBy |
+| `src/MechanicBotStrategy.h/.cpp` | `boss mechanics` strategy, its two triggers and two actions |
+| `src/MechanicBotLock.h/.cpp` | Lock multiplier: what may run while a bot escapes or holds (the one block list) |
+| `src/MechanicBotContexts.h` | The four playerbots named-object contexts |
+| `src/MechanicBotGate.h/.cpp` | Context registration, strategy gate, `AddSC_boss_mechanics_bots` |
+| `src/MechanicBotWaker.cpp` | After-tick waker and cast break |
+| `src/MechanicBotReport.cpp` | `.mech bots` body |
 | `src/BossMechanicsConfig.h/.cpp` | Cached config |
 | `src/BossMechanicsIds.h` | Pinned spell, creature and display ids |
 | `tests/` | Standalone tests for the pure headers: `tests/run.sh` (host g++, no server build) |
@@ -294,6 +308,9 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech test <shape> <size> <ms> [key=value ...]
 .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
 .mech palette <out color> <in color> [cross-lane color] [cell color]
+.mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
+.mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
+.mech bots [all]
 ```
 
 GMs are never valid targets: use `.gm off` (the command reminds you). The test encounter's owner is a hostile Mechanic
@@ -330,8 +347,35 @@ Common keys: `dmg=` flat (0 = telegraph only), `pct=` (20, percent of reference 
 `tick=<ms>` (1000), `anchor=point|me|target` (point: the selected unit's position, else the GM's; facing = the
 GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1, max 50), `every=` (1000 ms;
 repeats are registered from the test owner's scheduler), `scatter=` (0 yd: random offset per repeat, point anchors),
-`tele=0` (no marker). Damage keys do not apply to stack and soak, nor do `weak=`/`once=` (Weakened lands only from
-resolve hits). Keys that do not fit the shape are listed back as ignored.
+`tele=0` (no marker), `at=member` and `seed=<n>` (see below). Damage keys do not apply to stack and soak, nor do
+`weak=`/`once=` (Weakened lands only from resolve hits). Keys that do not fit the shape are listed back as ignored.
+
+`at=member` lands every repeat on a random alive member of the GM's group on the map, other than the GM (`self=1`
+includes the GM). The member is picked when that repeat registers, so delayed repeats follow the bots; the zone is a
+point anchor at the member's position then (facing = the GM's), and `scatter=` offsets it. It needs `anchor=point`
+(the default) and fails when the group has nobody to land on. `runout` takes the member as its target. `seed=<n>`
+seeds the command's own picks (scatter, member, barrage shapes) so a run can be repeated; without it a random seed is
+used and printed. Lane placement keeps the registry's own RNG. In the open world the target scope still applies
+(`BossMechanics.OpenWorld.CandidateRadius` around the test owner), so keep the bots near the GM.
+
+`.mech barrage` and `.mech minefield` are the bot acceptance runs (the bots in the GM's group, `.gm off`):
+
+- `.mech barrage [secs=30] [every=900] [warn=2000] [shapes=...] [dmg=1] [self=0] [seed=]`: for `secs` seconds, one
+  single Zone every `every` ms (100-60000) on a random group member (`self=1` includes the GM), `warn` ms warning
+  (0-60000). Each shot picks a kind from `shapes=` (comma separated, any of the five) and its geometry around that
+  member: circle r 3-6 on the member; donut 3/8 centred 0-2 yd off the member (the member stands in the safe hole:
+  stay in it); cone 60 or 90 degrees, length 15, apex 8 yd from the member facing it; line length 24, width 4, source
+  12 yd out at a random bearing, through the member; projectile the same line, width 3, speed 12. `dmg=1` (flat)
+  keeps hits visible in `.mech ledger` without killing; `dmg=0` is telegraph only. Ledger tags: 1 circle, 2 donut,
+  3 cone, 4 line, 5 projectile. The first shot registers at once, the rest from the test owner's scheduler, so
+  `.mech clear` stops the series. The reply prints the shot count and the seed.
+- `.mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]`: `count` mines of
+  `radius` at random points within `spread` yd of the selected unit (else the GM), snapped to the floor, arming after
+  `arm` ms with `grace` ms of grace, all in one cap group with cap = count (they never fizzle each other; a second
+  minefield gets its own group), `life` 120 s. Mines are tagged 1..count in the ledger. `.mech clear` removes them.
+- `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
+  the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
+  is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
 
 - `.mech list`: id, kind, shape, color, tag, time to resolve and to expiry, marker count.
 - `.mech markers [range]`: every live marker within range (100 yd) of the GM, one line each: mechanic id, layer
@@ -349,6 +393,151 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 - `.mech clear all`: ends **every** encounter on the map, real bosses included (the boss's next registration then
   runs as a bare implicit encounter: default palette, no boss state binding, no failure listener).
 - A mine without `life=` never expires, so it keeps the test owner from its idle despawn: `.mech clear` it.
+
+## Bots
+
+Playerbots dodge every `Zone` (and `Frontal`, unless the tank exemption covers them) from the registry's exact
+geometry, never from the markers. The glue (`MechanicBot*`) compiles only when mod-playerbots is enabled
+(`MechanicBotGuard.h`: `MOD_PLAYERBOTS` and `__has_include("PlayerbotAI.h")`); without it `AddSC_boss_mechanics_bots`
+is empty and `.mech bots` says so. No mod-playerbots or core edits.
+
+### Strategy
+
+| Kind | Name | Relevance |
+| --- | --- | --- |
+| strategy | `boss mechanics` (generic: combat and non-combat engines) | |
+| trigger / action | `boss mechanic reposition` -> `boss mechanic move` (a `MovementAction`, `MOVEMENT_FORCED`) | 96 |
+| trigger / action | `boss mechanic hold` -> `boss mechanic hold` (stop, clear the motion master, face) | 95 |
+| multiplier | `boss mechanic lock` | |
+| value | `boss mechanic state` | |
+
+Both triggers run the brain once per game-time millisecond. It keeps a view of the registry (rebuilt on a registry
+revision change, every 200 ms while not Idle, every `MovingAnchorRecheckMs` with unit-anchored hazards, every second
+while Idle on a map with mechanics) and runs the mode machine:
+
+- **Idle**: nothing relevant. A hazard is relevant when its windows meet `[now, now + HorizonMs]` and the bot could
+  reach its region (bounds + margin) before its first window plus 2 s, plus 3 yd: an open or endless hazard (a
+  persistent zone, a 120 s mine) keeps only the bots near it in Watch. A relevant hazard -> Watch.
+- **Watch**: relevant hazards; the spot and the current motion are safe. Spot unsafe -> solve -> Escape (while the
+  solve waits for the rate limit or the per-map budget, the lock already acts as in Escape). Only the bot's current
+  spline (follow, chase) crosses a hazard -> re-route: a solve with the spline's end as the role anchor and without
+  the bot's own spot; a clean target at least 1 yd closer to that end -> Escape there, then straight back to Watch,
+  where the stock motion resumes (and is re-routed again if it still crosses). No clean way around, or the spline's
+  end is itself unsafe -> Hold where it stands (until the hazard ends, at most `HoldCapMs`).
+- **Escape**: walking the solver's path. Within 0.6 yd, or the move we sent ended short at a spot that is safe
+  anyway -> Hold. Path or target turned unsafe -> re-solve. No progress (0.5 yd) for 500 ms since the escape began or
+  the bot last moved (re-sends do not restart this clock; refused sends count as no progress) -> re-solve; the same
+  target again -> released. Rooted, stunned or polymorphed with no progress -> released until it can move. One escape
+  past 2 x its planned travel + 1.5 s, or an unbroken run of escapes past 10 s -> released.
+- **Released** (Watch for 1.5 s, or until a root ends): the stock AI has the bot back. Nothing is locked, no cast is
+  broken and an unsafe spot is not solved, so a stuck or rooted bot heals, casts and follows; then it tries again.
+- **Hold**: at the safe spot until `holdUntil` (latest window end it answers, capped at `HoldCapMs`) -> Watch. Spot
+  unsafe -> re-solve; out of the role band for `RoleSlackMs` -> Watch (stock movement takes it back, policed).
+
+Solves are rate-limited by `MinSolveIntervalMs`, except the first after a registry change, and limited to 8 per map
+update across all bots of a map (the rest solve on the next update). Our move clears the pending wait of the last move
+(ours or a foreign `MOVEMENT_FORCED` hold) so the escape is never refused; a move to the same target is re-sent at
+most every 250 ms (after a refused send, a partial path or a spline that ended short).
+
+### Gate
+
+Installed on every bot, master or not, by login, map change and a sweep every `GateSweepMs` (repairs
+`ResetStrategies`): on an instance map `boss mechanics` (both engines) plus `avoid aoe` (combat, when
+`AvoidAoeInInstances`); in the open world `boss mechanics` only, while the bot's group holds a GM who ran `.mech test`
+on that map (`OpenWorldTestScope`); otherwise stripped. `avoid aoe` is stripped only when the gate added it and the
+stock rule (`Playerbots.AutoAvoidAoe` with a real master) would not have. `Bots.Enable` is latched at the first world
+tick, when the contexts are appended to the ten class lists.
+
+### Waker and cast break
+
+Right after each registry tick (full map updates) the waker sets `SetNextCheckDelay(0)` for a bot whose view is behind
+the registry revision, for which a mechanic hidden by fallibility becomes visible, or that is not Idle and has not run
+its brain for `FastTickMs` (bots without a real master otherwise tick every 0.5-3 s). A bot preparing a cast does not
+run its engine (`PlayerbotAI::UpdateAI` yields only in `SPELL_STATE_PREPARING`; a channel is `SPELL_STATE_CASTING`
+and the brain keeps running through it), so the waker refreshes its `leaveBy` and interrupts a cast or channel that
+would end after `leaveBy - SafetyMarginMs`, unless the bot is released. After a break the lock holds back cast-time
+spells and item uses for 500 ms, so the cast is not restarted and broken again.
+
+`leaveBy` already holds `SafetyMarginMs` once (the window is widened by it); the cast rule subtracts it a second time
+on purpose, for the AI tick between the cast's end and the escape's first step. Casts thus end 300 ms (default)
+earlier than the bare margin would allow.
+
+### Lock
+
+- **Idle, Watch, released**: nothing is blocked, except: Watch with an unsafe spot whose solve is deferred locks as
+  Escape, and for 500 ms after a cast break cast-time spells and item uses are blocked in every mode.
+- **Escape**: blocked: every movement action but ours, movement spells, any spell with a cast time or a channel.
+  Allowed: instants (heals too), auto-attack and the stock target picks, `set facing`, ours.
+- **Hold**: blocked: every movement action but ours, movement spells, a cast or channel that would end after
+  `leaveBy - SafetyMarginMs`. Allowed: casts that end in time, instants, auto-attack, `set facing`, ours.
+
+Movement spells: charge, leap, leap back, jump, jump dest and teleport effects, `CastReachTargetSpellAction`, and the
+named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `shadowstep`, `blink back`,
+`disengage`); see `MechanicBotLock.cpp`. Order: our move (96) and hold (95) > `avoid aoe` (90) > encounter actions
+(60s) > rotation.
+
+### Config (`BossMechanics.Bots.*`)
+
+| Key | Default | What |
+| --- | --- | --- |
+| `Enable` | 1 | 0: register nothing (latched at startup) |
+| `AvoidAoeInInstances` | 1 | the gate adds `avoid aoe` to every instance bot |
+| `OpenWorldTestScope` | 1 | outside instances: bots grouped with a GM who ran `.mech test` |
+| `GateSweepMs` | 1000 | gate sweep interval |
+| `FastTickMs` | 100 | waker: longest gap between an engaged bot's AI ticks (0 = every map update) |
+| `StartDelayMs` | 150 | solver: assumed delay before a move starts |
+| `SafetyMarginYd` / `SafetyMarginMs` | 0.75 / 300 | hazard edge distance (min 0.25) / widening of hot windows |
+| `PostResolveHoldMs` | 500 | a plain Zone stays live this long past its resolve |
+| `GraceMarginMs` | 250 | armed-mine crossing budget = grace - this |
+| `HorizonMs` | 10000 | windows starting later are ignored |
+| `HoldCapMs` | 3000 | longest hold for persistent and endless hazards |
+| `MaxCandidates` / `MaxPathChecks` | 400 / 8 | per solve (path checks x2 with the grace pass, +1 fallback) |
+| `GridStepYd` | 2.0 | lane-frame grid |
+| `MinSolveIntervalMs` | 150 | per bot, except the first solve after a registry change |
+| `MovingAnchorRecheckMs` | 250 | re-view cadence while a hazard is unit-anchored |
+| `RoleSlackMs` | 1000 | out of the role band this long while holding -> release the hold |
+| `RangedDistanceYd` | 22 | ranged and healer band [8, this + 6] (melee: melee range - 0.5) |
+| `FacingSlackDeg` | 15 | turning cones and lines are checked at +-this |
+| `Debug` | 0 | one log line per solve, and the view self-check (`module.bossmechanics.bots`) |
+| `Fallibility.Enable` | 0 | D1 human-like mistakes, deterministic under `Fallibility.Seed` (0 = random per load) |
+
+Fallibility keys (all off unless `Enable`): `ReactionMs` 350 + `JitterMs` 0-250 per bot before a mechanic is seen,
+`LateChancePct` 5 for `LateExtraMs` 700 more, `WrongSideChancePct` 3 to ignore it until `RealiseMs` 700 before its
+first window, `ScaleNormal` / `ScaleHeroic` 1.0. The out-of-combat role band is the follow distance + 2.
+
+Rolls are keyed on (seed, bot guid, registry mechanic id). Mechanic ids keep counting per map, so the same seed
+replays the same perception for the same mechanic id, not for a second run of `.mech barrage seed=1` on the same map
+(its mechanics get new ids): two runs draw similar, not identical, mistakes.
+
+### `.mech bots [all]`
+
+Per bot in the GM's group (`all`: every bot on the map): the strategies installed, mode, target and distance, time
+left before it must leave, its ledger failures, and its counters (solves by outcome, path checks, late arrivals,
+stuck re-solves, released escapes, motion stops and how many of them were re-routed, lock blocks by moves and casts,
+cast breaks, wakes, solve time last / max / mean in microseconds).
+
+### Limits
+
+- No navmesh on a map: every path check fails, so the solver falls back to `Fallback` / `NoPath` (logged once per bot
+  and mechanic).
+- Zones anchored on the bot itself (or lines aimed at it) are RunOut-shaped and ignored by their carrier (M3).
+- Actions run through `PlayerbotAI::DoSpecificAction` (chat `do`, `move to loot` from item use, pull pre-actions) skip
+  every multiplier, so the lock cannot stop them; engine reactions (knockback, teleport acks) are not actions.
+- The lock knows a cast by `CastSpellAction` (and items by `UseItemAction`). A plain `Action` that calls `CastSpell`
+  itself can still start a cast-time spell in Hold; the waker breaks it, at most once per 500 ms window (M4 class
+  audit).
+- Re-routing around a hazard is greedy, one hop at a time towards the end of the stock motion. A route that needs to
+  go away from the master first (a U-shaped wall of mines) is not found: the bot holds until the hazard ends or
+  `HoldCapMs`, then tries again.
+- A bot released after a stuck escape stands where it is for up to 1.5 s, inside the hazard if that is where it got
+  stuck (no navmesh way out); it heals and casts meanwhile.
+- The barrage donut tests "stay in the hole" only while `SafetyMarginYd` < 1 (`MechanicBarrage.h`).
+
+### Credits
+
+The context registration and the strategy gate follow mod-dungeon-clear (Jared Wright, AGPL-3.0-or-later),
+`DungeonClearModule` and `DcStrategyGate`; the solver's rule to validate path legs, not corners, and to validate a
+target against the same band the trigger fires on is from its `DcHazard`.
 
 ## Config
 

@@ -1,0 +1,106 @@
+/*
+ * mod-boss-mechanics: the "boss mechanics" bot strategy, its triggers and actions (STAGE-M2-HANDOFF §3.2, §3.4, WP-C).
+ *
+ * | Kind     | Name                       | Class                         | Relevance            |
+ * | strategy | boss mechanics             | MechanicBotStrategy (generic) | combat + non-combat  |
+ * | trigger  | boss mechanic reposition   | MechanicBotRepositionTrigger  | checkInterval 1      |
+ * | trigger  | boss mechanic hold         | MechanicBotHoldTrigger        | checkInterval 1      |
+ * | action   | boss mechanic move         | MechanicBotMoveAction         | ACTION_EMERGENCY + 6 |
+ * | action   | boss mechanic hold         | MechanicBotHoldAction         | ACTION_EMERGENCY + 5 |
+ * | (mult.)  | boss mechanic lock         | MechanicBotLockMultiplier     | MechanicBotLock.h    |
+ *
+ * Both triggers run the brain (MechanicBotBrain::Update, once per game-time ms) and read the mode it leaves. The
+ * move action is a MovementAction so it can use the protected MoveTo; the lock multiplier exempts it by type.
+ */
+
+#ifndef MOD_BOSS_MECHANICS_MECHANIC_BOT_STRATEGY_H
+#define MOD_BOSS_MECHANICS_MECHANIC_BOT_STRATEGY_H
+
+#include "MechanicBotGuard.h"
+
+#if BOSS_MECHANICS_WITH_BOTS
+
+#include "Action.h"
+#include "MovementActions.h"
+#include "Strategy.h"
+#include "Trigger.h"
+
+namespace BossMechanics
+{
+    struct MechanicBotState;
+
+    // Resolves and caches the bot's state value. The cached pointer is to the value object in the same bot's
+    // AiObjectContext (it lives as long as the trigger or action that holds it), never to a game object.
+    class MechanicBotStateRef
+    {
+    public:
+        MechanicBotState* Get(PlayerbotAI* botAI);
+
+    private:
+        MechanicBotState* _state = nullptr;
+    };
+}
+
+class MechanicBotStrategy : public Strategy
+{
+public:
+    explicit MechanicBotStrategy(PlayerbotAI* botAI) : Strategy(botAI) { }
+
+    std::string const getName() override { return "boss mechanics"; }
+    uint32 GetType() const override { return STRATEGY_TYPE_GENERIC; }
+    // The base Strategy has no triggers or multipliers of its own: nothing to chain.
+    void InitTriggers(std::vector<TriggerNode*>& triggers) override;
+    void InitMultipliers(std::vector<Multiplier*>& multipliers) override;
+};
+
+// Escape: active while the plan's move is not under way (not issued yet, re-planned, or the spline ended short).
+class MechanicBotRepositionTrigger : public Trigger
+{
+public:
+    explicit MechanicBotRepositionTrigger(PlayerbotAI* botAI) : Trigger(botAI, "boss mechanic reposition", 1) { }
+
+    bool IsActive() override;
+
+private:
+    BossMechanics::MechanicBotStateRef _state;
+};
+
+// Hold: active while something other than us moves the bot (follow, chase, a stock MovePoint).
+class MechanicBotHoldTrigger : public Trigger
+{
+public:
+    explicit MechanicBotHoldTrigger(PlayerbotAI* botAI) : Trigger(botAI, "boss mechanic hold", 1) { }
+
+    bool IsActive() override;
+
+private:
+    BossMechanics::MechanicBotStateRef _state;
+};
+
+class MechanicBotMoveAction : public MovementAction
+{
+public:
+    explicit MechanicBotMoveAction(PlayerbotAI* botAI) : MovementAction(botAI, "boss mechanic move") { }
+
+    bool isUseful() override;
+    bool Execute(Event event) override;
+
+private:
+    BossMechanics::MechanicBotStateRef _state;
+};
+
+class MechanicBotHoldAction : public Action
+{
+public:
+    explicit MechanicBotHoldAction(PlayerbotAI* botAI) : Action(botAI, "boss mechanic hold") { }
+
+    bool isUseful() override;
+    bool Execute(Event event) override;
+
+private:
+    BossMechanics::MechanicBotStateRef _state;
+};
+
+#endif
+
+#endif
