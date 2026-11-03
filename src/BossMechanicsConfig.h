@@ -31,7 +31,7 @@ namespace BossMechanics
         FollowMode followMode = FollowMode::SplineStep;         // BossMechanics.Telegraph.FollowMode
         uint32 followIntervalMs = 200;                          // BossMechanics.Telegraph.FollowIntervalMs
         float lift = 0.3f;                                      // BossMechanics.Telegraph.Lift
-        bool groundSnap = true;                                 // BossMechanics.Telegraph.GroundSnap
+        bool groundSnap = false;                                // BossMechanics.Telegraph.GroundSnap
         float groundSampleYd = 2.f;                             // BossMechanics.Telegraph.GroundSampleYd
         float maxPieceSpreadYd = 0.75f;                         // BossMechanics.Telegraph.MaxPieceSpreadYd
         bool shrinkProjectileLines = true;                      // BossMechanics.Telegraph.ShrinkProjectileLines

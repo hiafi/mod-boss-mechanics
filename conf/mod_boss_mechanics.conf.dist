@@ -61,20 +61,22 @@ BossMechanics.Telegraph.Lift = 0.3
 
 #
 #    BossMechanics.Telegraph.GroundSnap
-#        Description: Place each marker on the ground under it instead of at its anchor's height. Every marker is a
-#                     flat quad: on rolling ground, the terrain rises above a quad placed at the anchor's height and
-#                     hides parts of it (notched lane edges, cells that look the wrong size). With the snap, each
-#                     marker samples the walkable floor under its footprint (terrain, buildings, bridges) about every
-#                     GroundSampleYd and stands Lift above the highest sample; a static line spanning more than
-#                     MaxPieceSpreadYd of height is cut into shorter end-to-end pieces, each at its own height.
+#        Description: Place each marker on the ground under it instead of at its anchor's height. Off by default:
+#                     the marker skins project their texture onto the ground, so a marker at the anchor's height
+#                     already drapes over rolling terrain, and indoors the snap can lift a marker onto furniture
+#                     (the highest sample), where a small projected fill no longer reaches the floor. With the
+#                     snap, each marker samples the walkable floor under its footprint (terrain, buildings,
+#                     bridges) about every GroundSampleYd and stands Lift above the highest sample; a static line
+#                     spanning more than MaxPieceSpreadYd of height is cut into shorter end-to-end pieces, each at
+#                     its own height.
 #                     Only floors within the shape's height tolerance of the anchor count, searched from just above
 #                     the anchor, so a bridge or ceiling overhead or a lower floor never captures a marker. Moving
 #                     markers (on units, on Spread/RunOut carriers) sample a few points on every follow step.
-#        Default:     1 - Enabled
-#                     0 - Disabled (markers at the anchor's height + Lift, the old behavior)
+#        Default:     0 - Disabled (markers at the anchor's height + Lift)
+#                     1 - Enabled
 #
 
-BossMechanics.Telegraph.GroundSnap = 1
+BossMechanics.Telegraph.GroundSnap = 0
 
 #
 #    BossMechanics.Telegraph.GroundSampleYd

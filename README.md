@@ -241,10 +241,12 @@ resizes send one value update per fill marker per step (~7 per second), like a m
 
 ### Ground snap (`BossMechanics.Telegraph.GroundSnap`)
 
-Every marker is a flat quad. Placed at the anchor's height, rolling ground rises above it in places and hides those
-parts (notched lane edges, chevrons, cells that look bigger or smaller than they are). With `GroundSnap = 1` (the
-default) each marker piece samples the floor under its footprint (`src/MechanicGround.h`) and stands `Lift` above the
-highest sample:
+Off by default (playtest 2026-11-03). The marker skins carry the projected-texture batch flag, so the client paints
+each marker onto the ground around it and a marker at the anchor's height already drapes over rolling terrain; the
+notched lanes and chevrons first blamed on terrain were the projected smear of the old line textures' edge row. Indoors
+the snap took the highest sample (furniture) and lifted the marker 1.6 yd, where the small growing fill no longer
+reached the floor. With `GroundSnap = 1` each marker piece samples the floor under its footprint
+(`src/MechanicGround.h`) and stands `Lift` above the highest sample:
 
 - a line piece: a grid along its length and across its width about every `GroundSampleYd` (2 yd), ends and edges
   included; a disc, ring or dashed ring: the centre plus rings out to the radius; a donut: rings from its drawn hole
@@ -360,7 +362,7 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 | `BossMechanics.Telegraph.FollowMode` | 0 | 0 spline step, 1 MoveFollow, 2 teleport |
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
 | `BossMechanics.Telegraph.Lift` | 0.3 | height above the highest ground sample (yd; GroundSnap 0: above the anchor) |
-| `BossMechanics.Telegraph.GroundSnap` | 1 | 0: markers at the anchor's height + Lift (the old behavior) |
+| `BossMechanics.Telegraph.GroundSnap` | 0 | 1: each marker stands Lift above the highest floor under it |
 | `BossMechanics.Telegraph.GroundSampleYd` | 2 | ground sample spacing under a marker (min 0.5) |
 | `BossMechanics.Telegraph.MaxPieceSpreadYd` | 0.75 | a static line piece spanning more height than this is cut |
 | `BossMechanics.Telegraph.ShrinkProjectileLines` | 1 | shorten projectile markers behind the projectile |
