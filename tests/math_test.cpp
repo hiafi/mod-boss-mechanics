@@ -1,8 +1,10 @@
 // Standalone tests for src/MechanicMath.h (STAGE-M1-HANDOFF §6.1). Build: tests/run.sh.
 
 #include "check.h"
+#include "MechanicGround.h"
 #include "MechanicMath.h"
 #include <array>
+#include <functional>
 #include <map>
 #include <random>
 #include <set>
@@ -1397,6 +1399,364 @@ namespace
         CHECK(ok);
         CHECK(starts.size() <= 9);
     }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Ground snap (MechanicGround.h)
+    // ------------------------------------------------------------------------------------------------------------
+
+    // A synthetic world: a ground field plus an optional ceiling layer (a bridge or a roof) and a lower floor. The
+    // probe returns the highest layer at or below zFrom (within maxDown), like Map::GetHeight.
+    struct World
+    {
+        std::function<float(float, float)> ground;
+        std::function<float(float, float)> ceiling;     // empty: none; NaN at a point: none there
+        uint32_t calls = 0;
+
+        float operator()(float x, float y, float zFrom, float maxDown)
+        {
+            ++calls;
+            float best = Ground::kInvalidHeight - 1.f;
+            auto consider = [&](float h)
+            {
+                if (std::isfinite(h) && h <= zFrom + 1e-3f && h >= zFrom - maxDown - 1e-3f)
+                    best = std::max(best, h);
+            };
+            consider(ground(x, y));
+            if (ceiling)
+                consider(ceiling(x, y));
+            return best;
+        }
+    };
+
+    float Slope(float x, float y)
+    {
+        return 0.12f * x - 0.05f * y;
+    }
+
+    float Bumps(float x, float y)
+    {
+        auto g = [](float dx, float dy, float a, float sigma)
+        {
+            return a * std::exp(-(dx * dx + dy * dy) / (2.f * sigma * sigma));
+        };
+        return g(x - 12.f, y - 3.f, 1.6f, 4.f) - g(x - 28.f, y + 6.f, 1.2f, 5.f) + g(x + 5.f, y - 15.f, 2.f, 4.5f);
+    }
+
+    float StepField(float x, float /*y*/)
+    {
+        return x < 17.f ? 0.f : 1.5f;
+    }
+
+    float Flat(float, float)
+    {
+        return 0.f;
+    }
+
+    // Points every `d` yd over a marker piece's drawn area (line rectangle, cone sector, disc), for the dense check.
+    std::vector<Ground::Point2> Dense(Geo::Pose const& at, VisualPiece const& piece, float d)
+    {
+        Ground::PieceShape const ps = Ground::ShapeOfPiece(piece);
+        std::vector<Ground::Point2> out;
+        float const c = std::cos(at.o);
+        float const s = std::sin(at.o);
+        if (ps.type == Ground::PieceShape::Type::Line)
+        {
+            for (float a = 0.f; a <= ps.length + 1e-4f; a += d)
+                for (float t = -ps.width * 0.5f; t <= ps.width * 0.5f + 1e-4f; t += d)
+                    out.push_back({ at.x + c * a - s * t, at.y + s * a + c * t });
+            return out;
+        }
+        for (float dx = -ps.radius; dx <= ps.radius + 1e-4f; dx += d)
+            for (float dy = -ps.radius; dy <= ps.radius + 1e-4f; dy += d)
+            {
+                float const r = std::hypot(dx, dy);
+                if (r > ps.radius || r < ps.inner)
+                    continue;
+                if (ps.type == Ground::PieceShape::Type::Cone && r > 1e-4f
+                    && std::fabs(Geo::WrapPi(std::atan2(dy, dx) - at.o)) > ps.halfAngle)
+                    continue;
+                out.push_back({ at.x + dx, at.y + dy });
+            }
+        return out;
+    }
+
+    // The worst (ground - (z - lift)) over a pick's pieces: dense points and the piece's own footprint.
+    struct Clearance
+    {
+        float dense = -1e9f;
+        float footprint = -1e9f;
+    };
+
+    Clearance Check(VisualPick const& pick, Geo::Pose const& anchor, std::function<float(float, float)> const& f,
+        float lift, float step)
+    {
+        Clearance out;
+        for (VisualPiece const& piece : pick.pieces)
+        {
+            Geo::Pose const at = PieceWorldPose(anchor, piece);
+            for (Ground::Point2 const& p : Dense(at, piece, 0.25f))
+                out.dense = std::max(out.dense, f(p.x, p.y) - (piece.z - lift));
+            for (Ground::Point2 const& p : Ground::Footprint(at, piece, step))
+                out.footprint = std::max(out.footprint, f(p.x, p.y) - (piece.z - lift));
+        }
+        return out;
+    }
+
+    // The split laid out: abutting pieces from excludeStart, only the last one past the end.
+    bool CoversExactly(Shape const& shape, VisualPick const& pick)
+    {
+        if (pick.pieces.empty())
+            return false;
+        float at = shape.excludeStart;
+        for (std::size_t k = 0; k < pick.pieces.size(); ++k)
+        {
+            VisualPiece const& p = pick.pieces[k];
+            if (std::fabs(p.forward - at) > 1e-3f)
+                return false;
+            at += PieceExtent(p);
+            bool const last = k + 1 == pick.pieces.size();
+            if (!last && at >= shape.length - 1e-4f)
+                return false;
+            if (last && at < shape.length - 1e-3f)
+                return false;
+        }
+        return true;
+    }
+
+    VisualPick SplitPick(Shape const& shape, Geo::Pose const& pose, World& world, Ground::Settings const& st,
+        Ground::LineSplit* outSplit = nullptr, uint32_t* queries = nullptr)
+    {
+        Ground::Sampler<World> sampler(world, pose.z, shape.zTolerance);
+        Ground::LineSplit const split = Ground::SplitLine(shape, pose, sampler, st);
+        VisualPick pick = PickVisual(shape, 0, MarkerLayer::Outline, &split.steps);
+        for (std::size_t k = 0; k < pick.pieces.size() && k < split.z.size(); ++k)
+        {
+            pick.pieces[k].hasZ = true;
+            pick.pieces[k].z = split.z[k];
+        }
+        if (outSplit)
+            *outSplit = split;
+        if (queries)
+            *queries = sampler.Queries();
+        return pick;
+    }
+
+    void TestGroundFlat()
+    {
+        Ground::Settings st;
+        World world{ Flat, {} };
+        // Flat ground: the default layout (one piece, or 64-width pieces then the rest), every piece at lift.
+        for (auto [len, w] : { std::pair{ 40.f, 6.667f }, { 6.f, 6.f }, { 48.f, 4.f }, { 200.f, 2.f }, { 1.f, 6.f } })
+        {
+            Shape shape = Shape::Line(len, w);
+            Geo::Pose const pose{ 3.f, -4.f, 0.f, 0.7f };
+            Ground::LineSplit split;
+            uint32_t queries = 0;
+            VisualPick const pick = SplitPick(shape, pose, world, st, &split, &queries);
+            VisualPick const old = PickVisual(shape, 0, MarkerLayer::Outline);
+            CHECK(split.steps == DefaultLineSteps(shape));
+            CHECK(pick.pieces.size() == old.pieces.size());
+            bool same = pick.pieces.size() == old.pieces.size();
+            for (std::size_t k = 0; same && k < pick.pieces.size(); ++k)
+                same = pick.pieces[k].display == old.pieces[k].display && pick.pieces[k].scale == old.pieces[k].scale
+                    && pick.pieces[k].forward == old.pieces[k].forward;
+            CHECK(same);
+            for (float z : split.z)
+                CHECK_NEAR(z, st.lift, 1e-5);
+            CHECK(!split.minLengthStopped);
+            if (len == 40.f)
+                CHECK(queries <= 140);          // a 40 x 6.67 lane: 21+ rows x 5 columns, one query each on flat ground
+        }
+        // A layout made for another shape is ignored (the default is drawn).
+        Shape a = Shape::Line(40.f, 4.f);
+        LineSteps const wrong = { 3 };
+        VisualPick const pa = PickVisual(a, 0, MarkerLayer::Outline, &wrong);
+        CHECK(pa.pieces.size() == 1
+            && pa.pieces[0].display == PickVisual(a, 0, MarkerLayer::Outline).pieces[0].display);
+        // A disc on flat ground: lift, its centre included.
+        Ground::Sampler<World> sampler(world, 0.f, 6.f);
+        VisualPiece disc = PickVisual(Shape::Circle(8.f), 0, MarkerLayer::Outline).pieces.front();
+        CHECK_NEAR(Ground::PieceZ(sampler, Geo::Pose{ 1.f, 1.f, 0.f, 0.f }, disc, st, false), st.lift, 1e-6);
+    }
+
+    void TestGroundFields()
+    {
+        Ground::Settings st;
+        struct Field
+        {
+            char const* name;
+            float (*f)(float, float);
+            bool exact;         // planar or piecewise constant: the footprint's own samples clear exactly
+        };
+        Field const fields[] = { { "slope", Slope, true }, { "bumps", Bumps, false }, { "step", StepField, true } };
+        struct LineCase
+        {
+            float len, w, exclude, facing, x, y;
+        };
+        LineCase const lines[] = { { 40.f, 6.667f, 0.f, 0.f, -20.f, 0.f }, { 40.f, 6.667f, 0.f, 1.5708f, 5.f, -20.f },
+            { 60.f, 3.f, 0.f, 0.3f, -10.f, -8.f }, { 30.f, 4.f, 6.f, -0.8f, 0.f, 10.f }, { 120.f, 1.f, 0.f, 0.1f,
+            -50.f, 0.f }, { 8.f, 8.f, 0.f, 2.f, 14.f, 0.f } };
+        bool covered = true;
+        bool cleared = true;
+        bool clearedExact = true;
+        bool spreadOk = true;
+        bool order = true;
+        std::size_t splitCount = 0;
+        for (Field const& field : fields)
+        {
+            World world{ field.f, {} };
+            for (LineCase const& lc : lines)
+            {
+                Shape shape = Shape::Line(lc.len, lc.w);
+                shape.excludeStart = lc.exclude;
+                shape.zTolerance = 30.f;            // the whole field is in band (the band itself: TestGroundBand)
+                Geo::Pose const pose{ lc.x, lc.y, field.f(lc.x, lc.y), lc.facing };
+                Ground::LineSplit split;
+                VisualPick const pick = SplitPick(shape, pose, world, st, &split);
+                covered = covered && CoversExactly(shape, pick) && LineStepsCover(shape, split.steps);
+                Clearance const c = Check(pick, pose, field.f, st.lift, st.sampleYd);
+                cleared = cleared && c.dense <= st.lift + 1e-4f && c.dense <= 0.15f;
+                if (field.exact)
+                    clearedExact = clearedExact && c.footprint <= 1e-3f && c.dense <= 1e-3f;
+                // Spread limit: within it, or a non-last piece at the minimum length, or a last piece too short
+                // to cut.
+                float const minLen = LineAspect(LineStepFor(Ground::MinLinePieceYd(shape) / shape.width)) * shape.width;
+                for (std::size_t k = 0; k < split.spread.size(); ++k)
+                {
+                    float const len = PieceExtent(pick.pieces[k]);
+                    bool const last = k + 1 == split.spread.size();
+                    if (split.spread[k] > st.maxSpreadYd + 1e-5f)
+                        spreadOk = spreadOk && split.minLengthStopped && (std::fabs(len - minLen) < 1e-3f
+                            || (last && len < 2.f * minLen + 1e-3f));
+                }
+                for (std::size_t k = 1; k < pick.pieces.size(); ++k)
+                    order = order && pick.pieces[k].forward > pick.pieces[k - 1].forward;
+                if (pick.pieces.size() > DefaultLineSteps(shape).size())
+                    ++splitCount;
+            }
+        }
+        CHECK(covered);
+        CHECK(cleared);
+        CHECK(clearedExact);
+        CHECK(spreadOk);
+        CHECK(order);
+        CHECK(splitCount >= 6);                 // the fields really cut lines
+
+        // Steep ground (0.5 rise per yd across a 6.67 yd lane): every piece is at the minimum length and flagged.
+        World steep{ [](float x, float) { return 0.5f * x; }, {} };
+        Shape lane = Shape::Line(40.f, 6.667f);
+        lane.zTolerance = 30.f;
+        Ground::LineSplit split;
+        VisualPick const pick = SplitPick(lane, Geo::Pose{ 0.f, 0.f, 0.f, 0.f }, steep, st, &split);
+        CHECK(split.minLengthStopped);
+        CHECK(CoversExactly(lane, pick));
+        CHECK(pick.pieces.size() >= 6 && pick.pieces.size() <= Ground::kMaxLinePieces + 1);
+        CHECK_NEAR(PieceExtent(pick.pieces.front()), 6.667f, 1e-3);      // aspect 1: one width
+        // A narrow line along the contour of the same slope never splits (0.5 yd across its 1 yd width).
+        Shape contour = Shape::Line(40.f, 1.f);
+        contour.zTolerance = 30.f;
+        VisualPick const along = SplitPick(contour, Geo::Pose{ 0.f, 0.f, 0.f, Geo::kPi * 0.5f }, steep, st, &split);
+        CHECK(along.pieces.size() == 1);
+
+        // Discs and cones: one height, the footprint's highest + lift, nothing above it.
+        for (Field const& field : fields)
+        {
+            World world{ field.f, {} };
+            for (Shape const& sh : { Shape::Circle(10.f), Shape::Donut(4.f, 12.f), Shape::Cone(90.f, 20.f),
+                Shape::Circle(3.f) })
+            {
+                Geo::Pose const pose{ 10.f, 2.f, field.f(10.f, 2.f), 0.4f };
+                Ground::Sampler<World> sampler(world, pose.z, 30.f);
+                VisualPick pick = PickVisual(sh, 0, MarkerLayer::Outline);
+                Ground::AssignZ(pick, sampler, pose, st, false);
+                Clearance const c = Check(pick, pose, field.f, st.lift, st.sampleYd);
+                CHECK(c.footprint <= 1e-4f);
+                CHECK(c.dense <= 0.15f);
+                CHECK(pick.pieces.front().z >= pose.z + st.lift - 1e-4f || sh.type == ShapeType::Donut);
+            }
+        }
+    }
+
+    void TestGroundBand()
+    {
+        Ground::Settings st;
+        Geo::Pose const pose{ 0.f, 0.f, 0.f, 0.f };
+        VisualPiece const disc = PickVisual(Shape::Circle(6.f), 0, MarkerLayer::Outline).pieces.front();
+
+        // A ceiling (a bridge deck, a roof) 4 yd up, inside the 6 yd band: never captures the marker.
+        World roofed{ Flat, [](float, float) { return 4.f; } };
+        Ground::Sampler<World> a(roofed, 0.f, 6.f);
+        CHECK_NEAR(Ground::PieceZ(a, pose, disc, st, false), st.lift, 1e-6);
+        Shape lane = Shape::Line(40.f, 6.f);
+        VisualPick const under = SplitPick(lane, pose, roofed, st);
+        CHECK(under.pieces.size() == 1 && std::fabs(under.pieces[0].z - st.lift) < 1e-6f);
+
+        // A hill rising above the first search start (2 yd) but inside the band: found from the band's top.
+        World hill{ [](float x, float) { return x > 3.f ? 3.5f : 0.f; }, {} };
+        Ground::Sampler<World> b(hill, 0.f, 6.f);
+        CHECK_NEAR(Ground::PieceZ(b, pose, disc, st, false), 3.5f + st.lift, 1e-6);
+
+        // Ground out of band (a cliff 10 yd down, a wall 9 yd up): ignored; nothing accepted -> the anchor z.
+        World pit{ [](float x, float) { return x > 2.f ? -10.f : 0.f; }, {} };
+        Ground::Sampler<World> c(pit, 0.f, 6.f);
+        CHECK_NEAR(Ground::PieceZ(c, pose, disc, st, false), st.lift, 1e-6);
+        World wall{ [](float, float) { return 9.f; }, {} };
+        Ground::Sampler<World> d(wall, 0.f, 6.f);
+        Ground::Heights h;
+        CHECK_NEAR(Ground::PieceZ(d, pose, disc, st, false, &h), st.lift, 1e-6);
+        CHECK(h.accepted == 0);
+
+        // The anchor standing on a bridge deck (z 4) over ground at 0 (out of a 3 yd band): the deck.
+        World deck{ Flat, [](float, float) { return 4.f; } };
+        Ground::Sampler<World> e(deck, 4.f, 3.f);
+        CHECK_NEAR(Ground::PieceZ(e, Geo::Pose{ 0.f, 0.f, 4.f, 0.f }, disc, st, false), 4.f + st.lift, 1e-6);
+
+        // The cheap follow set: a handful of queries, on a slope its highest point.
+        World slope{ Slope, {} };
+        Ground::Sampler<World> f(slope, 0.f, 30.f);
+        float const z = Ground::PieceZ(f, pose, disc, st, true);
+        CHECK(f.Queries() <= 14);
+        CHECK_NEAR(z, 0.12f * 6.f + st.lift, 1e-4);
+    }
+
+    void TestGroundFill()
+    {
+        Ground::Settings st;
+        World world{ StepField, {} };
+        Shape lane = Shape::Line(40.f, 4.f);
+        lane.zTolerance = 30.f;
+        Geo::Pose const pose{ 0.f, 0.f, 0.f, 0.f };
+        Ground::LineSplit split;
+        VisualPick const outline = SplitPick(lane, pose, world, st, &split);
+        CHECK(outline.pieces.size() >= 2);
+        bool ok = true;
+        for (float f : { 0.1f, 0.35f, 0.6f, 0.9f, 1.f })
+        {
+            VisualPick fill = PickFill(lane, 0, f, false, &split.steps);
+            CHECK(fill.pieces.size() == outline.pieces.size());
+            Ground::AssignFillZ(fill, outline);
+            for (std::size_t k = 0; k < fill.pieces.size(); ++k)
+            {
+                // Never below the ground it covers (the highest outline piece it overlaps); at the full fill,
+                // exactly its own outline piece's height.
+                if (fill.pieces[k].display)
+                {
+                    Geo::Pose const at = PieceWorldPose(pose, fill.pieces[k]);
+                    for (Ground::Point2 const& p : Dense(at, fill.pieces[k], 0.25f))
+                        ok = ok && StepField(p.x, p.y) <= fill.pieces[k].z - st.lift + 1e-4f;
+                }
+                if (f == 1.f)
+                    ok = ok && std::fabs(fill.pieces[k].z - outline.pieces[k].z) < 1e-5f;
+            }
+        }
+        CHECK(ok);
+        // The ExceptOne draw strip keeps working: the strip is split like any line and covers itself exactly.
+        Shape strip = lane;
+        Geo::Pose stripPose = pose;
+        ApplyDrawStrip(strip, stripPose, 1.f, 2.f);
+        VisualPick const sp = SplitPick(strip, stripPose, world, st, &split);
+        CHECK(CoversExactly(strip, sp) && sp.pieces.front().scale == 2.f);
+    }
 }
 
 int main()
@@ -1417,5 +1777,9 @@ int main()
     TestCrossingLayout();
     TestFillPacing();
     TestProjectileShrink();
+    TestGroundFlat();
+    TestGroundFields();
+    TestGroundBand();
+    TestGroundFill();
     return Report("math_test");
 }

@@ -40,6 +40,8 @@
 #include "Define.h"
 #include "Duration.h"
 #include "ObjectGuid.h"
+#include <string>
+#include <vector>
 
 class Creature;
 class Map;
@@ -60,6 +62,11 @@ namespace BossMechanics
         // before it enters the map (the first create packet carries them). display 0 keeps the template's invisible
         // model (a hidden resolve caster). nullptr when the summon fails.
         Creature* SummonMarker(Map* map, Position const& pos, Unit const* owner, uint32 display, float scale);
+
+        // `.mech markers`: one line per live marker within `range` yd of `from` (2D), nearest mechanic first: the
+        // mechanic, layer, decoded display, the scale and displays the creature really has, its pose, distance and
+        // bearing from `from`, and the drawn extent the server intends (a line's far end).
+        std::vector<std::string> DescribeMarkers(Map* map, Position const& from, float range);
     }
 }
 

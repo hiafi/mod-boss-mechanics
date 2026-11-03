@@ -2,7 +2,7 @@
  * mod-boss-mechanics: the `.mech` GM command (STAGE-M1-HANDOFF §3.10). SEC_GAMEMASTER, in game only.
  *
  *   .mech test <shape> <size> <ms> [key=value ...]
- *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7>
+ *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
  *   .mech palette <get-out color> <get-in color> [cross-lane color] [cell color]
  *                                                    (red yellow blue purple orange green teal white black)
  *
@@ -22,6 +22,7 @@
 #include "GameTime.h"
 #include "Map.h"
 #include "MechanicMarkerAI.h"
+#include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -463,6 +464,7 @@ public:
             { "ledger",   HandleLedger,   SEC_GAMEMASTER, Console::No },
             { "weakened", HandleWeakened, SEC_GAMEMASTER, Console::No },
             { "palette",  HandlePalette,  SEC_GAMEMASTER, Console::No },
+            { "markers",  HandleMarkers,  SEC_GAMEMASTER, Console::No },     // [range]
         };
         static ChatCommandTable commandTable =
         {
@@ -748,6 +750,19 @@ public:
                     m.persist ? " persistent" : "");
             });
         handler->PSendSysMessage("{} active mechanic(s) on this map.", shown);
+        return true;
+    }
+
+    // Every live marker within range (default 100 yd) of the GM, one line each: the server's side of what is drawn.
+    static bool HandleMarkers(ChatHandler* handler, Optional<float> range)
+    {
+        Player* gm = handler->GetPlayer();
+        float const r = range && *range > 0.f ? *range : 100.f;
+        std::vector<std::string> const lines = Telegraph::DescribeMarkers(gm->GetMap(), gm->GetPosition(), r);
+        for (std::string const& line : lines)
+            handler->PSendSysMessage("{}", line);
+        handler->PSendSysMessage("{} marker(s) within {:.0f} yd. GM at {:.2f} {:.2f} {:.2f} o {:.3f}.", lines.size(),
+            r, gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation());
         return true;
     }
 

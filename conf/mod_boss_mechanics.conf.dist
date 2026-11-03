@@ -52,11 +52,50 @@ BossMechanics.Telegraph.FollowIntervalMs = 200
 
 #
 #    BossMechanics.Telegraph.Lift
-#        Description: Height of a marker above its anchor, in yards (raise it if markers z-fight with the floor).
-#        Default:     0.1
+#        Description: Height of a marker above the highest ground sampled under it, in yards (GroundSnap = 1), or
+#                     above its anchor (GroundSnap = 0). Raise it if markers z-fight with the floor.
+#        Default:     0.3
 #
 
-BossMechanics.Telegraph.Lift = 0.1
+BossMechanics.Telegraph.Lift = 0.3
+
+#
+#    BossMechanics.Telegraph.GroundSnap
+#        Description: Place each marker on the ground under it instead of at its anchor's height. Every marker is a
+#                     flat quad: on rolling ground, the terrain rises above a quad placed at the anchor's height and
+#                     hides parts of it (notched lane edges, cells that look the wrong size). With the snap, each
+#                     marker samples the walkable floor under its footprint (terrain, buildings, bridges) about every
+#                     GroundSampleYd and stands Lift above the highest sample; a static line spanning more than
+#                     MaxPieceSpreadYd of height is cut into shorter end-to-end pieces, each at its own height.
+#                     Only floors within the shape's height tolerance of the anchor count, searched from just above
+#                     the anchor, so a bridge or ceiling overhead or a lower floor never captures a marker. Moving
+#                     markers (on units, on Spread/RunOut carriers) sample a few points on every follow step.
+#        Default:     1 - Enabled
+#                     0 - Disabled (markers at the anchor's height + Lift, the old behavior)
+#
+
+BossMechanics.Telegraph.GroundSnap = 1
+
+#
+#    BossMechanics.Telegraph.GroundSampleYd
+#        Description: Ground sample spacing under a marker, in yards (minimum 0.5). Smaller follows the ground more
+#                     closely and costs more height queries; big markers sample more coarsely on their own (at most
+#                     about 160 points per marker piece).
+#        Default:     2
+#
+
+BossMechanics.Telegraph.GroundSampleYd = 2
+
+#
+#    BossMechanics.Telegraph.MaxPieceSpreadYd
+#        Description: A static line marker whose ground rises and falls by more than this many yards under one piece
+#                     is cut into shorter end-to-end pieces, down to one line width (at least 2 yd), so each piece sits
+#                     close to its own ground. Discs, rings, cones and donuts are never cut (they stand at their
+#                     highest sample).
+#        Default:     0.75
+#
+
+BossMechanics.Telegraph.MaxPieceSpreadYd = 0.75
 
 #
 #    BossMechanics.Telegraph.ShrinkProjectileLines

@@ -10,16 +10,22 @@
 #include "GameTime.h"
 #include "Log.h"
 #include "Map.h"
+#include "MechanicGround.h"
 #include "MechanicMath.h"
 #include "MechanicRegistry.h"
 #include "MotionMaster.h"
+#include "MoveSpline.h"
 #include "MoveSplineInit.h"
+#include "StringFormat.h"
 #include "ObjectAccessor.h"
 #include "Pet.h"
 #include "Player.h"
 #include "TemporarySummon.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <iterator>
+#include <tuple>
 #include <unordered_map>
 
 namespace BossMechanics::Telegraph
@@ -41,6 +47,7 @@ namespace BossMechanics::Telegraph
             bool facingMatters = false; // cones and lines turn; discs, rings and donuts do not
             Geo::Pose sent;             // last commanded pose (lift included)
             bool followStarted = false; // FollowMode::MoveFollow issued
+            bool fillLayer = false;     // a fill marker (SyncFillSlot); else an outline (or a carrier ring)
         };
 
         struct MechanicState
@@ -55,6 +62,14 @@ namespace BossMechanics::Telegraph
             // host, keyed by the host.
             std::vector<ObjectGuid> fill;
             std::unordered_map<ObjectGuid, ObjectGuid> carrierFill;
+            // Ground snap (MechanicGround.h). lineSteps: a static line's terrain split, made once at the spawn (empty:
+            // the default layout). outline: the last outline pick with its heights (shape kinds, Stack/Soak), which
+            // the fill takes its heights from (AssignFillZ). zCache: a static anchor's piece heights by (display,
+            // forward), so a shrinking projectile line samples each new piece once.
+            LineSteps lineSteps;
+            VisualPick outline;
+            std::vector<VisualPiece> zCache;
+            uint32 groundQueries = 0;   // height queries made so far (logged once after the spawn under Debug)
         };
 
         // Per-map follow state; lives in Map::CustomData, freed with the map.
@@ -96,11 +111,60 @@ namespace BossMechanics::Telegraph
             return Position(p.x, p.y, p.z, Geo::Wrap2Pi(p.o));
         }
 
-        // Where a piece sits: `forward` yards along anchor facing + offset, facing that way (PieceWorldPose), lifted.
+        char const* MarkerShapeName(Ids::MarkerShape shape)
+        {
+            static char const* const names[] = { "disc", "ring", "timer-ring", "donut", "donut-outline", "cone",
+                "cone-outline", "dashed-ring", "line", "line-outline" };
+            std::size_t const i = static_cast<std::size_t>(shape);
+            return i < std::size(names) ? names[i] : "?";
+        }
+
+        // One line about a live marker (`.mech markers`, the Debug log): what the server set on the creature and what
+        // it means to draw. `from`: also the distance and bearing (absolute and relative to from's facing).
+        std::string DescribeMarker(Creature const* c, MarkerState const& s, Position const* from)
+        {
+            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(s.piece.display);
+            bool const line = parts.valid && Ids::IsLineShape(parts.shape);
+            float const k = line ? LineAspect(parts.step) : 1.f;
+            float const scale = c->GetObjectScale();
+            float const extent = k * scale;                 // the drawn length (line) or radius, at the real scale
+            float const o = c->GetOrientation();
+            std::string out = Acore::StringFormat("#{} {} {} disp {} ({} c{} step {}{}) scale {:.3f} (want {:.3f}) "
+                "native {} cur {} at {:.2f} {:.2f} {:.2f} o {:.3f}", s.mechanicId, s.fillLayer ? "fill" : "outline",
+                parts.valid ? MarkerShapeName(parts.shape) : "?", s.piece.display, parts.valid ? "ok" : "bad",
+                parts.color, parts.step, line ? Acore::StringFormat(" k {:.4f}", k) : std::string(), scale,
+                s.piece.scale, c->GetNativeDisplayId(), c->GetDisplayId(), c->GetPositionX(), c->GetPositionY(),
+                c->GetPositionZ(), o);
+            if (from)
+            {
+                float const dx = c->GetPositionX() - from->GetPositionX();
+                float const dy = c->GetPositionY() - from->GetPositionY();
+                float const bearing = std::atan2(dy, dx);
+                out += Acore::StringFormat(" | {:.2f} yd brg {:.1f} (rel {:+.1f}) deg", std::hypot(dx, dy),
+                    Geo::RadToDeg(Geo::Wrap2Pi(bearing)), Geo::RadToDeg(Geo::WrapPi(bearing - from->GetOrientation())));
+            }
+            if (line)
+                out += Acore::StringFormat(" | len {:.2f} x w {:.2f}, far end {:.2f} {:.2f}", extent, scale,
+                    c->GetPositionX() + std::cos(o) * extent, c->GetPositionY() + std::sin(o) * extent);
+            else
+                out += Acore::StringFormat(" | radius {:.2f}", extent);
+            if (c->movespline && !c->movespline->Finalized())
+                out += " | moving";
+            return out;
+        }
+
+        void LogMarker(char const* what, Creature const* c, MarkerState const& s)
+        {
+            if (GetConfig().debug)
+                LOG_INFO(kLog, "Marker {}: {}", what, DescribeMarker(c, s, nullptr));
+        }
+
+        // Where a piece sits: `forward` yards along anchor facing + offset, facing that way (PieceWorldPose), at its
+        // ground height (the ground snap; lift included) or lifted above the anchor.
         Geo::Pose PiecePose(Geo::Pose const& anchor, VisualPiece const& piece)
         {
             Geo::Pose p = PieceWorldPose(anchor, piece);
-            p.z += GetConfig().lift;
+            p.z = piece.hasZ ? piece.z : p.z + GetConfig().lift;
             return p;
         }
 
@@ -172,11 +236,169 @@ namespace BossMechanics::Telegraph
             return m.mine && m.mine->armed;
         }
 
-        // The outline pieces of a shape kind: the hitbox's outline, or an armed mine's dashed ring.
-        VisualPick OutlinePick(ActiveMechanic const& m, Shape const& shape)
+        // The outline pieces of a shape kind: the hitbox's outline (a line laid out by `lineSteps` when given), or an
+        // armed mine's dashed ring.
+        VisualPick OutlinePick(ActiveMechanic const& m, Shape const& shape, LineSteps const* lineSteps = nullptr)
         {
             return ArmedMine(m) ? PickArmedMine(shape, ColorIndex(m)) : PickVisual(shape, ColorIndex(m),
-                MarkerLayer::Outline);
+                MarkerLayer::Outline, lineSteps);
+        }
+
+        LineSteps const* LineStepsOf(MechanicState const& ms)
+        {
+            return ms.lineSteps.empty() ? nullptr : &ms.lineSteps;
+        }
+
+        // ------------------------------------------------------------------------------------------------------------
+        // Ground snap (MechanicGround.h)
+        // ------------------------------------------------------------------------------------------------------------
+
+        // The walkable floor at or below zFrom: terrain, WMOs (buildings, bridges) and gameobjects in the phase.
+        // Map::GetHeight takes the ADT height only when zFrom is at or above it, and casts the vmap ray down at most
+        // maxDown; INVALID_HEIGHT (or lower) when there is nothing.
+        struct MapProbe
+        {
+            Map const* map = nullptr;
+            uint32 phaseMask = PHASEMASK_NORMAL;
+
+            float operator()(float x, float y, float zFrom, float maxDown) const
+            {
+                return map->GetHeight(phaseMask, x, y, zFrom, true, maxDown);
+            }
+        };
+
+        using GroundSampler = Ground::Sampler<MapProbe const>;
+
+        Ground::Settings GroundSettings()
+        {
+            ModuleConfig const& cfg = GetConfig();
+            Ground::Settings st;
+            st.sampleYd = cfg.groundSampleYd;
+            st.maxSpreadYd = cfg.maxPieceSpreadYd;
+            st.lift = cfg.lift;
+            return st;
+        }
+
+        MapProbe ProbeFor(Map* map, ActiveMechanic const& m)
+        {
+            Unit* owner = FindUnit(map, m.owner);
+            return { map, owner ? owner->GetPhaseMask() : uint32(PHASEMASK_NORMAL) };
+        }
+
+        // The anchor itself moves (a unit anchor, a Line(from, to) with a unit end): its markers sample the cheap set.
+        bool AnchorMoves(ActiveMechanic const& m)
+        {
+            return m.anchor.IsUnit() || (m.to && m.to->IsUnit());
+        }
+
+        // A static anchor's piece height, sampled once per (display, forward) and cached.
+        void CachedPieceZ(MechanicState& ms, GroundSampler& sampler, Geo::Pose const& anchor, VisualPiece& piece)
+        {
+            for (VisualPiece const& c : ms.zCache)
+            {
+                if (c.display == piece.display && std::fabs(c.forward - piece.forward) < 1e-3f
+                    && std::fabs(c.scale - piece.scale) < 1e-3f)
+                {
+                    piece.hasZ = true;
+                    piece.z = c.z;
+                    return;
+                }
+            }
+            piece.z = Ground::PieceZ(sampler, anchor, piece, GroundSettings(), false);
+            piece.hasZ = true;
+            ms.zCache.push_back(piece);
+        }
+
+        // The outline of a shape kind with its heights. A static line is split by the terrain at its spawn (the
+        // layout is kept in ms.lineSteps for the fill and the mine swap); a static anchor samples each piece's whole
+        // footprint once (cached); a moving anchor samples the cheap set on every follow step. Off: no heights.
+        VisualPick PlacedOutline(Map* map, ActiveMechanic const& m, MechanicState& ms, Shape const& shape,
+            Geo::Pose const& pose, bool spawning)
+        {
+            ModuleConfig const& cfg = GetConfig();
+            if (!cfg.groundSnap)
+            {
+                ms.lineSteps.clear();
+                ms.outline = OutlinePick(m, shape);
+                return ms.outline;
+            }
+            MapProbe const probe = ProbeFor(map, m);
+            GroundSampler sampler(probe, pose.z, shape.zTolerance);
+            Ground::Settings const st = GroundSettings();
+            VisualPick pick;
+            if (spawning && !IsDynamic(m) && shape.type == ShapeType::Line && !ArmedMine(m))
+            {
+                Ground::LineSplit const split = Ground::SplitLine(shape, pose, sampler, st);
+                ms.lineSteps = split.steps;
+                pick = OutlinePick(m, shape, LineStepsOf(ms));
+                if (pick.pieces.size() == split.z.size())
+                {
+                    for (std::size_t k = 0; k < pick.pieces.size(); ++k)
+                    {
+                        pick.pieces[k].hasZ = true;
+                        pick.pieces[k].z = split.z[k];
+                    }
+                }
+                else
+                    Ground::AssignZ(pick, sampler, pose, st, false);
+                if (cfg.debug && split.minLengthStopped)
+                    LOG_INFO(kLog, "Mechanic {} (tag {}): line piece still spans more than {:.2f} yd of height at "
+                        "its minimum length", m.id, m.tag, st.maxSpreadYd);
+            }
+            else
+            {
+                pick = OutlinePick(m, shape, LineStepsOf(ms));
+                bool const moving = AnchorMoves(m);
+                for (VisualPiece& piece : pick.pieces)
+                {
+                    if (moving)
+                    {
+                        piece.z = Ground::PieceZ(sampler, pose, piece, st, true);
+                        piece.hasZ = true;
+                    }
+                    else
+                        CachedPieceZ(ms, sampler, pose, piece);
+                }
+            }
+            ms.groundQueries += sampler.Queries();
+            ms.outline = pick;
+            return pick;
+        }
+
+        // One disc-like piece on a point or a unit (Stack/Soak/Spot, carrier rings): its whole footprint (`full`) or
+        // the cheap set, in the band of the mechanic's own zTolerance.
+        void PlaceRound(Map* map, ActiveMechanic const& m, MechanicState& ms, Geo::Pose const& at, VisualPiece& piece,
+            bool full)
+        {
+            if (!GetConfig().groundSnap)
+                return;
+            MapProbe const probe = ProbeFor(map, m);
+            GroundSampler sampler(probe, at.z, m.shape.zTolerance);
+            piece.z = Ground::PieceZ(sampler, at, piece, GroundSettings(), !full);
+            piece.hasZ = true;
+            ms.groundQueries += sampler.Queries();
+        }
+
+        // A fill piece's height from the outline's (AssignFillZ); unchanged without one.
+        void FillZFrom(VisualPick const& outline, VisualPiece& piece)
+        {
+            if (outline.pieces.empty() || !outline.pieces.front().hasZ)
+                return;
+            VisualPick one;
+            one.pieces.push_back(piece);
+            Ground::AssignFillZ(one, outline);
+            piece.hasZ = one.pieces.front().hasZ;
+            piece.z = one.pieces.front().z;
+        }
+
+        // The height of the outline marker `guid` (a fill slot's outline), copied onto `piece`.
+        void FillZFromMarker(TelegraphState const& state, ObjectGuid const& guid, VisualPiece& piece)
+        {
+            auto it = state.markers.find(guid);
+            if (it == state.markers.end() || !it->second.piece.hasZ)
+                return;
+            piece.hasZ = true;
+            piece.z = it->second.piece.z;
         }
 
         // Spread: every carrier's ring gets a fill. RunOut From(Owner): only the owner's ring (the hitbox); the small
@@ -214,6 +436,7 @@ namespace BossMechanics::Telegraph
             s.piece = piece;
             s.facingMatters = facingMatters;
             s.sent = at;
+            LogMarker("spawn", marker, s);
             return marker;
         }
 
@@ -235,14 +458,18 @@ namespace BossMechanics::Telegraph
         // only swaps left are an outline whose shape changed (a shrinking projectile line) and a mine arming.
         void ApplyPiece(Creature* marker, MarkerState& s, VisualPiece const& piece)
         {
-            if (piece.display != s.piece.display)
+            bool const swap = piece.display != s.piece.display;
+            bool const resize = !swap && piece.scale != s.piece.scale;
+            if (swap)
             {
                 marker->SetDisplayId(piece.display, piece.scale);
                 marker->SetNativeDisplayId(piece.display);
             }
-            else if (piece.scale != s.piece.scale)
+            else if (resize)
                 marker->SetObjectScale(piece.scale);
             s.piece = piece;       // a new forward / facing offset: the caller moves the marker (MoveMarker)
+            if (swap || resize)
+                LogMarker(swap ? "display" : "scale", marker, s);
         }
 
         void DespawnMarker(Map* map, TelegraphState& state, ObjectGuid guid)
@@ -298,7 +525,8 @@ namespace BossMechanics::Telegraph
             s.sent = target;
         }
 
-        // Moves the fill markers of slots (shape kinds, Stack/Soak) with the anchor, like their outlines.
+        // Moves the fill markers of slots (shape kinds, Stack/Soak) with the anchor, like their outlines, at the
+        // heights of the outline they belong to (ms.outline).
         void MoveFillSlots(Map* map, TelegraphState& state, MechanicState const& ms, Geo::Pose const& pose,
             Unit* anchorUnit)
         {
@@ -308,8 +536,10 @@ namespace BossMechanics::Telegraph
                     continue;
                 Creature* marker = map->GetCreature(g);
                 auto it = state.markers.find(g);
-                if (marker && it != state.markers.end())
-                    MoveMarker(marker, it->second, PiecePose(pose, it->second.piece), anchorUnit);
+                if (!marker || it == state.markers.end())
+                    continue;
+                FillZFrom(ms.outline, it->second.piece);
+                MoveMarker(marker, it->second, PiecePose(pose, it->second.piece), anchorUnit);
             }
         }
 
@@ -319,7 +549,7 @@ namespace BossMechanics::Telegraph
         {
             Geo::Pose pose;
             Shape const shape = DrawnShape(reg, m, now, pose);
-            VisualPick const pick = OutlinePick(m, shape);
+            VisualPick const pick = PlacedOutline(map, m, state.mechanics[m.id], shape, pose, spawning);
             bool const facingMatters = shape.type == ShapeType::Cone || shape.type == ShapeType::Line;
             Unit* owner = FindUnit(map, m.owner);
             if (spawning)
@@ -407,14 +637,17 @@ namespace BossMechanics::Telegraph
                     byHost[it->second.follow] = g;
             }
 
+            MechanicState& ms = state.mechanics[m.id];
             std::vector<ObjectGuid> keep;
             for (CarrierHost const& h : hosts)
             {
                 ObjectGuid const& host = h.unit;
-                VisualPiece const& piece = h.piece;
                 Unit* unit = FindUnit(map, host);
                 if (!unit || !unit->IsAlive())
                     continue;
+                // Carriers move: the cheap set every follow step, on the carrier's own floor.
+                VisualPiece piece = h.piece;
+                PlaceRound(map, m, ms, PoseOf(unit->GetPosition()), piece, false);
                 auto found = byHost.find(host);
                 if (found != byHost.end())
                 {
@@ -422,6 +655,8 @@ namespace BossMechanics::Telegraph
                     auto st = state.markers.find(found->second);
                     if (marker && st != state.markers.end())
                     {
+                        st->second.piece.hasZ = piece.hasZ;
+                        st->second.piece.z = piece.z;
                         MoveMarker(marker, st->second, PiecePose(PoseOf(unit->GetPosition()), piece), unit);
                         keep.push_back(found->second);
                         byHost.erase(found);
@@ -439,18 +674,19 @@ namespace BossMechanics::Telegraph
                 DespawnMarker(map, state, g);
             m.markers = keep;
 
-            // Fill markers follow their host; a host without an outline any more loses its fill too.
-            MechanicState& ms = state.mechanics[m.id];
-            GuidSet hostsUp;
+            // Fill markers follow their host at its ring's height; a host without an outline any more loses its fill
+            // too.
+            std::unordered_map<ObjectGuid, ObjectGuid> hostsUp;     // host -> its outline marker
             for (ObjectGuid const& g : m.markers)
             {
                 auto it = state.markers.find(g);
                 if (it != state.markers.end())
-                    hostsUp.insert(it->second.follow);
+                    hostsUp[it->second.follow] = g;
             }
             for (auto it = ms.carrierFill.begin(); it != ms.carrierFill.end();)
             {
-                Unit* unit = hostsUp.count(it->first) ? FindUnit(map, it->first) : nullptr;
+                auto const up = hostsUp.find(it->first);
+                Unit* unit = up != hostsUp.end() ? FindUnit(map, it->first) : nullptr;
                 Creature* marker = map->GetCreature(it->second);
                 auto st = state.markers.find(it->second);
                 if (!unit || !marker || st == state.markers.end())
@@ -459,6 +695,7 @@ namespace BossMechanics::Telegraph
                     it = ms.carrierFill.erase(it);
                     continue;
                 }
+                FillZFromMarker(state, up->second, st->second.piece);
                 MoveMarker(marker, st->second, PiecePose(PoseOf(unit->GetPosition()), st->second.piece), unit);
                 ++it;
             }
@@ -489,16 +726,24 @@ namespace BossMechanics::Telegraph
         void SpawnGetIn(Map* map, TelegraphState& state, Registry const& reg, ActiveMechanic& m)
         {
             Unit* owner = FindUnit(map, m.owner);
-            VisualPick const pick = PickVisual(Shape::Circle(m.shape.radius), ColorIndex(m), MarkerLayer::Outline);
+            VisualPick pick = PickVisual(Shape::Circle(m.shape.radius), ColorIndex(m), MarkerLayer::Outline);
             if (pick.pieces.empty())
                 return;
+            MechanicState& ms = state.mechanics[m.id];
             if (m.kind == Kind::Spot)
             {
                 for (auto const& [player, spot] : m.spots)
-                    SpawnPiece(map, state, m, owner, PoseOf(spot), pick.pieces.front(), false);
+                {
+                    VisualPiece piece = pick.pieces.front();
+                    PlaceRound(map, m, ms, PoseOf(spot), piece, true);
+                    SpawnPiece(map, state, m, owner, PoseOf(spot), piece, false);
+                }
                 return;
             }
-            SpawnPiece(map, state, m, owner, reg.AnchorPose(m), pick.pieces.front(), false);
+            Geo::Pose const pose = reg.AnchorPose(m);
+            PlaceRound(map, m, ms, pose, pick.pieces.front(), true);
+            ms.outline = pick;
+            SpawnPiece(map, state, m, owner, pose, pick.pieces.front(), false);
         }
 
         void FollowGetIn(Map* map, TelegraphState& state, Registry const& reg, ActiveMechanic& m)
@@ -511,8 +756,11 @@ namespace BossMechanics::Telegraph
                 return;
             Geo::Pose const pose = reg.AnchorPose(m);
             Unit* anchorUnit = FindUnit(map, m.anchor.unit);
+            MechanicState& ms = state.mechanics[m.id];
+            PlaceRound(map, m, ms, pose, it->second.piece, false);
+            ms.outline.pieces.assign(1, it->second.piece);
             MoveMarker(marker, it->second, PiecePose(pose, it->second.piece), anchorUnit);
-            MoveFillSlots(map, state, state.mechanics[m.id], pose, anchorUnit);
+            MoveFillSlots(map, state, ms, pose, anchorUnit);
         }
 
         // One fill slot: spawn, resize, or despawn its marker so it draws `piece` (display 0: nothing). A line fill
@@ -531,16 +779,21 @@ namespace BossMechanics::Telegraph
                 if (!piece.display)
                     return;
                 if (Creature* spawned = SpawnMarkerAt(map, state, m, owner, anchor, piece, facingMatters, follow))
+                {
                     slot = spawned->GetGUID();
+                    state.markers[slot].fillLayer = true;
+                }
                 return;
             }
-            bool const moved = piece.forward != it->second.piece.forward;
+            bool const moved = piece.forward != it->second.piece.forward || piece.hasZ != it->second.piece.hasZ
+                || piece.z != it->second.piece.z;
             ApplyPiece(marker, it->second, piece);
             if (moved)
                 MoveMarker(marker, it->second, PiecePose(anchor, piece), nullptr, stepMs);
         }
 
-        // An armed mine's outline swaps to the dashed ring (one display swap when it arms; nothing after).
+        // An armed mine's outline swaps to the dashed ring (one display swap when it arms; nothing after), at the
+        // height its ring had.
         void SyncArmedMineOutline(Map* map, TelegraphState& state, ActiveMechanic const& m, Shape const& shape)
         {
             VisualPick const pick = OutlinePick(m, shape);
@@ -548,8 +801,12 @@ namespace BossMechanics::Telegraph
             {
                 Creature* marker = map->GetCreature(m.markers[i]);
                 auto it = state.markers.find(m.markers[i]);
-                if (marker && it != state.markers.end())
-                    ApplyPiece(marker, it->second, pick.pieces[i]);
+                if (!marker || it == state.markers.end())
+                    continue;
+                VisualPiece piece = pick.pieces[i];
+                piece.hasZ = it->second.piece.hasZ;
+                piece.z = it->second.piece.z;
+                ApplyPiece(marker, it->second, piece);
             }
         }
 
@@ -589,9 +846,9 @@ namespace BossMechanics::Telegraph
             uint8 const color = ColorIndex(m);
             Unit* owner = FindUnit(map, m.owner);
             bool const timer = cfg.fill && m.fillTimer;
-            auto pickFor = [&](Shape const& shape)
+            auto pickFor = [&](Shape const& shape, LineSteps const* lineSteps)
             {
-                VisualPick pick = PickFill(shape, color, f, live);
+                VisualPick pick = PickFill(shape, color, f, live, lineSteps);
                 if ((!timer && !live) || ArmedMine(m))
                     for (VisualPiece& piece : pick.pieces)
                         piece.display = 0;         // timer off: the fill only shows the live danger; armed mine: none
@@ -605,7 +862,8 @@ namespace BossMechanics::Telegraph
                 {
                     Geo::Pose pose;
                     Shape const shape = DrawnShape(reg, m, now, pose);
-                    VisualPick const pick = pickFor(shape);
+                    VisualPick pick = pickFor(shape, LineStepsOf(ms));
+                    Ground::AssignFillZ(pick, ms.outline);
                     bool const facingMatters = shape.type == ShapeType::Cone || shape.type == ShapeType::Line;
                     if (ArmedMine(m))
                         SyncArmedMineOutline(map, state, m, shape);
@@ -619,7 +877,7 @@ namespace BossMechanics::Telegraph
                 case Kind::Soak:
                 case Kind::Spot:
                 {
-                    VisualPick const pick = pickFor(Shape::Circle(m.shape.radius));
+                    VisualPick const pick = pickFor(Shape::Circle(m.shape.radius), nullptr);
                     if (pick.pieces.empty())
                         break;
                     std::vector<Geo::Pose> poses;
@@ -630,14 +888,19 @@ namespace BossMechanics::Telegraph
                         poses.push_back(reg.AnchorPose(m));
                     ResizeFillSlots(map, state, ms, poses.size());
                     for (std::size_t k = 0; k < poses.size(); ++k)
-                        SyncFillSlot(map, state, m, owner, ms.fill[k], poses[k], pick.pieces.front(), false,
-                            ObjectGuid::Empty, ms.fillStepMs);
+                    {
+                        VisualPiece piece = pick.pieces.front();
+                        if (k < m.markers.size())
+                            FillZFromMarker(state, m.markers[k], piece);    // slot k: outline k's height
+                        SyncFillSlot(map, state, m, owner, ms.fill[k], poses[k], piece, false, ObjectGuid::Empty,
+                            ms.fillStepMs);
+                    }
                     break;
                 }
                 case Kind::Spread:
                 case Kind::RunOut:
                 {
-                    VisualPick const pick = pickFor(Shape::Circle(m.shape.radius));
+                    VisualPick const pick = pickFor(Shape::Circle(m.shape.radius), nullptr);
                     if (pick.pieces.empty())
                         break;
                     GuidSet hosts;
@@ -650,8 +913,10 @@ namespace BossMechanics::Telegraph
                         if (!unit || !unit->IsAlive())
                             continue;
                         hosts.insert(it->second.follow);
+                        VisualPiece piece = pick.pieces.front();
+                        FillZFromMarker(state, g, piece);                    // the host ring's height
                         SyncFillSlot(map, state, m, owner, ms.carrierFill[it->second.follow],
-                            PoseOf(unit->GetPosition()), pick.pieces.front(), false, it->second.follow, ms.fillStepMs);
+                            PoseOf(unit->GetPosition()), piece, false, it->second.follow, ms.fillStepMs);
                     }
                     for (auto it = ms.carrierFill.begin(); it != ms.carrierFill.end();)
                     {
@@ -722,6 +987,41 @@ namespace BossMechanics::Telegraph
         return marker;
     }
 
+    std::vector<std::string> DescribeMarkers(Map* map, Position const& from, float range)
+    {
+        std::vector<std::string> lines;
+        if (!map)
+            return lines;
+        TelegraphState* state = map->CustomData.Get<TelegraphState>(kStateKey);
+        if (!state)
+            return lines;
+        struct Row
+        {
+            uint32 mechanicId;
+            bool fill;
+            float dist;
+            std::string text;
+        };
+        std::vector<Row> rows;
+        for (auto const& [guid, s] : state->markers)
+        {
+            Creature const* c = map->GetCreature(guid);
+            if (!c || !c->IsInWorld())
+                continue;
+            float const d = from.GetExactDist2d(c);
+            if (d > range)
+                continue;
+            rows.push_back({ s.mechanicId, s.fillLayer, d, DescribeMarker(c, s, &from) });
+        }
+        std::sort(rows.begin(), rows.end(), [](Row const& a, Row const& b)
+        {
+            return std::tie(a.mechanicId, a.fill, a.dist) < std::tie(b.mechanicId, b.fill, b.dist);
+        });
+        for (Row& r : rows)
+            lines.push_back(std::move(r.text));
+        return lines;
+    }
+
     void Spawn(Map* map, ActiveMechanic& m)
     {
         Registry const* reg = Registry::Get(map);
@@ -729,6 +1029,7 @@ namespace BossMechanics::Telegraph
             return;
         TelegraphState& state = StateOf(map);
         Milliseconds const now = GameTime::GetGameTimeMS();
+        auto const started = std::chrono::steady_clock::now();
         MechanicState& ms = state.mechanics[m.id];
         ms.nextFollowAt = now + Milliseconds(GetConfig().followIntervalMs);
         ms.fillStepMs = FillStepFor(*reg, m, now);
@@ -755,6 +1056,15 @@ namespace BossMechanics::Telegraph
         }
         if (FillApplies(m))
             StepFill(map, state, *reg, m, ms, now);
+
+        ModuleConfig const& cfg = GetConfig();
+        if (cfg.debug && cfg.groundSnap)
+        {
+            auto const us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()
+                - started).count();
+            LOG_INFO(kLog, "Mechanic {} ({} {}, tag {}): ground snap {} height queries, {} outline pieces, spawn {} us",
+                m.id, KindName(m.kind), ShapeName(m.shape.type), m.tag, ms.groundQueries, m.markers.size(), us);
+        }
     }
 
     void Update(Map* map, ActiveMechanic& m, Milliseconds now)

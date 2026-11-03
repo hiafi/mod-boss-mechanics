@@ -18,6 +18,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicRegistry.h/.cpp` | Data model, per-map registry (`Map::CustomData`), scheduler, ledger |
 | `src/MechanicGeometry.h` | Pure shape geometry (`Contains`, `Bounds`), shared by the resolve filter and bots |
 | `src/MechanicMath.h` | Pure timing and numbers: projectile, mine, lanes, threat, damage, visual pick, `Rules::` |
+| `src/MechanicGround.h` | Pure ground snap: footprint sampling, height band, terrain line split |
 | `src/MechanicProviders.h/.cpp` | Reference health, content key and role providers (stubs) |
 | `src/EngineBridge.h` | The seam between the registry and the engine glue |
 | `src/MechanicTelegraph.h/.cpp` | Marker creatures: outline + fill layers, spawn, size, fill timer, follow, despawn |
@@ -163,7 +164,8 @@ battlegrounds use the whole map.
 ## Telegraph markers
 
 One Mechanic Marker (300400) per marker piece, summoned with no summoner (so no `JustSummoned` and no zone combat),
-passive, never evading, faction/level/phase copied from the owner, gravity off, `Telegraph.Lift` above the anchor.
+passive, never evading, faction/level/phase copied from the owner, gravity off, `Telegraph.Lift` above the ground under
+it (see "Ground snap" below).
 Display and size come from the ladder pick (scale = radius / length / width; the marker shapes are 1 yd at scale 1)
 and are set **before** the creature enters the map: `SummonMarker` builds the TempSummon itself instead of calling
 `Map::SummonCreature`, whose `AddToMap` sends the create packet with the template display at scale 1. The client
@@ -237,6 +239,35 @@ resizes send one value update per fill marker per step (~7 per second), like a m
   for RunOut `From(Owner)`); a mechanic with no marker (`NoTelegraph`, Bait) casts from a hidden marker summoned for
   that cast only.
 
+### Ground snap (`BossMechanics.Telegraph.GroundSnap`)
+
+Every marker is a flat quad. Placed at the anchor's height, rolling ground rises above it in places and hides those
+parts (notched lane edges, chevrons, cells that look bigger or smaller than they are). With `GroundSnap = 1` (the
+default) each marker piece samples the floor under its footprint (`src/MechanicGround.h`) and stands `Lift` above the
+highest sample:
+
+- a line piece: a grid along its length and across its width about every `GroundSampleYd` (2 yd), ends and edges
+  included; a disc, ring or dashed ring: the centre plus rings out to the radius; a donut: rings from its drawn hole
+  out; a cone: the apex plus arcs. At most 160 points per piece (the step grows for big markers).
+- Heights come from `Map::GetHeight(phase, x, y, z, vmap, maxDown)` (terrain, WMOs, gameobjects). The first search
+  starts 2 yd above the anchor, so a bridge deck or a ceiling overhead is never seen; only when it finds no floor in
+  the band (the ground rises: a hill) does a second search start from the band's top. A floor counts only within the
+  shape's `zTolerance` (6 yd) of the anchor z, the hitbox's own band; nothing accepted: the anchor z.
+- A static line (point anchors, no shrinking projectile) whose ground spans more than `MaxPieceSpreadYd` (0.75 yd)
+  under one piece is cut into shorter end-to-end ladder pieces (`SplitLine`), each as long as the limit allows, none
+  but the last shorter than one width (at least 2 yd), each at its own height. The pieces abut exactly like the
+  default layout (only the last one overshoots, at the far end); flat ground gives the default layout. The fill keeps
+  one piece per outline piece, scaled from the source; a fill piece stands at the highest outline piece its own extent
+  overlaps (its own piece's height once full). Discs, rings, cones, donuts and dashed mine rings are never cut.
+- Moving markers (unit anchors, `Line(from, to)` with a unit end, Spread/RunOut carriers, Stack/Soak on a unit)
+  sample a cheap set on every follow step: a line piece's centreline at its ends, quarters and middle plus its two
+  edges, a disc's centre and six rim points, a cone's apex, middle and three arc points (up to twice that many queries
+  on rising ground).
+  Shrinking projectile lines are not cut; each piece samples its whole footprint once (cached per piece).
+- Cost: a 40 x 6.67 lane is about 110-120 height queries; `.mech test lanes 6 4000 count=3 cross=1` (6 lanes and 9
+  cells) about 900-1000 at the spawn, a 20 yd circle about 120. `GroundSampleYd = 3` roughly halves them. With
+  `Debug = 1` every mechanic logs its query count and spawn time once.
+
 ### Follow modes (`BossMechanics.Telegraph.FollowMode`)
 
 Markers (both layers) on a unit anchor, on a `Line(from, to)` with a unit end, and on Spread/RunOut carriers are moved
@@ -259,7 +290,7 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 
 ```
 .mech test <shape> <size> <ms> [key=value ...]
-.mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7>
+.mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
 .mech palette <out color> <in color> [cross-lane color] [cell color]
 ```
 
@@ -301,6 +332,11 @@ repeats are registered from the test owner's scheduler), `scatter=` (0 yd: rando
 resolve hits). Keys that do not fit the shape are listed back as ignored.
 
 - `.mech list`: id, kind, shape, color, tag, time to resolve and to expiry, marker count.
+- `.mech markers [range]`: every live marker within range (100 yd) of the GM, one line each: mechanic id, layer
+  (outline / fill), display decoded (shape, color, ladder step, line aspect k), the scale the creature really has and
+  the one the server asked for, native and current display, x y z o, distance and bearing from the GM (absolute and
+  relative to the GM's facing), and the drawn extent the server intends (a line's length k x scale and its far end).
+  With `Debug = 1` the same line is logged for every marker spawn, display swap and scale change.
 - `.mech ledger [name]`: per encounter, per-player failure counts by tag; with a name, also that player's last ten
   events.
 - `.mech weakened n`: sets n stacks on the selected player (yourself when none), for the threat check.
@@ -323,7 +359,10 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 | `BossMechanics.ReferenceHealth.Rows` | `20:1000:1500 60:5000:8000` | stub `level:nonTank:tank` rows |
 | `BossMechanics.Telegraph.FollowMode` | 0 | 0 spline step, 1 MoveFollow, 2 teleport |
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
-| `BossMechanics.Telegraph.Lift` | 0.1 | marker height above the anchor (yd) |
+| `BossMechanics.Telegraph.Lift` | 0.3 | height above the highest ground sample (yd; GroundSnap 0: above the anchor) |
+| `BossMechanics.Telegraph.GroundSnap` | 1 | 0: markers at the anchor's height + Lift (the old behavior) |
+| `BossMechanics.Telegraph.GroundSampleYd` | 2 | ground sample spacing under a marker (min 0.5) |
+| `BossMechanics.Telegraph.MaxPieceSpreadYd` | 0.75 | a static line piece spanning more height than this is cut |
 | `BossMechanics.Telegraph.ShrinkProjectileLines` | 1 | shorten projectile markers behind the projectile |
 | `BossMechanics.Telegraph.Fill` | 1 | 0: no fill timer (the fill still shows a live zone; mines unchanged) |
 | `BossMechanics.Telegraph.FillStepMs` | 150 | longest fill step (min 50) |
@@ -379,7 +418,7 @@ copy of the resolve spell bound to `spell_boss_mechanics_resolve` and passes it 
 | --- | --- | --- |
 | S1 | A disc shows its texture through the display's skin | rerun the marker asset script with `--no-skins` |
 | S2 | Blend 2 paints over the floor (not additive glow) | try blend 3 (alpha key) |
-| S3 | Marker on the floor: no z-fighting, not hidden by bumps | raise `Telegraph.Lift`; else flag 0x8 |
+| S3 | Marker on the floor: no z-fighting, not hidden by bumps | `Telegraph.GroundSnap`, `GroundSampleYd`, `Lift` |
 | S4 | `circle 2`, `circle 10`, `circle 40` match 2/10/40 yd (`.gps` at the edge) | fix the model radius |
 | S8 | The outline appears at full size at once; the fill grows and meets it as the hit lands | `Telegraph.FillLeadMs` |
 | S5 | `cone 20 3000` points where the GM faces | flip the texture orientation |

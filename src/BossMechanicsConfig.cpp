@@ -53,7 +53,11 @@ namespace BossMechanics
 
         c.followIntervalMs = std::max<uint32>(50, sConfigMgr->GetOption<uint32>(
             "BossMechanics.Telegraph.FollowIntervalMs", 200));
-        c.lift = sConfigMgr->GetOption<float>("BossMechanics.Telegraph.Lift", 0.1f);
+        c.lift = sConfigMgr->GetOption<float>("BossMechanics.Telegraph.Lift", 0.3f);
+        c.groundSnap = sConfigMgr->GetOption<bool>("BossMechanics.Telegraph.GroundSnap", true);
+        c.groundSampleYd = std::max(0.5f, sConfigMgr->GetOption<float>("BossMechanics.Telegraph.GroundSampleYd", 2.f));
+        c.maxPieceSpreadYd = std::max(0.f, sConfigMgr->GetOption<float>("BossMechanics.Telegraph.MaxPieceSpreadYd",
+            0.75f));
         c.shrinkProjectileLines = sConfigMgr->GetOption<bool>("BossMechanics.Telegraph.ShrinkProjectileLines", true);
         c.fill = sConfigMgr->GetOption<bool>("BossMechanics.Telegraph.Fill", true);
         c.fillStepMs = std::max<uint32>(50, sConfigMgr->GetOption<uint32>("BossMechanics.Telegraph.FillStepMs", 150));

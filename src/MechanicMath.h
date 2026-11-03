@@ -587,13 +587,16 @@ namespace BossMechanics
 
     // One marker creature: display id, object scale, facing relative to the anchor pose's facing (radians), and its
     // spawn point `forward` yards from the anchor along (anchor facing + facingOffset). display 0: nothing in this
-    // slot (PickFill: a fill piece that has not started yet).
+    // slot (PickFill: a fill piece that has not started yet). hasZ: the marker stands at world height z (the ground
+    // snap, MechanicGround.h; the lift is included) instead of the anchor's z + BossMechanics.Telegraph.Lift.
     struct VisualPiece
     {
         std::uint32_t display = 0;
         float scale = 1.f;
         float facingOffset = 0.f;
         float forward = 0.f;
+        bool hasZ = false;
+        float z = 0.f;
     };
 
     struct VisualPick
@@ -658,10 +661,58 @@ namespace BossMechanics
         return best;
     }
 
+    // A line's pieces, source end first, as ladder steps (LineAspect(step) * width long each). Every piece but the last
+    // is an exact ladder length, so the pieces abut with no overlap; the last one covers the rest, rounded up (the only
+    // overshoot is at the far end).
+    using LineSteps = std::vector<std::uint32_t>;
+
+    // The default layout (M1-FIX-LINES): full pieces at the top step (exactly kLineMaxAspect = 64 widths), then one
+    // last piece rounded up to cover the rest. Most lines are one piece. Empty for a line with nothing to draw.
+    inline LineSteps DefaultLineSteps(Shape const& shape)
+    {
+        LineSteps steps;
+        float const drawn = shape.length - shape.excludeStart;
+        float const w = shape.width;
+        if (shape.type != ShapeType::Line || drawn <= 0.f || w <= 0.f)
+            return steps;
+        float const full = Ids::kLineMaxAspect * w;
+        std::uint32_t const n = std::max<std::uint32_t>(1,
+            static_cast<std::uint32_t>(std::ceil(drawn / full - 1e-4f)));
+        steps.assign(n - 1, Ids::kLineSteps - 1);
+        steps.push_back(LineStepFor((drawn - (n - 1) * full) / w));
+        return steps;
+    }
+
+    // Do these steps lay the line out the LineSteps way: every piece but the last ends short of the line's end, and
+    // the last one reaches it? A layout made for another shape (or none) fails, and PickVisual draws the default.
+    inline bool LineStepsCover(Shape const& shape, LineSteps const& steps)
+    {
+        float const w = shape.width;
+        if (steps.empty() || shape.type != ShapeType::Line || w <= 0.f)
+            return false;
+        float at = shape.excludeStart;
+        for (std::size_t k = 0; k < steps.size(); ++k)
+        {
+            if (steps[k] >= Ids::kLineSteps)
+                return false;
+            bool const last = k + 1 == steps.size();
+            float const end = at + LineAspect(steps[k]) * w;
+            if (!last && end >= shape.length - 1e-4f)
+                return false;
+            if (last && end < shape.length - 1e-3f)
+                return false;
+            at = end;
+        }
+        return true;
+    }
+
     // The full-size pieces of one layer. Ladder rounding is the same for both layers (the outline and the full fill
     // draw the same geometry): cones round the angle up, donuts the ratio down, lines the length up. Every shape exists
-    // in every color (Ids::MarkerDisplay); a color index past the palette draws the last color.
-    inline VisualPick PickVisual(Shape const& shape, std::uint8_t color, MarkerLayer layer)
+    // in every color (Ids::MarkerDisplay); a color index past the palette draws the last color. `lineSteps` (lines
+    // only): a layout of the line's pieces (the ground snap's terrain split); null, or one that does not cover the
+    // shape, draws DefaultLineSteps.
+    inline VisualPick PickVisual(Shape const& shape, std::uint8_t color, MarkerLayer layer,
+        LineSteps const* lineSteps = nullptr)
     {
         using Ids::MarkerShape;
         VisualPick pick;
@@ -725,26 +776,23 @@ namespace BossMechanics
             }
             case ShapeType::Line:
             {
-                // End to end (M1-FIX-LINES): full pieces at the top step (exactly kLineMaxAspect = 64 widths, so they
-                // abut with no overlap), then one last piece rounded up to cover the rest. The only overshoot is at
-                // the far end (at most one ladder step of the last piece). Most lines are one piece.
+                // End to end (M1-FIX-LINES): see LineSteps. Each piece starts where the one before it ends.
                 float const drawn = shape.length - shape.excludeStart;
                 float const w = shape.width;
                 if (drawn <= 0.f || w <= 0.f)
                     break;
-                float const full = Ids::kLineMaxAspect * w;
-                std::uint32_t const n = std::max<std::uint32_t>(1,
-                    static_cast<std::uint32_t>(std::ceil(drawn / full - 1e-4f)));
+                LineSteps const steps = lineSteps && LineStepsCover(shape, *lineSteps) ? *lineSteps
+                    : DefaultLineSteps(shape);
                 MarkerShape const line = outline ? MarkerShape::LineOutline : MarkerShape::Line;
                 float const facing = Geo::DegToRad(shape.facingOffsetDeg);
-                for (std::uint32_t k = 0; k + 1 < n; ++k)
-                    pick.pieces.push_back({ display(line, Ids::kLineSteps - 1), w, facing,
-                        shape.excludeStart + k * full });
-                float const rest = drawn - (n - 1) * full;
-                if (n == 1 && rest < Ids::kLineMinAspect * w * (1.f - 1e-5f))
+                float at = shape.excludeStart;
+                for (std::uint32_t step : steps)
+                {
+                    pick.pieces.push_back({ display(line, step), w, facing, at });
+                    at += LineAspect(step) * w;
+                }
+                if (steps.size() == 1 && drawn < Ids::kLineMinAspect * w * (1.f - 1e-5f))
                     pick.clamped = true;                    // shorter than the ladder's first step: drawn longer
-                pick.pieces.push_back({ display(line, LineStepFor(rest / w)), w, facing,
-                    shape.excludeStart + (n - 1) * full });
                 break;
             }
         }
@@ -841,9 +889,10 @@ namespace BossMechanics
     //   piece k standing f * (start_k - source) from the source. It starts as a sliver at the source and grows longer
     //   and wider together; the line is convex, so the copy stays inside the outline.
     // Pieces smaller than Rules::kFillMinScaleYd are left out (display 0).
-    inline VisualPick PickFill(Shape const& shape, std::uint8_t color, float f, bool active)
+    inline VisualPick PickFill(Shape const& shape, std::uint8_t color, float f, bool active,
+        LineSteps const* lineSteps = nullptr)
     {
-        VisualPick pick = PickVisual(shape, color, MarkerLayer::Fill);
+        VisualPick pick = PickVisual(shape, color, MarkerLayer::Fill, lineSteps);
         if (active || pick.pieces.empty())
             return pick;
         f = std::clamp(f, 0.f, 1.f);
