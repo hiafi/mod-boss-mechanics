@@ -297,7 +297,8 @@ BossMechanics.Bots.MaxCandidates = 400
 
 #
 #    BossMechanics.Bots.MaxPathChecks
-#        Description: Most navmesh paths one solve computes (1-64); twice this when it retries with mine grace.
+#        Description: Most navmesh paths one solve pass computes (1-64). A solve runs up to three passes (clean,
+#                     clean at a reduced 0.25 yd margin, mine grace) plus one for a fallback.
 #        Default:     8
 #
 
@@ -358,8 +359,9 @@ BossMechanics.Bots.FacingSlackDeg = 15
 
 #
 #    BossMechanics.Bots.Debug
-#        Description: Log one line per bot solve (category module.bossmechanics.bots) and check the bots' view of
-#                     each hazard against the registry's own timing.
+#        Description: Log one line per bot solve (category module.bossmechanics.bots) with why candidates and
+#                     navmesh calls failed, sum those counts in .mech bots, and check the bots' view of each hazard
+#                     against the registry's own timing.
 #        Default:     0 - Disabled
 #                     1 - Enabled
 #

@@ -4,13 +4,18 @@
 
 #include "MechanicBotView.h"
 #include "BossMechanicsConfig.h"
+#include "DetourNavMeshQuery.h"
 #include "Log.h"
+#include "Map.h"
+#include "MapDefines.h"
 #include "MechanicRegistry.h"
 #include "MoveSpline.h"
 #include "ObjectAccessor.h"
 #include "PathGenerator.h"
 #include "Player.h"
+#include "StringFormat.h"
 #include "Unit.h"
+#include "WorldSession.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -23,8 +28,17 @@ namespace BossMechanics
     {
         constexpr char const* kLog = "module.bossmechanics.bots";
 
-        // A path whose navmesh end lands farther than this from the asked point does not reach it.
-        constexpr float kPathEndToleranceYd = 1.f;
+        // A path whose end lands farther than this from the asked point goes somewhere else (the solver validates
+        // and scores the real end of every accepted path, so this only keeps a candidate from turning into another).
+        constexpr float kMaxEndShiftYd = 3.f;
+        // Debug: an accepted end this far from the asked point counts as shifted.
+        constexpr float kShiftedYd = 0.5f;
+        // Walkability probe: a walkable polygon must lie within this horizontally (the snap distance), and within
+        // kProbeUpYd vertically (ramps and stairs: the candidates carry the bot's z; PathGenerator's first search box
+        // is as tall).
+        constexpr float kProbeSnapYd = 1.f;
+        constexpr float kProbeUpYd = 5.f;
+        constexpr float kProbeMovedYd = 0.05f;
         // A path whose first point is this close to `from` already starts there.
         constexpr float kPathStartToleranceYd = 0.1f;
         // Drift: the anchor is assumed to move for at most this long before the hazard's first window.
@@ -284,6 +298,7 @@ namespace BossMechanics
             h.id = m.id;
             h.shape = shape;
             h.marginYd = margin;
+            h.driftYd = drift;
             h.timing = timing;
             h.poses.push_back(pose);
             bool const turns = m.anchor.IsUnit() && m.anchor.followFacing && !m.to && slackRad > 0.f
@@ -323,30 +338,149 @@ namespace BossMechanics
         return info;
     }
 
+    NavOracle::NavOracle(Unit const* bot, NavOracleStats* stats) : _bot(bot), _stats(stats)
+    {
+        // The polygon filter PathGenerator::CreateFilter gives a bot (a headless session): ground and water, no
+        // lava, slime or steep slopes. Other players: everything walkable.
+        Player const* player = bot ? bot->ToPlayer() : nullptr;
+        if (player && player->GetSession() && player->GetSession()->IsHeadless())
+        {
+            _includeFlags = NAV_GROUND | NAV_WATER;
+            _excludeFlags = NAV_MAGMA | NAV_SLIME | NAV_GROUND_STEEP;
+        }
+        else
+            _includeFlags = NAV_GROUND | NAV_GROUND_STEEP | NAV_WATER | NAV_MAGMA;
+    }
+
+    bool NavOracle::Walkable(Geo::Vec3& p)
+    {
+        if (_stats)
+            ++_stats->probes;
+        if (!_bot || !_bot->IsInWorld())
+            return true;    // Find decides (and fails)
+        dtNavMeshQuery const* query = _bot->GetMap()->GetMapCollisionData().GetMMapData().GetNavMeshQuery();
+        if (!query)
+        {
+            if (_stats)
+                ++_stats->probeNoMesh;
+            return true;
+        }
+
+        dtQueryFilter filter;
+        filter.setIncludeFlags(_includeFlags);
+        filter.setExcludeFlags(_excludeFlags);
+        // Detour works in (y, z, x).
+        float const center[3] = { p.y, p.z, p.x };
+        float const extents[3] = { kProbeSnapYd, kProbeUpYd, kProbeSnapYd };
+        float nearest[3] = { 0.f, 0.f, 0.f };
+        dtPolyRef ref = 0;
+        if (dtStatusFailed(query->findNearestPoly(center, extents, &filter, &ref, nearest)) || !ref
+            || Geo::Dist2d(nearest[2], nearest[0], p.x, p.y) > kProbeSnapYd)
+        {
+            if (_stats)
+                ++_stats->probeOff;
+            return false;
+        }
+        Geo::Vec3 const snapped{ nearest[2], nearest[0], nearest[1] };
+        if (_stats && (Geo::Dist2d(snapped.x, snapped.y, p.x, p.y) > kProbeMovedYd
+            || std::fabs(snapped.z - p.z) > kProbeMovedYd))
+            ++_stats->probeSnapped;
+        p = snapped;
+        return true;
+    }
+
     bool NavOracle::Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out)
     {
         ++_calls;
+        if (_stats)
+            ++_stats->calls;
         out.clear();
         if (!_bot || !_bot->IsInWorld())
             return false;
 
         PathGenerator path(_bot);
         path.CalculatePath(from.x, from.y, from.z, to.x, to.y, to.z, false);
-        if (path.GetPathType() != PATHFIND_NORMAL)
-            return false;
-        Movement::PointsArray const& points = path.GetPath();
-        if (points.empty())
-            return false;
-        G3D::Vector3 const& end = points.back();
-        if (Geo::Dist2d(end.x, end.y, to.x, to.y) > kPathEndToleranceYd)
-            return false;
+        uint32 const type = path.GetPathType();
+        uint32* reject = nullptr;
+        if (type & PATHFIND_NOPATH)
+            reject = _stats ? &_stats->noPath : nullptr;
+        else if (type & PATHFIND_NOT_USING_PATH)
+            reject = _stats ? &_stats->notUsingPath : nullptr;
+        else if (type & PATHFIND_SHORT)
+            reject = _stats ? &_stats->tooLong : nullptr;
+        else if (type & PATHFIND_SHORTCUT)
+            reject = _stats ? &_stats->shortcut : nullptr;
+        else if (type & PATHFIND_FARFROMPOLY_START)
+            reject = _stats ? &_stats->farStart : nullptr;
+        else if (!(type & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE)))
+            reject = _stats ? &_stats->otherType : nullptr;
+        else
+        {
+            Movement::PointsArray const& points = path.GetPath();
+            if (points.empty())
+                reject = _stats ? &_stats->empty : nullptr;
+            else if (Geo::Dist2d(points.back().x, points.back().y, to.x, to.y) > kMaxEndShiftYd)
+                reject = _stats ? &_stats->endFar : nullptr;
+            else
+            {
+                out.reserve(points.size() + 1);
+                G3D::Vector3 const& first = points.front();
+                if (Geo::Dist2d(first.x, first.y, from.x, from.y) > kPathStartToleranceYd)
+                    out.push_back(from);
+                for (G3D::Vector3 const& p : points)
+                    out.push_back({ p.x, p.y, p.z });
+                if (_stats)
+                {
+                    ++_stats->ok;
+                    if (type & PATHFIND_INCOMPLETE)
+                        ++_stats->okIncomplete;
+                    if (type & PATHFIND_FARFROMPOLY_END)
+                        ++_stats->farEnd;
+                    if (Geo::Dist2d(points.back().x, points.back().y, to.x, to.y) > kShiftedYd)
+                        ++_stats->okShifted;
+                }
+                return true;
+            }
+        }
+        if (reject)
+            ++*reject;
+        return false;
+    }
 
-        out.reserve(points.size() + 1);
-        G3D::Vector3 const& first = points.front();
-        if (Geo::Dist2d(first.x, first.y, from.x, from.y) > kPathStartToleranceYd)
-            out.push_back(from);
-        for (G3D::Vector3 const& p : points)
-            out.push_back({ p.x, p.y, p.z });
-        return true;
+    void NavOracleStats::Add(NavOracleStats const& o)
+    {
+        probes += o.probes;
+        probeNoMesh += o.probeNoMesh;
+        probeOff += o.probeOff;
+        probeSnapped += o.probeSnapped;
+        calls += o.calls;
+        ok += o.ok;
+        okIncomplete += o.okIncomplete;
+        okShifted += o.okShifted;
+        noPath += o.noPath;
+        notUsingPath += o.notUsingPath;
+        tooLong += o.tooLong;
+        shortcut += o.shortcut;
+        farStart += o.farStart;
+        otherType += o.otherType;
+        empty += o.empty;
+        endFar += o.endFar;
+        farEnd += o.farEnd;
+    }
+
+    std::string FormatNavStats(NavOracleStats const& s)
+    {
+        return Acore::StringFormat("probes {} (no mesh {}, off {}, snapped {}), paths {} (ok {}, incomplete {}, "
+            "end moved {}, far end {}; no path {}, not using path {}, too long {}, shortcut {}, far start {}, "
+            "other {}, empty {}, end > {} yd {})", s.probes, s.probeNoMesh, s.probeOff, s.probeSnapped, s.calls, s.ok,
+            s.okIncomplete, s.okShifted, s.farEnd, s.noPath, s.notUsingPath, s.tooLong, s.shortcut, s.farStart,
+            s.otherType, s.empty, kMaxEndShiftYd, s.endFar);
+    }
+
+    std::string FormatSolveStats(Solver::SolveStats const& s)
+    {
+        return Acore::StringFormat("kept {}, probes {} (off {}, snapped {}), no path {}, end unsafe {}, crosses start "
+            "{} / other {}, budget stops {}", s.kept, s.probes, s.offMesh, s.snapped, s.noPath, s.endUnsafe,
+            s.crossStart, s.crossOther, s.budgetStops);
     }
 }

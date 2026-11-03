@@ -421,11 +421,14 @@ while Idle on a map with mechanics) and runs the mode machine:
 - **Watch**: relevant hazards; the spot and the current motion are safe. Spot unsafe -> solve -> Escape (while the
   solve waits for the rate limit or the per-map budget, the lock already acts as in Escape). Only the bot's current
   spline (follow, chase) crosses a hazard -> re-route: a solve with the spline's end as the role anchor and without
-  the bot's own spot; a clean target at least 1 yd closer to that end -> Escape there, then straight back to Watch,
-  where the stock motion resumes (and is re-routed again if it still crosses). No clean way around, or the spline's
-  end is itself unsafe -> Hold where it stands (until the hazard ends, at most `HoldCapMs`).
-- **Escape**: walking the solver's path. Within 0.6 yd, or the move we sent ended short at a spot that is safe
-  anyway -> Hold. Path or target turned unsafe -> re-solve. No progress (0.5 yd) for 500 ms since the escape began or
+  the bot's own spot, offered only targets at least 1 yd closer to that end (so a narrow gap is tried at the reduced
+  margin instead of settling for a spot that makes no progress); a clean target -> Escape there, then straight back to
+  Watch, where the stock motion resumes (and is re-routed again if it still crosses). No clean way around, or the
+  spline's end is itself unsafe -> Hold where it stands (until the hazard ends, at most `HoldCapMs`).
+- **Escape**: walking the solver's path. Within 0.6 yd at a spot that is safe (or once our spline has ended), or the
+  move we sent ended short at a spot that is safe anyway -> Hold. (An exit lies 0.5 yd beyond the margin, so a bot
+  stopped 0.6 yd short would still stand in it.) Path or target turned unsafe -> re-solve; a plan from the
+  reduced-margin pass is re-checked at the reduced margins. No progress (0.5 yd) for 500 ms since the escape began or
   the bot last moved (re-sends do not restart this clock; refused sends count as no progress) -> re-solve; the same
   target again -> released. Rooted, stunned or polymorphed with no progress -> released until it can move. One escape
   past 2 x its planned travel + 1.5 s, or an unbroken run of escapes past 10 s -> released.
@@ -438,6 +441,29 @@ Solves are rate-limited by `MinSolveIntervalMs`, except the first after a regist
 update across all bots of a map (the rest solve on the next update). Our move clears the pending wait of the last move
 (ours or a foreign `MOVEMENT_FORCED` hold) so the escape is never refused; a move to the same target is re-sent at
 most every 250 ms (after a refused send, a partial path or a spline that ended short).
+
+### Solver
+
+Candidates (the bot's spot, exits, rings, the role ring, lane-frame points) are kept when their straight-line arrival
+is safe at the full margin, then validated in score order, in passes that each spend at most `MaxPathChecks` new
+navmesh path calls (paths found earlier are reused):
+
+1. a clean path at the full margin (`SafetyMarginYd`) -> Move;
+2. a clean path at the reduced margin (each hazard's anchor drift + 0.25 yd; `SafetyMarginMs` stays): the bot slips
+   through a gap narrower than two full margins, between two mines for instance. The target itself is still safe at
+   the full margin, so the bot never holds inside a margin -> Move (counted as "reduced margin");
+3. only when an armed or arming mine allows grace: a grace crossing at the full margin -> GraceMove;
+4. Fallback: the candidate with the fewest hazards hot from its arrival, then the least time inside the exact hitboxes
+   (no margin) on its straight line, then the nearest; candidates known to have no path are skipped and the first
+   walkable one down that ranking is taken. No path to it -> NoPath, straight to the nearest exit.
+
+Within a pass, candidates whose straight line passes the path check are tried first; the others (their straight line
+crosses a hazard while it is hot, the common case under a barrage) only when none of the first validated. Before a
+candidate costs a path call, a navmesh probe (one Detour `findNearestPoly` within 1 yd around it and 5 yd up and down,
+with the bot's polygon filter) drops it when no walkable polygon lies within 1 yd (inside a wall or a pillar), or
+snaps it onto the navmesh and checks it again where it landed (up to 64 probes per solve). The path call accepts
+`PATHFIND_NORMAL` and `PATHFIND_INCOMPLETE` paths that end within 3 yd of the asked point; the solver validates and
+scores the real end, never the asked point.
 
 ### Gate
 
@@ -491,14 +517,14 @@ named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `s
 | `GraceMarginMs` | 250 | armed-mine crossing budget = grace - this |
 | `HorizonMs` | 10000 | windows starting later are ignored |
 | `HoldCapMs` | 3000 | longest hold for persistent and endless hazards |
-| `MaxCandidates` / `MaxPathChecks` | 400 / 8 | per solve (path checks x2 with the grace pass, +1 fallback) |
+| `MaxCandidates` / `MaxPathChecks` | 400 / 8 | per solve / path calls per pass (up to 3 passes, +1 fallback) |
 | `GridStepYd` | 2.0 | lane-frame grid |
 | `MinSolveIntervalMs` | 150 | per bot, except the first solve after a registry change |
 | `MovingAnchorRecheckMs` | 250 | re-view cadence while a hazard is unit-anchored |
 | `RoleSlackMs` | 1000 | out of the role band this long while holding -> release the hold |
 | `RangedDistanceYd` | 22 | ranged and healer band [8, this + 6] (melee: melee range - 0.5) |
 | `FacingSlackDeg` | 15 | turning cones and lines are checked at +-this |
-| `Debug` | 0 | one log line per solve, and the view self-check (`module.bossmechanics.bots`) |
+| `Debug` | 0 | one log line per solve with why it failed, the view self-check (`module.bossmechanics.bots`) |
 | `Fallibility.Enable` | 0 | D1 human-like mistakes, deterministic under `Fallibility.Seed` (0 = random per load) |
 
 Fallibility keys (all off unless `Enable`): `ReactionMs` 350 + `JitterMs` 0-250 per bot before a mechanic is seen,
@@ -512,14 +538,29 @@ replays the same perception for the same mechanic id, not for a second run of `.
 ### `.mech bots [all]`
 
 Per bot in the GM's group (`all`: every bot on the map): the strategies installed, mode, target and distance, time
-left before it must leave, its ledger failures, and its counters (solves by outcome, path checks, late arrivals,
-stuck re-solves, released escapes, motion stops and how many of them were re-routed, lock blocks by moves and casts,
-cast breaks, wakes, solve time last / max / mean in microseconds).
+left before it must leave, its ledger failures, and its counters (solves by outcome, with the moves found only at the
+reduced margin, path checks, late arrivals and how many of them followed a Fallback, stuck re-solves, released
+escapes, motion stops and how many of them were re-routed, lock blocks by moves and casts, cast breaks, wakes, solve
+time last / max / mean in microseconds).
+
+With `Debug = 1`, each solve logs the pass that found the plan and why the rest failed: candidates kept, probes (off
+the navmesh, snapped), path calls without a path, ends unsafe at arrival, paths crossing a hazard that holds the bot
+or another one, passes cut short by `MaxPathChecks`; and for the navmesh calls the accepted ones (INCOMPLETE, end
+moved) and the rejected ones by path type flag (NOPATH, NOT_USING_PATH, SHORT, SHORTCUT, FARFROMPOLY_START, other,
+empty) and by end distance (more than 3 yd off). `.mech bots` then adds the same counts summed per bot ("debug solve",
+"debug nav"). Nothing of this is counted or formatted with `Debug = 0`.
+
+A late arrival is an escape that reached its target after the first window of the spot it left had started. Most are
+Fallback escapes, late by construction (nothing on time existed); a late clean Move points at reaction time (the view
+seen late, a solve deferred by the per-map budget, a stuck re-solve).
 
 ### Limits
 
 - No navmesh on a map: every path check fails, so the solver falls back to `Fallback` / `NoPath` (logged once per bot
-  and mechanic).
+  and mechanic). The probe cannot tell walls apart there and lets every candidate through to the path call.
+- A reduced-margin path passes 0.25 yd from a hazard's edge (plus the anchor's drift). Grace crossings are still
+  measured at the full margin, so a gap the reduced pass rejects (narrower than about 0.5 yd) stays closed: a bot
+  boxed in by overlapping mines holds, or crosses under grace when the mines allow it.
 - Zones anchored on the bot itself (or lines aimed at it) are RunOut-shaped and ignored by their carrier (M3).
 - Actions run through `PlayerbotAI::DoSpecificAction` (chat `do`, `move to loot` from item use, pull pre-actions) skip
   every multiplier, so the lock cannot stop them; engine reactions (knockback, teleport acks) are not actions.

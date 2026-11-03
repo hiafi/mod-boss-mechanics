@@ -54,9 +54,9 @@ namespace BossMechanics
         // A hold that stops foreign motion lasts at least this (then stock movement may try again).
         constexpr Milliseconds kMinMotionHold{ 250 };
         // Re-route of an unsafe foreign motion: role band [0, this] around the motion's end; the target must bring
-        // the bot at least kRerouteGainYd closer to that end, and the motion must still have kRerouteMinYd to go.
+        // the bot at least Solver::Params::rerouteGainYd (1 yd) closer to that end (the solver only offers such
+        // targets), and the motion must still have kRerouteMinYd to go.
         constexpr float kRerouteBandYd = 3.f;
-        constexpr float kRerouteGainYd = 1.f;
         constexpr float kRerouteMinYd = 2.f;
         // Relevance (STAGE-M2-REVIEW m6): a hazard matters to a bot that could reach its region (bounds + margin)
         // within the time to its first window plus kRelevanceLead, plus kRelevanceSlackYd. Open and endless hazards
@@ -429,6 +429,21 @@ namespace BossMechanics
             return "?";
         }
 
+        char const* PassName(uint8 pass)
+        {
+            switch (pass)
+            {
+                case 1:
+                    return "clean";
+                case 2:
+                    return "reduced margin";
+                case 3:
+                    return "grace";
+                default:
+                    return "-";
+            }
+        }
+
         std::string IdList(std::vector<uint32> const& ids)
         {
             std::string s;
@@ -496,7 +511,9 @@ namespace BossMechanics
         // Solve (§3.9) with the telemetry and the once-per-mechanic Fallback log.
         Solver::Plan RunSolve(Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
         {
-            NavOracle oracle(bot);
+            // Debug = 1 only: the oracle counts why its probes and path calls failed (nothing is counted otherwise).
+            NavOracleStats nav;
+            NavOracle oracle(bot, cfg.debug ? &nav : nullptr);
             auto const t0 = std::chrono::steady_clock::now();
             Solver::Plan plan = Solver::Solve(st.input, oracle);
             auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -506,6 +523,8 @@ namespace BossMechanics
             ++c.solves;
             c.pathChecks += plan.pathChecks;
             ++c.outcomes[static_cast<std::size_t>(plan.outcome)];
+            if (plan.outcome == Solver::Outcome::Move && plan.stats.pass == 2)
+                ++c.tightMoves;
             c.solveUsLast = us;
             c.solveUsMax = std::max(c.solveUsMax, us);
             c.solveUsTotal += us;
@@ -514,10 +533,15 @@ namespace BossMechanics
 
             Geo::Vec3 const from = st.input.bot;
             if (cfg.debug)
+            {
+                c.debugSolve.Add(plan.stats);
+                c.debugNav.Add(nav);
                 LOG_INFO(kLog, "Bot {}: {} -> {} at ({:.1f}, {:.1f}, {:.1f}), {:.1f} yd, answers {}, {} candidates, "
-                    "{} path checks, {} us", bot->GetName(), st.input.reroute ? "reroute" : "solve",
-                    OutcomeName(plan.outcome), plan.target.x, plan.target.y, plan.target.z, Dist2d(from, plan.target),
-                    IdList(plan.answers), plan.candidates, plan.pathChecks, us);
+                    "{} path checks, {} us; pass {}, {}; nav {}", bot->GetName(), st.input.reroute ? "reroute"
+                    : "solve", OutcomeName(plan.outcome), plan.target.x, plan.target.y, plan.target.z,
+                    Dist2d(from, plan.target), IdList(plan.answers), plan.candidates, plan.pathChecks, us,
+                    PassName(plan.stats.pass), FormatSolveStats(plan.stats), FormatNavStats(nav));
+            }
             if (plan.outcome == Solver::Outcome::Fallback || plan.outcome == Solver::Outcome::NoPath)
             {
                 // Once per bot and mechanic (PLAN §7 navmesh gaps). Debug level: a recurring infeasible mechanic
@@ -549,6 +573,7 @@ namespace BossMechanics
             Milliseconds const travel = std::max(Milliseconds(0), plan.arriveAt - now);
             st.escapeCeilingAt = now + 2 * travel + kEscapeSlack;
             st.escapeDeadline = FirstThreatAt(st.input, from);
+            st.planReduced = plan.stats.pass == 2;
             st.plan = std::move(plan);
             st.planFor = st.plan.answers;
             st.mode = MechanicBotMode::Escape;
@@ -602,7 +627,8 @@ namespace BossMechanics
             in.role = role;
             in.reroute = false;
             bool const moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
-            if (!moving || Dist2d(plan.target, end) > toGo - kRerouteGainYd)
+            // The solver offered only targets that close in on the end; its real path end (a navmesh snap) may not.
+            if (!moving || Dist2d(plan.target, end) > toGo - in.params.rerouteGainYd)
                 return false;
             plan.holdUntil = plan.arriveAt;
             BeginEscape(st, std::move(plan), now);
@@ -663,14 +689,22 @@ namespace BossMechanics
             Geo::Vec3 const pos = in.bot;
             Milliseconds const horizonEnd = now + in.params.horizon;
             // Arrived: at the target, or the move we sent has ended short (SearchForBestPath may move the end, a
-            // partial path stops early) at a spot that is safe anyway.
-            bool const arrived = Dist2d(pos, st.plan.target) <= kArriveYd
-                || (st.escapeIssuedAt != Milliseconds(0) && !SplineInFlight(bot)
-                    && Solver::PointSafe(in, pos, now, horizonEnd));
+            // partial path stops early) at a spot that is safe anyway. Within kArriveYd of the target while our
+            // spline still runs, the spot must be safe too: an exit point lies only 0.5 yd beyond the margin, so a
+            // bot stopped 0.6 yd short stands inside it, re-solves to the same point and is stopped again by the
+            // hold, a creep of 0.1 yd per solve that ends in a Fallback once the window is near (M2 playtest).
+            bool const spline = SplineInFlight(bot);
+            bool const spotSafe = Solver::PointSafe(in, pos, now, horizonEnd);
+            bool const arrived = (Dist2d(pos, st.plan.target) <= kArriveYd && (spotSafe || !spline))
+                || (st.escapeIssuedAt != Milliseconds(0) && !spline && spotSafe);
             if (arrived)
             {
                 if (now > st.escapeDeadline)
+                {
                     ++st.counters.lateArrivals;
+                    if (st.plan.outcome == Solver::Outcome::Fallback || st.plan.outcome == Solver::Outcome::NoPath)
+                        ++st.counters.lateFallbacks;
+                }
                 st.mode = MechanicBotMode::Hold;
                 st.outOfRoleSince = Milliseconds(0);
                 return;
@@ -684,10 +718,15 @@ namespace BossMechanics
             }
 
             bool resolve = false;
-            // The view changed (new revision, moving anchors, perception): is the rest of the way still clean?
+            // The view changed (new revision, moving anchors, perception): is the rest of the way still clean? A plan
+            // from the reduced-margin pass is checked at those margins (its path squeezes through a gap).
             if (st.viewRebuilt)
             {
-                Solver::PathCheck const pc = CheckMotion(in, RemainingPath(st.plan.path, pos));
+                Solver::Input reduced;
+                if (st.planReduced)
+                    reduced = Solver::ReducedMargins(in);
+                Solver::PathCheck const pc = CheckMotion(st.planReduced ? reduced : in,
+                    RemainingPath(st.plan.path, pos));
                 resolve = !pc.ok || !Solver::PointSafe(in, st.plan.target, pc.arriveAt,
                     std::max(pc.arriveAt, horizonEnd));
                 if (!resolve)

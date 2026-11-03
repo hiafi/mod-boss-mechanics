@@ -867,13 +867,13 @@ namespace
         for (std::size_t i = 1; i < c.size(); ++i)
             CHECK(Dist(c[i], in.bot) >= Dist(c[i - 1], in.bot) - 1e-4f);
 
-        // Every path rejected: the oracle is asked at most maxPathChecks per pass plus the fallback.
+        // Every path rejected: the oracle is asked at most maxPathChecks per pass (three passes) plus the fallback.
         Input few = in;
         few.params.maxPathChecks = 3;
         NoPathOracle none;
         Plan const p = Solver::Solve(few, none);
         CHECK(p.outcome == Outcome::NoPath);
-        CHECK(none.calls <= 2 * 3 + 1);
+        CHECK(none.calls <= 3 * 3 + 1);
         CHECK(p.pathChecks == none.calls);
 
         // A wall that blocks the best directions: the solve still finds a validated path elsewhere.
@@ -1002,6 +1002,278 @@ namespace
     }
 
     // ----------------------------------------------------------------------------------------------------------
+    // M2 playtest fixes: walkability probe, path tiers, reduced-margin pass
+    // ----------------------------------------------------------------------------------------------------------
+
+    // A floor plan: walkable inside `rooms` (axis-aligned rectangles); `walls` are segments no straight path may
+    // cross. Walkable() drops points off the plan, or snaps the ones within snapYd of a room onto it (the navmesh
+    // probe); Find() fails for an end off the plan or a segment across a wall.
+    struct FloorOracle : Solver::PathOracle
+    {
+        struct Rect
+        {
+            float x0, y0, x1, y1;
+        };
+        std::vector<Rect> rooms;
+        std::vector<std::pair<Vec3, Vec3>> walls;
+        bool probe = true;
+        float snapYd = 0.f;
+        std::uint32_t calls = 0, probes = 0;
+
+        bool OnPlan(Vec3 const& p) const
+        {
+            for (Rect const& r : rooms)
+                if (p.x >= r.x0 - 1e-3f && p.x <= r.x1 + 1e-3f && p.y >= r.y0 - 1e-3f && p.y <= r.y1 + 1e-3f)
+                    return true;
+            return false;
+        }
+
+        bool Walkable(Vec3& p) override
+        {
+            if (!probe)
+                return true;
+            ++probes;
+            if (OnPlan(p))
+                return true;
+            float best = 1e9f;
+            Vec3 snapped = p;
+            for (Rect const& r : rooms)
+            {
+                Vec3 const q{ std::clamp(p.x, r.x0, r.x1), std::clamp(p.y, r.y0, r.y1), p.z };
+                if (Dist(p, q) < best)
+                {
+                    best = Dist(p, q);
+                    snapped = q;
+                }
+            }
+            if (best > snapYd)
+                return false;
+            p = snapped;
+            return true;
+        }
+
+        bool Find(Vec3 const& from, Vec3 const& to, std::vector<Vec3>& out) override
+        {
+            ++calls;
+            if (!OnPlan(to))
+                return false;
+            for (auto const& [a, b] : walls)
+                if (WallOracle::Intersects(from, to, a, b))
+                    return false;
+            out = { from, to };
+            return true;
+        }
+    };
+
+    // Indoors: the best-scored candidates (towards a role anchor behind a wall) lie inside the wall. The probe drops
+    // them without a path check, so a walkable exit is found with the first path checks; without it the budget is
+    // spent on the wall (the M2 playtest's fallbacks with 17 path checks).
+    void TestProbeSkipsWalls()
+    {
+        Input in = MakeInput({ 0.f, 0.f, 0.f });
+        in.hazards.push_back(MakeHazard(1, Shape::Circle(4.f), Pose{}, InstantIn(2000)));
+        in.role.present = true;
+        in.role.anchor = { 0.f, -10.f, 0.f };
+        in.role.minYd = 0.f;
+        in.role.maxYd = 3.f;
+        FloorOracle floor;
+        floor.rooms = { { -30.f, -1.f, 30.f, 30.f } };      // the wall is everything south of y = -1
+
+        Plan const plan = Solver::Solve(in, floor);
+        CHECK(IsMove(plan));
+        CHECK(plan.stats.pass == 1);
+        CHECK(TargetClear(in, plan));
+        CHECK(floor.OnPlan(plan.target));
+        CHECK(plan.stats.offMesh >= 8);
+        CHECK(plan.pathChecks <= 2);
+        CHECK(plan.stats.noPath == 0);
+        CHECK(plan.stats.probes == floor.probes);
+
+        // Without the probe the same solve spends its path checks on the wall first.
+        FloorOracle blind = floor;
+        blind.probe = false;
+        blind.calls = 0;
+        Plan const old = Solver::Solve(in, blind);
+        CHECK(old.pathChecks > plan.pathChecks);
+        CHECK(old.stats.noPath >= in.params.maxPathChecks);
+        CHECK(old.stats.offMesh == 0);
+    }
+
+    // A candidate just off the floor is snapped onto it and checked again where it landed: a snap that puts it in a
+    // hazard's margin rejects it (the plan never targets an unsafe spot), one that keeps it safe is used.
+    void TestProbeSnap()
+    {
+        Input in = MakeInput({ 0.f, 0.f, 0.f });
+        in.hazards.push_back(MakeHazard(1, Shape::Circle(4.f), Pose{ 0.f, 3.f, 0.f, 0.f }, InstantIn(2500)));
+        FloorOracle floor;
+        floor.rooms = { { -30.f, -1.75f, 30.f, 30.f } };    // the radial exit (0, -2.25) lies 0.5 yd in the wall
+        floor.snapYd = 1.f;
+        Plan const plan = Solver::Solve(in, floor);
+        CHECK(IsMove(plan));
+        CHECK(TargetClear(in, plan));
+        CHECK(floor.OnPlan(plan.target));
+        CHECK(plan.stats.snapped >= 1);
+        CHECK(plan.stats.endUnsafe >= 1);                   // the snapped exit sits on the margin: rejected
+        CHECK(Solver::CheckPath(in, plan.path, kNow, false).ok);
+    }
+
+    // The oracle's path may end away from the asked point (a navmesh end, an INCOMPLETE path): the solver validates
+    // and scores that real end, never the asked one.
+    void TestShiftedPathEnd()
+    {
+        struct ShiftOracle : Solver::PathOracle
+        {
+            float dx = 0.f, dy = 0.f;
+
+            bool Find(Vec3 const& from, Vec3 const& to, std::vector<Vec3>& out) override
+            {
+                out = { from, { to.x + dx, to.y + dy, to.z } };
+                return true;
+            }
+        };
+        Input in = MakeInput({ 1.f, 0.f, 0.f });
+        in.hazards.push_back(MakeHazard(1, Shape::Circle(4.f), Pose{}, InstantIn(3000)));
+        ShiftOracle away;
+        away.dx = 0.8f;
+        Plan const plan = Solver::Solve(in, away);
+        CHECK(IsMove(plan));
+        CHECK(TargetClear(in, plan));
+        CHECK(plan.target.x == plan.path.back().x && plan.target.y == plan.path.back().y);
+
+        // Every end pulled 1 yd towards the centre: the nearest exits land inside the margin and are rejected.
+        ShiftOracle in1;
+        in1.dx = -1.f;
+        Plan const p2 = Solver::Solve(in, in1);
+        CHECK(p2.stats.endUnsafe >= 1);
+        CHECK(p2.outcome != Outcome::Move || TargetClear(in, p2));
+    }
+
+    // Candidates whose straight line crosses a neighbouring hazard while it is hot are tried after the ones whose
+    // straight line is clean, even when nothing holding the bot is hot yet (a barrage: the next shot lands across the
+    // way to the role anchor). Before, the budget went to them and the solve fell back.
+    void TestTiersUnderBarrage()
+    {
+        Input in = MakeInput({ 0.f, 0.f, 0.f });
+        in.hazards.push_back(MakeHazard(1, Shape::Circle(4.f), Pose{}, InstantIn(2500)));
+        // A strip x in [3, 7], |y| <= 30, hot from 600 to 1100 ms: the way east crosses it while it burns, the spots
+        // beyond it are safe on arrival.
+        Pose const strip{ 3.f, 0.f, 0.f, 0.f };
+        in.hazards.push_back(MakeHazard(2, Shape::Line(4.f, 60.f), strip, InstantIn(600)));
+        in.role.present = true;
+        in.role.anchor = { 15.f, 0.f, 0.f };
+        in.role.minYd = 0.f;
+        in.role.maxYd = 3.f;
+        StraightOracle oracle;
+        Plan const plan = Solver::Solve(in, oracle);
+        CHECK(IsMove(plan));
+        CHECK(plan.stats.pass == 1);
+        CHECK(plan.pathChecks <= 2);
+        CHECK(TargetClear(in, plan));
+        CHECK(Solver::CheckPath(in, plan.path, kNow, false).ok);
+    }
+
+    // Two armed mines with a 1.2 yd gap between their edges, the bot walled into a pocket below them with a zone on
+    // it: no clean path at the full margin (the gap is narrower than two 0.75 yd margins), so the reduced-margin pass
+    // takes the gap, the target beyond it is safe at the full margin, and the path never enters a mine.
+    void MakePocket(Input& in, FloorOracle& floor, float gap)
+    {
+        in = MakeInput({ 0.f, -5.f, 0.f });
+        in.hazards.push_back(MakeHazard(1, Shape::Circle(8.f), Pose{ 0.f, -5.f, 0.f, 0.f }, InstantIn(3000)));
+        float const cx = 3.f + gap * 0.5f;
+        in.hazards.push_back(MakeHazard(100, Shape::Circle(3.f), Pose{ -cx, 0.f, 0.f, 0.f }, ArmedSince(5000, 500)));
+        in.hazards.push_back(MakeHazard(101, Shape::Circle(3.f), Pose{ cx, 0.f, 0.f, 0.f }, ArmedSince(5000, 500)));
+        floor = FloorOracle();
+        floor.rooms = { { -30.f, -10.f, 30.f, 30.f } };
+        floor.walls = { { { -6.f, -10.f, 0.f }, { -6.f, 0.f, 0.f } }, { { 6.f, -10.f, 0.f }, { 6.f, 0.f, 0.f } },
+            { { -6.f, -10.f, 0.f }, { 6.f, -10.f, 0.f } } };
+        in.params.maxPathChecks = 16;   // the wall oracle has no probe for the far side of the walls
+    }
+
+    void TestReducedMarginGap()
+    {
+        Input in;
+        FloorOracle floor;
+        MakePocket(in, floor, 1.2f);
+        Plan const plan = Solver::Solve(in, floor);
+        CHECK(IsMove(plan));
+        CHECK(plan.stats.pass == 2);
+        CHECK(TargetClear(in, plan));
+        CHECK(plan.target.y > 3.f);                         // beyond the mines
+        CHECK(!PathTouches(in, plan.path, 100));            // never inside an armed mine
+        CHECK(DeepestAlong(in.hazards[1], plan.path) >= 0.25f - 1e-3f);
+        CHECK(DeepestAlong(in.hazards[2], plan.path) >= 0.25f - 1e-3f);
+        CHECK(!Solver::CheckPath(in, plan.path, kNow, false).ok);                         // not clean at 0.75
+        CHECK(Solver::CheckPath(Solver::ReducedMargins(in), plan.path, kNow, false).ok);  // clean at 0.25
+        CHECK(plan.pathChecks <= 3 * in.params.maxPathChecks + 1);
+
+        // A wide gap: the full margin is enough, the first pass takes it.
+        MakePocket(in, floor, 2.5f);
+        Plan const wide = Solver::Solve(in, floor);
+        CHECK(IsMove(wide));
+        CHECK(wide.stats.pass == 1);
+        CHECK(!PathTouches(in, wide.path, 100));
+
+        // A re-route (a following bot's motion crossing the mines, its spot safe) at the mouth of the gap (no clean
+        // spot 1 yd closer to the motion's end is left on this side) slips through the same gap.
+        MakePocket(in, floor, 1.2f);
+        in.hazards.erase(in.hazards.begin());               // no zone on the bot
+        in.bot = { 0.f, -1.6f, 0.f };
+        in.reroute = true;
+        in.role.present = true;
+        in.role.anchor = { 0.f, 10.f, 0.f };
+        in.role.minYd = 0.f;
+        in.role.maxYd = 3.f;
+        Plan const re = Solver::Solve(in, floor);
+        CHECK(IsMove(re));
+        CHECK(re.stats.pass == 2);
+        CHECK(re.target.y > 3.f);
+        CHECK(!PathTouches(in, re.path, 100));
+    }
+
+    // A true enclosure (gap 0.4 yd, narrower than two reduced margins; or a closed ring) still has no clean way out:
+    // the reduced pass finds nothing, and the outcome is what it was before (grace crossing, fallback, or no plan for a
+    // re-route).
+    void TestTrueEnclosure()
+    {
+        Input in;
+        FloorOracle floor;
+        MakePocket(in, floor, 0.4f);
+        Plan const plan = Solver::Solve(in, floor);
+        CHECK(plan.outcome != Outcome::Move);
+        CHECK(plan.stats.pass != 2);
+        CHECK(plan.outcome == Outcome::Fallback || plan.outcome == Outcome::NoPath
+            || plan.outcome == Outcome::GraceMove);
+
+        // No grace either (grace <= GraceMarginMs): Fallback, as before.
+        for (Hazard& h : in.hazards)
+            if (h.id >= 100)
+                h.timing.grace = Ms(200);
+        Plan const none = Solver::Solve(in, floor);
+        CHECK(none.outcome == Outcome::Fallback || none.outcome == Outcome::NoPath);
+
+        // Closed ring of overlapping mines: grace crossing as before, never a reduced-margin Move.
+        Input ring = MakeInput({ 0.f, 0.f, 0.f });
+        ring.hazards.push_back(MakeHazard(1, Shape::Circle(4.f), Pose{}, InstantIn(3000)));
+        AddMineRing(ring, 7.f, 16, -1.f, 100);
+        StraightOracle oracle;
+        Plan const g = Solver::Solve(ring, oracle);
+        CHECK(g.outcome == Outcome::GraceMove);
+        CHECK(g.stats.pass == 3);
+
+        // A re-route boxed in by the ring, at its inner edge towards the motion's end: no plan, the bot holds.
+        Input boxed = ring;
+        boxed.hazards.erase(boxed.hazards.begin());
+        boxed.bot = { 4.2f, 0.f, 0.f };
+        boxed.reroute = true;
+        boxed.role.present = true;
+        boxed.role.anchor = { 15.f, 0.f, 0.f };
+        boxed.role.maxYd = 3.f;
+        for (Hazard& h : boxed.hazards)
+            h.timing.grace = Ms(0);
+        CHECK(Solver::Solve(boxed, oracle).outcome == Outcome::Safe);
+    }
+
+    // ----------------------------------------------------------------------------------------------------------
     // Cost
     // ----------------------------------------------------------------------------------------------------------
 
@@ -1064,6 +1336,52 @@ namespace
         std::printf("solver cost, bot in a burning zone: outcome %d, oracle calls %u: %.0f us\n",
             static_cast<int>(hotMove.outcome), hotMove.pathChecks,
             std::chrono::duration<double, std::micro>(s1 - s0).count());
+
+        // All three passes run dry: the barrage plus 30 armed mines (the grace pass is live), no path anywhere.
+        Input mined = hot;
+        Lcg mrng;
+        mrng.state = 99;
+        for (std::uint32_t i = 0; i < 30; ++i)
+        {
+            Pose const p{ mrng.Range(-20.f, 20.f), mrng.Range(-20.f, 20.f), 0.f, 0.f };
+            mined.hazards.push_back(MakeHazard(2000 + i, Shape::Circle(3.f), p, ArmedSince(1000, 500)));
+        }
+        auto const m0 = std::chrono::steady_clock::now();
+        Plan const minedPlan = Solver::Solve(mined, none);
+        for (int i = 0; i < 20; ++i)
+            sink += Solver::Solve(mined, none).candidates;
+        auto const m1 = std::chrono::steady_clock::now();
+        double const minedMean = std::chrono::duration<double, std::micro>(m1 - m0).count() / 21;
+        std::printf("solver cost, no path anywhere, %zu hazards with 30 armed mines (three passes): outcome %d, oracle "
+            "calls %u: mean %.0f us%s\n", mined.hazards.size(), static_cast<int>(minedPlan.outcome),
+            minedPlan.pathChecks, minedMean, minedMean > 2000.0 ? "  ** OVER **" : "");
+        CHECK(minedPlan.outcome == Outcome::NoPath);
+        CHECK(minedPlan.pathChecks <= 3 * mined.params.maxPathChecks + 1);
+
+        // Every probe says "inside a wall": the probes run to their cap, then the path checks as before.
+        struct WallsEverywhere : NoPathOracle
+        {
+            std::uint32_t probes = 0;
+
+            bool Walkable(Vec3&) override
+            {
+                ++probes;
+                return false;
+            }
+        };
+        WallsEverywhere walls;
+        auto const p0 = std::chrono::steady_clock::now();
+        Plan const wallPlan = Solver::Solve(hot, walls);
+        for (int i = 0; i < 20; ++i)
+            sink += Solver::Solve(hot, walls).candidates;
+        auto const p1 = std::chrono::steady_clock::now();
+        double const wallMean = std::chrono::duration<double, std::micro>(p1 - p0).count() / 21;
+        std::printf("solver cost, every probe off the navmesh: outcome %d, probes %u, oracle calls %u: "
+            "mean %.0f us%s\n",
+            static_cast<int>(wallPlan.outcome), wallPlan.stats.probes, wallPlan.pathChecks, wallMean,
+            wallMean > 2000.0 ? "  ** OVER **" : "");
+        CHECK(wallPlan.stats.probes <= hot.params.maxProbes + 8);
+        CHECK(wallPlan.stats.offMesh == wallPlan.stats.probes);
         CHECK(sink > 0);
     }
 }
@@ -1094,6 +1412,12 @@ int main()
     TestDeterminismAndCaps();
     TestLeaveByAndCast();
     TestFallibility();
+    TestProbeSkipsWalls();
+    TestProbeSnap();
+    TestShiftedPathEnd();
+    TestTiersUnderBarrage();
+    TestReducedMarginGap();
+    TestTrueEnclosure();
     Benchmark();
     return Report("solver_test");
 }

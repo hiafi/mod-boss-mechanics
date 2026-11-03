@@ -16,6 +16,7 @@
 #include "Duration.h"
 #include "MechanicSolver.h"
 #include <functional>
+#include <string>
 
 class Player;
 class Unit;
@@ -65,22 +66,61 @@ namespace BossMechanics
     BotViewInfo BuildInput(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
         Solver::Input& out, PerceptionFilter const* perceive = nullptr);
 
-    // Solver path oracle on the bot's navmesh: PathGenerator from `from` to `to`, complete paths only
-    // (PATHFIND_NORMAL). The result starts at `from` and ends at the navmesh point found for `to` (its real z).
-    // Lives for one solve: it keeps the unit pointer only for that call.
+    // Debug counters of one NavOracle, filled only when the brain passes them (BossMechanics.Bots.Debug = 1).
+    struct NavOracleStats
+    {
+        uint32 probes = 0;          // Walkable() calls
+        uint32 probeNoMesh = 0;     // ...on a map without a navmesh (left to Find, which then fails)
+        uint32 probeOff = 0;        // ...no walkable polygon within kProbeSnapYd: the candidate is dropped
+        uint32 probeSnapped = 0;    // ...moved onto the navmesh (more than 0.05 yd)
+        uint32 calls = 0;           // Find() calls
+        uint32 ok = 0;              // ...accepted
+        uint32 okIncomplete = 0;    // ...of which PATHFIND_INCOMPLETE (ends at the reachable point)
+        uint32 okShifted = 0;       // ...of which end more than 0.5 yd from the asked point
+        uint32 noPath = 0;          // rejected: PATHFIND_NOPATH (no polygon, or a broken corridor)
+        uint32 notUsingPath = 0;    // rejected: PATHFIND_NOT_USING_PATH (no tile, or a shortcut for fliers)
+        uint32 tooLong = 0;         // rejected: PATHFIND_SHORT (longer than the point limit)
+        uint32 shortcut = 0;        // rejected: PATHFIND_SHORTCUT
+        uint32 farStart = 0;        // rejected: PATHFIND_FARFROMPOLY_START (the bot is off the navmesh)
+        uint32 otherType = 0;       // rejected: neither NORMAL nor INCOMPLETE
+        uint32 empty = 0;           // rejected: no points
+        uint32 endFar = 0;          // rejected: the end lands more than kMaxEndShiftYd from the asked point
+        uint32 farEnd = 0;          // accepted with PATHFIND_FARFROMPOLY_END (the asked point was > 7 yd off)
+
+        void Add(NavOracleStats const& o);
+    };
+
+    // Solver path oracle on the bot's navmesh.
+    //
+    // Walkable: one Detour findNearestPoly in a small box around the point (the bot's own polygon filter): no walkable
+    // polygon within kProbeSnapYd -> false (inside a wall, a pillar, off a ledge), else the point moves onto the
+    // polygon (its navmesh z). No navmesh on the map -> true, unchanged.
+    //
+    // Find: PathGenerator from `from` to `to` (the same generator and start MoveTo uses). Accepted: PATHFIND_NORMAL or
+    // PATHFIND_INCOMPLETE without NOPATH, NOT_USING_PATH, SHORT, SHORTCUT or FARFROMPOLY_START, whose end lands within
+    // kMaxEndShiftYd of `to`. The result starts at `from` and ends at the path's real end (the solver validates that
+    // point, not `to`). Lives for one solve: it keeps the unit pointer only for that call.
     class NavOracle : public Solver::PathOracle
     {
     public:
-        explicit NavOracle(Unit const* bot) : _bot(bot) { }
+        explicit NavOracle(Unit const* bot, NavOracleStats* stats = nullptr);
 
         bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) override;
+        bool Walkable(Geo::Vec3& p) override;
 
         uint32 Calls() const { return _calls; }
 
     private:
         Unit const* _bot;
+        NavOracleStats* _stats;
         uint32 _calls = 0;
+        uint16 _includeFlags = 0;
+        uint16 _excludeFlags = 0;
     };
+
+    // One line of NavOracleStats / Solver::SolveStats for the Debug log and `.mech bots`.
+    std::string FormatNavStats(NavOracleStats const& s);
+    std::string FormatSolveStats(Solver::SolveStats const& s);
 }
 
 #endif

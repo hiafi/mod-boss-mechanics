@@ -62,6 +62,7 @@ namespace BossMechanics::Solver
         std::vector<Geo::Pose> poses;       // one, or three for a turning anchor (facing -slack, 0, +slack)
         float marginYd = 0.f;               // SafetyMarginYd + drift of a moving anchor
         Timing timing;
+        float driftYd = 0.f;                // the drift part of marginYd (kept by the reduced-margin pass)
     };
 
     struct LaneFrame
@@ -88,6 +89,15 @@ namespace BossMechanics::Solver
         float gridStepYd = 2.f;
         std::uint32_t maxCandidates = 400, maxPathChecks = 8;
         Weights w;
+        // Reduced-margin pass (tried after the clean pass at the full margin, before a grace crossing): every hazard
+        // margin becomes its drift + this (never below kMinTightMarginYd), so a bot can slip through a gap narrower
+        // than two full margins. Time margins (marginMs) are not reduced.
+        float tightMarginYd = 0.25f;
+        // Walkability probes (PathOracle::Walkable) per solve; past this the oracle is asked for paths unprobed.
+        std::uint32_t maxProbes = 64;
+        // Re-route: a target must be at least this much closer to the role anchor (the motion's end) than the bot,
+        // so a clean pass never settles for a spot that makes no progress while a later pass could pass the hazard.
+        float rerouteGainYd = 1.f;
     };
 
     struct Input
@@ -101,17 +111,24 @@ namespace BossMechanics::Solver
         std::vector<Geo::Vec3> crowd;       // other bots' targets
         Params params;
         // The bot's spot is safe but its current motion (follow, chase) is not: solve anyway, without the bot's own
-        // spot as a candidate, so the role anchor (the motion's end) pulls it around the hazard.
+        // spot as a candidate and only with targets params.rerouteGainYd closer to the role anchor (the motion's
+        // end), so the anchor pulls it around the hazard.
         bool reroute = false;
     };
 
     // Walkable path from `from` to `to`: `out` gets the corner points, from the start (or its first corner) to the
-    // end with its real z. false = no complete path (the candidate is skipped).
+    // end with its real z. The end may differ from `to` (the walkable point the oracle found for it): the solver
+    // validates and scores the real end. false = no path (the candidate is skipped).
+    //
+    // Walkable is a cheap probe the solver runs before it spends a path check on a candidate: false = `p` is not on
+    // walkable ground (inside a wall or a pillar; skipped, no path check spent); true may move `p` onto the walkable
+    // surface (a snap, with its real z). The default knows no geometry: everything is walkable, unchanged.
     class PathOracle
     {
     public:
         virtual ~PathOracle() = default;
         virtual bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) = 0;
+        virtual bool Walkable(Geo::Vec3& /*p*/) { return true; }
     };
 
     enum class Outcome : std::uint8_t
@@ -121,6 +138,35 @@ namespace BossMechanics::Solver
         GraceMove,      // as Move, but crossing armed mines under their grace
         Fallback,       // nothing clean: the least bad target, by the oracle's path
         NoPath          // nothing clean and no oracle path: straight to the nearest exit
+    };
+
+    // Why the validation passes rejected what they tried (counts per attempt; a later pass re-tries the paths an
+    // earlier one found). Plain counters, kept on every solve; the brain logs them with BossMechanics.Bots.Debug = 1.
+    struct SolveStats
+    {
+        std::uint32_t kept = 0;             // candidates past the straight-line pre-filter (full margin)
+        std::uint32_t probes = 0;           // walkability probes run
+        std::uint32_t offMesh = 0;          // ...that found no walkable ground (no path check spent)
+        std::uint32_t snapped = 0;          // ...that moved the candidate onto the walkable surface
+        std::uint32_t noPath = 0;           // oracle path calls that returned no path
+        std::uint32_t endUnsafe = 0;        // the snapped point or the path's real end is not safe at its arrival
+        std::uint32_t crossStart = 0;       // a path was found, it fails inside a hazard that holds the bot
+        std::uint32_t crossOther = 0;       // ...inside another hazard
+        std::uint32_t budgetStops = 0;      // validation passes cut short by maxPathChecks
+        std::uint8_t pass = 0;              // what found the plan: 1 clean, 2 clean at the reduced margin, 3 grace
+
+        void Add(SolveStats const& o)       // sums the counters (not `pass`)
+        {
+            kept += o.kept;
+            probes += o.probes;
+            offMesh += o.offMesh;
+            snapped += o.snapped;
+            noPath += o.noPath;
+            endUnsafe += o.endUnsafe;
+            crossStart += o.crossStart;
+            crossOther += o.crossOther;
+            budgetStops += o.budgetStops;
+        }
     };
 
     struct Plan
@@ -133,6 +179,7 @@ namespace BossMechanics::Solver
         float score = 0.f;
         std::vector<std::uint32_t> answers;
         std::uint32_t candidates = 0, pathChecks = 0;
+        SolveStats stats;
     };
 
     struct PathCheck
@@ -1095,6 +1142,15 @@ namespace BossMechanics::Solver
             return until;
         }
 
+        // Does hazard `id` hold the bot's spot (within its margin)?
+        inline bool HoldsBot(Input const& in, std::uint32_t id)
+        {
+            for (Hazard const& h : in.hazards)
+                if (h.id == id)
+                    return Within(h, in.bot);
+            return false;
+        }
+
         // Keeps the oracle's polyline starting at the bot.
         inline void AnchorPath(Geo::Vec3 const& from, std::vector<Geo::Vec3>& path)
         {
@@ -1103,7 +1159,59 @@ namespace BossMechanics::Solver
         }
     }
 
+    namespace Detail
+    {
+        constexpr float kMinTightMarginYd = 0.1f;       // the reduced-margin pass never goes below this
+        constexpr float kMovedYd = 0.05f;               // a probe or a path end moved the point by more than this
+        constexpr std::uint32_t kFallbackProbes = 8;    // fallback: walkability probes down its ranking
+        constexpr std::uint32_t kStraightChecks = 64;   // straight-line checks per validation pass (cost cap)
+
+        // The input of the reduced-margin pass: every margin cut to its drift + tightMarginYd. false = no margin
+        // changes (the pass would repeat the first one).
+        inline bool ReducedMargins(Input const& in, Input& out)
+        {
+            out = in;
+            float const tight = std::max(kMinTightMarginYd, in.params.tightMarginYd);
+            bool changed = false;
+            for (Hazard& h : out.hazards)
+            {
+                float const m = std::min(h.marginYd, std::max(0.f, h.driftYd) + tight);
+                changed = changed || m < h.marginYd - 1e-4f;
+                h.marginYd = m;
+            }
+            return changed;
+        }
+
+        // Does any hazard allow a grace crossing (an armed or arming mine with a grace)? Without one the grace pass
+        // could only repeat the clean pass.
+        inline bool AnyGrace(Input const& in)
+        {
+            for (Hazard const& h : in.hazards)
+                if ((h.timing.type == TimingType::MineArmed || h.timing.type == TimingType::MineArming)
+                    && h.timing.grace > in.params.graceMargin)
+                    return true;
+            return false;
+        }
+    }
+
+    // The input with every hazard margin cut to its drift + Params::tightMarginYd (what Solve's reduced-margin pass
+    // checks paths against). The brain re-checks the rest of a pass-2 plan with it.
+    inline Input ReducedMargins(Input const& in)
+    {
+        Input out;
+        Detail::ReducedMargins(in, out);
+        return out;
+    }
+
     // Picks where the bot goes (§3.9 "Solve"). Deterministic for a given input and oracle.
+    //
+    // Validation order (each pass in score order, its own maxPathChecks budget of new oracle calls; paths, probes and
+    // unreachable candidates are shared): (1) a clean path at the full margin -> Move; (2) a clean path at the reduced
+    // margin (Params::tightMarginYd; the target itself stays safe at the full margin, so the bot only passes through
+    // the narrow gap and never holds in it) -> Move, stats.pass 2; (3) armed-mine grace crossings at the full margin
+    // -> GraceMove (only when a hazard allows grace); (4) Fallback. Before a candidate costs an oracle call it is
+    // probed (PathOracle::Walkable): off the walkable ground it is dropped for free, snapped onto it it is re-checked
+    // at its new place.
     inline Plan Solve(Input const& in, PathOracle& oracle)
     {
         Plan plan;
@@ -1122,14 +1230,18 @@ namespace BossMechanics::Solver
         Ms const deadline = Detail::Deadline(in);
         Ms const moveStart = in.now + in.params.startDelay;
 
-        // 2. Straight-line pre-filter and score.
+        // 2. Straight-line pre-filter and score. Targets are always safe at the full margin (every pass).
         std::vector<Detail::Scored> kept;
         kept.reserve(cands.size());
+        float const rerouteMax = in.reroute && in.role.present
+            ? Detail::Dist2(in.bot, in.role.anchor) - in.params.rerouteGainYd : Detail::kInf;
         for (std::uint32_t i = 0; i < cands.size(); ++i)
         {
             if (i == 0 && in.reroute)
                 continue;
             Geo::Vec3 const& c = cands[i];
+            if (in.reroute && Detail::Dist2(c, in.role.anchor) > rerouteMax)
+                continue;
             float const dist = Detail::Dist3(in.bot, c);
             Ms const arrival = moveStart + Detail::TravelMs(dist, speed);
             if (!PointSafe(in, c, arrival, std::max(arrival, horizonEnd)))
@@ -1137,65 +1249,130 @@ namespace BossMechanics::Solver
             kept.push_back({ i, dist, Detail::Score(in, c, dist, arrival, deadline, i == 0), c });
         }
         std::sort(kept.begin(), kept.end(), Detail::ScoredLess);
+        plan.stats.kept = static_cast<std::uint32_t>(kept.size());
 
-        // 3./4. Validate in score order: clean paths first, then grace crossings.
+        // 3. Validate in score order. Shared across the passes: oracle paths, unreachable candidates and the probes
+        // (point[i] is candidate i after its probe).
         std::unordered_map<std::uint32_t, std::vector<Geo::Vec3>> paths;
         std::unordered_set<std::uint32_t> unreachable;
+        std::vector<std::int8_t> probed(cands.size(), 0);      // 0 not yet, 1 walkable
+        std::vector<Geo::Vec3> point = cands;
+        std::uint32_t probes = 0;
         // Oracle calls are capped (maxPathChecks), so candidates whose straight line already fails the path check
-        // (typically across a start hazard towards a role anchor on its far side) are tried only after the ones whose
-        // straight line passes: the cap must not be spent on them while a clean way out exists (STAGE-M2-REVIEW B1).
-        // Each tier runs in score order with the same exact early stop. The tiers only matter while a hazard holding
-        // the bot is already hot (the start-hazard exemption is live) or when re-routing a motion (the role anchor sits
-        // beyond the hazard); otherwise everything is tier 0 (no extra cost).
-        bool startHot = in.reroute;
-        for (Hazard const& h : in.hazards)
-            startHot = startHot || Detail::HotOver(h, in.bot, in.now, in.now, in.params.marginMs);
-        std::vector<std::int8_t> straightOk[2] = { std::vector<std::int8_t>(cands.size(), startHot ? -1 : 1),
-            std::vector<std::int8_t>(cands.size(), startHot ? -1 : 1) };
-        auto validate = [&](bool allowGrace, Plan& out) -> bool
+        // (across a start hazard towards a role anchor on its far side, STAGE-M2-REVIEW B1; or across a neighbouring
+        // hazard that will be hot by then, the common case under a barrage) are tried only when no candidate whose
+        // straight line passes validated: the cap must not be spent on them while a clean way out exists. Tier 0 runs
+        // in score order with the exact early stop; a tier-1 candidate could only beat its result by a path that bends
+        // around the hazard its straight line crosses, which is not worth up to maxPathChecks more oracle calls.
+        // Straight lines that passed the clean full-margin check pass the reduced-margin one too (a smaller region).
+        std::vector<std::int8_t> cleanStraight(cands.size(), -1);
+        // pin: the input the paths are checked against (the reduced margins in pass 2); targets use `in`.
+        auto validate = [&](Input const& pin, bool allowGrace, int pass, Plan& out) -> bool
         {
             bool found = false;
             float bestScore = 0.f;
             Detail::Scored best;
             std::uint32_t checks = 0;
-            std::vector<std::int8_t>& straight = straightOk[allowGrace ? 1 : 0];
-            for (int tier = 0; tier < 2; ++tier)
+            // -1 unknown, 0 fails, 1 passes. Past kStraightChecks the tier-0 scan ends and the unknown ones are
+            // tried in tier 1, in score order like the rest.
+            std::vector<std::int8_t> straight(cands.size(), -1);
+            if (pass == 2)
+                for (std::size_t i = 0; i < cands.size(); ++i)
+                    if (cleanStraight[i] == 1 && Detail::Dist3(point[i], cands[i]) <= Detail::kMovedYd)
+                        straight[i] = 1;
+            std::uint32_t straightRuns = 0;
+            auto tierOf = [&](std::uint32_t i) -> int
+            {
+                if (straight[i] < 0 && straightRuns < Detail::kStraightChecks)
+                {
+                    ++straightRuns;
+                    straight[i] = CheckPath(pin, { in.bot, point[i] }, in.now, allowGrace).ok ? 1 : 0;
+                }
+                return straight[i] == 1 ? 0 : (straight[i] == 0 ? 1 : -1);
+            };
+            for (int tier = 0; tier < 2 && !found; ++tier)
             {
                 for (Detail::Scored const& s : kept)
                 {
+                    std::uint32_t const i = s.index;
                     if (found && bestScore <= s.score)
                         break;
-                    if (unreachable.count(s.index))
+                    if (unreachable.count(i))
                         continue;
-                    auto it = paths.find(s.index);
+                    auto it = paths.find(i);
                     if (it == paths.end() && checks >= in.params.maxPathChecks)
+                    {
+                        ++out.stats.budgetStops;
                         break;
-                    if (straight[s.index] < 0)
-                        straight[s.index] = CheckPath(in, { in.bot, s.p }, in.now, allowGrace).ok ? 1 : 0;
-                    if (straight[s.index] != (tier == 0 ? 1 : 0))
+                    }
+                    int const t = tierOf(i);
+                    if (t < 0 && tier == 0)
+                        break;
+                    if (t >= 0 && t != tier)
                         continue;
                     if (it == paths.end())
                     {
+                        // Probe first: a candidate inside a wall costs no path check.
+                        if (!probed[i] && probes < in.params.maxProbes)
+                        {
+                            ++probes;
+                            ++out.stats.probes;
+                            Geo::Vec3 q = point[i];
+                            if (!oracle.Walkable(q))
+                            {
+                                ++out.stats.offMesh;
+                                unreachable.insert(i);
+                                continue;
+                            }
+                            probed[i] = 1;
+                            if (Detail::Dist3(q, point[i]) > Detail::kMovedYd)
+                            {
+                                ++out.stats.snapped;
+                                point[i] = q;
+                                straight[i] = -1;
+                                if (tier == 0 && tierOf(i) != 0)
+                                    continue;   // tier 1 retries it
+                            }
+                        }
+                        if (Detail::Dist3(point[i], cands[i]) > Detail::kMovedYd)
+                        {
+                            Ms const at = moveStart + Detail::TravelMs(Detail::Dist3(in.bot, point[i]), speed);
+                            if (!PointSafe(in, point[i], at, std::max(at, horizonEnd)))
+                            {
+                                ++out.stats.endUnsafe;
+                                continue;
+                            }
+                        }
                         ++checks;
                         ++out.pathChecks;
                         std::vector<Geo::Vec3> path;
-                        if (!oracle.Find(in.bot, s.p, path) || path.empty())
+                        if (!oracle.Find(in.bot, point[i], path) || path.empty())
                         {
-                            unreachable.insert(s.index);
+                            ++out.stats.noPath;
+                            unreachable.insert(i);
                             continue;
                         }
                         Detail::AnchorPath(in.bot, path);
-                        it = paths.emplace(s.index, std::move(path)).first;
+                        it = paths.emplace(i, std::move(path)).first;
                     }
                     std::vector<Geo::Vec3> const& path = it->second;
                     float const len = Detail::PathLength(path);
                     Ms const arrival = moveStart + Detail::TravelMs(len, speed);
                     if (!PointSafe(in, path.back(), arrival, std::max(arrival, horizonEnd)))
+                    {
+                        ++out.stats.endUnsafe;
                         continue;
-                    PathCheck const pc = CheckPath(in, path, in.now, allowGrace);
+                    }
+                    PathCheck const pc = CheckPath(pin, path, in.now, allowGrace);
                     if (!pc.ok)
+                    {
+                        ++(Detail::HoldsBot(pin, pc.firstHit) ? out.stats.crossStart : out.stats.crossOther);
                         continue;
-                    float const real = s.score + in.params.w.path * (len - s.straight);
+                    }
+                    // The real end is scored where it is when the probe or the oracle moved it.
+                    float const real = Detail::Dist3(path.back(), s.p) > Detail::kMovedYd
+                        ? Detail::Score(in, path.back(), len, arrival, deadline, false)
+                        : s.score + in.params.w.path * (len - s.straight);
                     Detail::Scored cand = s;
                     cand.score = real;
                     cand.p = path.back();
@@ -1211,59 +1388,136 @@ namespace BossMechanics::Solver
                     }
                 }
             }
+            if (pass == 1)
+                cleanStraight = straight;
             return found;
         };
 
         Plan work = plan;
-        if (validate(false, work))
+        Input tightIn;
+        bool found = false;
+        if (validate(in, false, 1, work))
+        {
             work.outcome = Outcome::Move;
-        else if (validate(true, work))
+            work.stats.pass = 1;
+            found = true;
+        }
+        else if (Detail::ReducedMargins(in, tightIn) && validate(tightIn, false, 2, work))
+        {
+            work.outcome = Outcome::Move;
+            work.stats.pass = 2;
+            found = true;
+        }
+        else if (Detail::AnyGrace(in) && validate(in, true, 3, work))
+        {
             work.outcome = Outcome::GraceMove;
-        else if (in.reroute)
+            work.stats.pass = 3;
+            found = true;
+        }
+        if (!found && in.reroute)
         {
             // No clean way around: the caller keeps the bot where it is (no fallback for a motion).
             plan.candidates = work.candidates;
             plan.pathChecks = work.pathChecks;
+            plan.stats = work.stats;
             return plan;
         }
-        else
+        if (!found)
         {
-            // 5. Fallback: fewest hazards hot from the straight-line arrival, then least time inside on the straight
-            // line (scanned for the kFallbackScans nearest such candidates only), then nearest.
-            std::vector<std::uint32_t> counts(cands.size(), 0);
+            // 4. Fallback: fewest hazards hot from the straight-line arrival, then least time inside on the straight
+            // line (scanned for the kFallbackScans nearest such candidates only), then nearest. Candidates known to
+            // have no path are skipped; down that ranking, the first walkable one is taken (an oracle path already
+            // found for it is reused).
+            // The pre-filter's survivors are exactly the candidates with no hazard hot from their arrival on, so the
+            // counts are only needed when none survived (or none of them has a path).
+            std::vector<std::uint32_t> counts(cands.size(), 1);
             std::uint32_t minCount = std::numeric_limits<std::uint32_t>::max();
-            for (std::uint32_t i = 0; i < cands.size(); ++i)
-            {
-                Geo::Vec3 const& c = cands[i];
-                Ms const arrival = moveStart + Detail::TravelMs(Detail::Dist3(in.bot, c), speed);
-                for (Hazard const& h : in.hazards)
-                    if (Detail::HotOver(h, c, arrival, std::max(arrival, horizonEnd), in.params.marginMs))
-                        ++counts[i];
-                minCount = std::min(minCount, counts[i]);
-            }
-            std::uint32_t bestIdx = 0;
-            Ms bestInside = kForever;
-            float bestDist = Detail::kInf;
-            std::uint32_t scanned = 0;
-            for (std::uint32_t i = 0; i < cands.size() && scanned < Detail::kFallbackScans; ++i)
-            {
-                if (counts[i] != minCount)
-                    continue;
-                ++scanned;
-                Geo::Vec3 const& c = cands[i];
-                float const dist = Detail::Dist3(in.bot, c);
-                Ms const inside = Detail::WalkPath(in, { in.bot, c }, in.now, true, true).timeInsideHot;
-                if (inside < bestInside || (inside == bestInside && dist < bestDist))
+            for (Detail::Scored const& s : kept)
+                if (!unreachable.count(s.index))
                 {
-                    bestIdx = i;
-                    bestInside = inside;
-                    bestDist = dist;
+                    counts[s.index] = 0;
+                    minCount = 0;
                 }
+            if (minCount != 0)
+                for (std::uint32_t i = 0; i < cands.size(); ++i)
+                {
+                    if (unreachable.count(i))
+                        continue;
+                    Geo::Vec3 const& c = cands[i];
+                    Ms const arrival = moveStart + Detail::TravelMs(Detail::Dist3(in.bot, c), speed);
+                    counts[i] = 0;
+                    for (Hazard const& h : in.hazards)
+                        if (Detail::HotOver(h, c, arrival, std::max(arrival, horizonEnd), in.params.marginMs))
+                            ++counts[i];
+                    minCount = std::min(minCount, counts[i]);
+                }
+            struct Ranked
+            {
+                Ms inside;
+                float dist;
+                std::uint32_t index;
+            };
+            // Ranked by the time inside the exact hitboxes (drift kept, no yard or time margin): nothing clean
+            // exists at the margins, so the least real exposure wins, not the least time in the margin band.
+            Input exact = in;
+            exact.params.marginMs = Ms(0);
+            for (Hazard& h : exact.hazards)
+                h.marginYd = std::max(0.f, h.driftYd);
+            std::vector<Ranked> ranked;
+            ranked.reserve(Detail::kFallbackScans);
+            for (std::uint32_t i = 0; i < cands.size() && ranked.size() < Detail::kFallbackScans; ++i)
+            {
+                if (counts[i] != minCount || unreachable.count(i))
+                    continue;
+                Geo::Vec3 const& c = cands[i];
+                ranked.push_back({ Detail::WalkPath(exact, { in.bot, c }, in.now, true, true).timeInsideHot,
+                    Detail::Dist3(in.bot, c), i });
             }
-            Geo::Vec3 const target = cands.empty() ? in.bot : cands[bestIdx];
+            std::stable_sort(ranked.begin(), ranked.end(), [](Ranked const& a, Ranked const& b)
+            {
+                return a.inside != b.inside ? a.inside < b.inside : a.dist < b.dist;
+            });
+
+            // Default: the top of the ranking (as before the probes), also when every probe down it fails.
+            Geo::Vec3 target = !ranked.empty() ? point[ranked.front().index] : (cands.empty() ? in.bot : cands[0]);
             std::vector<Geo::Vec3> path;
-            ++work.pathChecks;
-            if (oracle.Find(in.bot, target, path) && !path.empty())
+            bool havePath = false;
+            std::uint32_t tries = 0;
+            for (Ranked const& r : ranked)
+            {
+                std::uint32_t const i = r.index;
+                if (auto it = paths.find(i); it != paths.end())
+                {
+                    path = it->second;
+                    havePath = true;
+                    break;
+                }
+                if (tries >= Detail::kFallbackProbes)
+                    break;
+                ++tries;
+                Geo::Vec3 q = point[i];
+                if (!probed[i])
+                {
+                    ++work.stats.probes;
+                    if (!oracle.Walkable(q))
+                    {
+                        ++work.stats.offMesh;
+                        continue;
+                    }
+                    if (Detail::Dist3(q, point[i]) > Detail::kMovedYd)
+                        ++work.stats.snapped;
+                }
+                target = q;
+                break;
+            }
+            if (!havePath)
+            {
+                ++work.pathChecks;
+                havePath = oracle.Find(in.bot, target, path) && !path.empty();
+                if (!havePath)
+                    ++work.stats.noPath;
+            }
+            if (havePath)
             {
                 Detail::AnchorPath(in.bot, path);
                 work.outcome = Outcome::Fallback;

@@ -17,6 +17,7 @@
 #include "Group.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
+#include "MechanicBotView.h"
 #include "MechanicRegistry.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
@@ -83,13 +84,20 @@ namespace BossMechanics
             MechanicBotCounters const& c = st->counters;
             auto outcome = [&c](Solver::Outcome o) { return c.outcomes[static_cast<std::size_t>(o)]; };
             uint64 const mean = c.solves ? c.solveUsTotal / c.solves : 0;
-            handler->PSendSysMessage("  solves {} (safe {}, move {}, grace {}, fallback {}, no path {}), "
-                "path checks {}, late {}, stuck {}, released {}, motion stops {} (rerouted {}), lock {} (moves {}, "
-                "casts {}), cast breaks {}, wakes {}, solve us last {} max {} mean {}", c.solves,
-                outcome(Solver::Outcome::Safe), outcome(Solver::Outcome::Move), outcome(Solver::Outcome::GraceMove),
-                outcome(Solver::Outcome::Fallback), outcome(Solver::Outcome::NoPath), c.pathChecks, c.lateArrivals,
-                c.stuckResolves, c.releases, c.motionStops, c.reroutes, c.lockBlocks, c.lockMoves, c.lockCasts,
-                c.castBreaks, c.wakes, c.solveUsLast, c.solveUsMax, mean);
+            handler->PSendSysMessage("  solves {} (safe {}, move {} (reduced margin {}), grace {}, fallback {}, "
+                "no path {}), path checks {}, late {} (fallback {}), stuck {}, released {}, motion stops {} (rerouted "
+                "{}), lock {} (moves {}, casts {}), cast breaks {}, wakes {}, solve us last {} max {} mean {}",
+                c.solves, outcome(Solver::Outcome::Safe), outcome(Solver::Outcome::Move), c.tightMoves,
+                outcome(Solver::Outcome::GraceMove), outcome(Solver::Outcome::Fallback),
+                outcome(Solver::Outcome::NoPath), c.pathChecks, c.lateArrivals, c.lateFallbacks, c.stuckResolves,
+                c.releases, c.motionStops, c.reroutes, c.lockBlocks, c.lockMoves, c.lockCasts, c.castBreaks, c.wakes,
+                c.solveUsLast, c.solveUsMax, mean);
+            // Debug = 1 only (BossMechanics.Bots.Debug): why candidates and navmesh calls failed, summed.
+            if (c.debugNav.probes || c.debugNav.calls)
+            {
+                handler->PSendSysMessage("  debug solve: {}", FormatSolveStats(c.debugSolve));
+                handler->PSendSysMessage("  debug nav: {}", FormatNavStats(c.debugNav));
+            }
         }
     }
 

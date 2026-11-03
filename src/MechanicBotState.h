@@ -18,6 +18,7 @@
 
 #include "Define.h"
 #include "Duration.h"
+#include "MechanicBotView.h"
 #include "MechanicFallibility.h"
 #include "MechanicSolver.h"
 #include "Value.h"
@@ -48,7 +49,9 @@ namespace BossMechanics
         uint32 solves = 0;
         uint32 pathChecks = 0;
         std::array<uint32, kOutcomes> outcomes{};       // indexed by Solver::Outcome
+        uint32 tightMoves = 0;      // Move outcomes found only at the reduced margin (Solver::Params::tightMarginYd)
         uint32 lateArrivals = 0;    // reached the target after the first window of the spot it left had started
+        uint32 lateFallbacks = 0;   // ...of which the plan was a Fallback or NoPath (late by construction)
         uint32 stuckResolves = 0;   // re-solved because the bot did not move for 500 ms during an escape
         uint32 releases = 0;        // escapes given up (stuck on the same target, rooted, or past the hard ceiling)
         uint32 motionStops = 0;     // foreign motion (follow, chase, ...) stopped because its path was unsafe
@@ -61,6 +64,9 @@ namespace BossMechanics
         uint32 solveUsLast = 0;
         uint32 solveUsMax = 0;
         uint64 solveUsTotal = 0;
+        // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
+        Solver::SolveStats debugSolve;
+        NavOracleStats debugNav;
     };
 
     struct MechanicBotState
@@ -87,6 +93,7 @@ namespace BossMechanics
         Solver::Input input;                                // the view: hazards, lanes, role band, crowd
         Milliseconds nextPerceptionAt = Solver::kForever;   // fallibility: a hidden mechanic becomes visible
         Milliseconds escapeDeadline = Solver::kForever;     // first window start at the spot the escape left
+        bool planReduced = false;                           // the plan came from the reduced-margin pass
         Geo::Vec3 stuckRef;                                 // escape: where the bot was at stuckSince (set when the
         Milliseconds stuckSince{ 0 };                       // escape begins and on progress only, never on a send)
         Geo::Vec3 issuedTarget;                             // the point the move action last tried
