@@ -47,6 +47,7 @@ namespace BossMechanics::Telegraph
         {
             Milliseconds nextFollowAt{ 0 };
             Milliseconds nextFillAt{ 0 };
+            uint32 fillStepMs = 0;      // this mechanic's fill step (FillStepInterval), set at the spawn
             bool liveShown = false;     // the fill shows the live-danger state (resolved, armed mine)
             bool fillFinal = false;     // a static mechanic whose fill reached its last state: no more fill steps
             // The fill layer (MarkerState entries in TelegraphState::markers too). Shape kinds, Stack/Soak and Spot:
@@ -135,8 +136,9 @@ namespace BossMechanics::Telegraph
         }
 
         // The drawn shape of a shape kind right now (pose = live anchor pose): the hitbox, except that a shrinking
-        // projectile line drops the part the projectile's tail has already passed (cosmetic, config), and a line with
-        // a draw strip (ExceptOne's last lane) draws only that strip.
+        // projectile line drops the part the projectile's tail has already passed, in whole steps of its width
+        // (ShrunkExcludeStart: cosmetic, config), and a line with a draw strip (ExceptOne's last lane) draws only that
+        // strip.
         Shape DrawnShape(Registry const& reg, ActiveMechanic const& m, Milliseconds now, Geo::Pose& pose)
         {
             Shape shape = reg.EffectiveShape(m, pose);
@@ -145,8 +147,7 @@ namespace BossMechanics::Telegraph
             {
                 float const half = m.projectile->halfLength > 0.f ? m.projectile->halfLength : shape.width * 0.5f;
                 float const tail = m.projectile->speed * SecondsOf(now - m.resolveAt) - half;
-                if (tail > shape.excludeStart)
-                    shape.excludeStart = std::min(tail, shape.length);
+                shape.excludeStart = ShrunkExcludeStart(tail, shape.excludeStart, shape.length, shape.width);
             }
             return shape;
         }
@@ -344,8 +345,18 @@ namespace BossMechanics::Telegraph
                     continue;
                 MarkerState& s = it->second;
                 VisualPiece const& piece = pick.pieces[i];
+                bool const swapped = piece.display != s.piece.display;
                 ApplyPiece(marker, s, piece);
-                MoveMarker(marker, s, PiecePose(pose, piece), anchorUnit);
+                Geo::Pose const target = PiecePose(pose, piece);
+                if (swapped && ShrinksProjectile(m))
+                {
+                    // A shrink step: the new (shorter) model goes out with its new start in the same tick, instead of
+                    // drawing from the old start while a spline carries it there (its far end overshooting meanwhile).
+                    marker->NearTeleportTo(target.x, target.y, target.z, Geo::Wrap2Pi(target.o));
+                    s.sent = target;
+                }
+                else
+                    MoveMarker(marker, s, target, anchorUnit);
             }
             MoveFillSlots(map, state, state.mechanics[m.id], pose, anchorUnit);
         }
@@ -506,9 +517,9 @@ namespace BossMechanics::Telegraph
 
         // One fill slot: spawn, resize, or despawn its marker so it draws `piece` (display 0: nothing). A line fill
         // piece past the first also moves along the line as the fill grows (PickFill scales its distance from the
-        // source); the spline takes one fill step, so it arrives with the next one.
+        // source); the spline takes one fill step (`stepMs`), so it arrives with the next one.
         void SyncFillSlot(Map* map, TelegraphState& state, ActiveMechanic const& m, Unit const* owner, ObjectGuid& slot,
-            Geo::Pose const& anchor, VisualPiece const& piece, bool facingMatters, ObjectGuid follow)
+            Geo::Pose const& anchor, VisualPiece const& piece, bool facingMatters, ObjectGuid follow, uint32 stepMs)
         {
             Creature* marker = slot.IsEmpty() ? nullptr : map->GetCreature(slot);
             auto it = slot.IsEmpty() ? state.markers.end() : state.markers.find(slot);
@@ -526,7 +537,7 @@ namespace BossMechanics::Telegraph
             bool const moved = piece.forward != it->second.piece.forward;
             ApplyPiece(marker, it->second, piece);
             if (moved)
-                MoveMarker(marker, it->second, PiecePose(anchor, piece), nullptr, GetConfig().fillStepMs);
+                MoveMarker(marker, it->second, PiecePose(anchor, piece), nullptr, stepMs);
         }
 
         // An armed mine's outline swaps to the dashed ring (one display swap when it arms; nothing after).
@@ -548,6 +559,21 @@ namespace BossMechanics::Telegraph
                 if (!ms.fill[i].IsEmpty())
                     DespawnMarker(map, state, ms.fill[i]);
             ms.fill.resize(n);
+        }
+
+        // This mechanic's fill step (round 4b): FillStepInterval over the fill it draws (the drawn shape of a shape
+        // kind, the radius's disc for the rest), so a big fill steps often enough to move smoothly and a small one no
+        // more often than FillStepMs.
+        uint32 FillStepFor(Registry const& reg, ActiveMechanic const& m, Milliseconds now)
+        {
+            ModuleConfig const& cfg = GetConfig();
+            Shape shape = Shape::Circle(m.shape.radius);
+            if (m.kind == Kind::Zone || m.kind == Kind::Frontal)
+            {
+                Geo::Pose pose;
+                shape = DrawnShape(reg, m, now, pose);
+            }
+            return FillStepInterval(m.resolveAt - m.createdAt, FillTravel(shape), cfg.fillStepYd, cfg.fillStepMs);
         }
 
         // One fill step: the timer fraction from createdAt to resolveAt (BossMechanics.Telegraph.FillLeadMs early),
@@ -586,7 +612,7 @@ namespace BossMechanics::Telegraph
                     ResizeFillSlots(map, state, ms, pick.pieces.size());
                     for (std::size_t k = 0; k < pick.pieces.size(); ++k)
                         SyncFillSlot(map, state, m, owner, ms.fill[k], pose, pick.pieces[k], facingMatters,
-                            ObjectGuid::Empty);
+                            ObjectGuid::Empty, ms.fillStepMs);
                     break;
                 }
                 case Kind::Stack:
@@ -605,7 +631,7 @@ namespace BossMechanics::Telegraph
                     ResizeFillSlots(map, state, ms, poses.size());
                     for (std::size_t k = 0; k < poses.size(); ++k)
                         SyncFillSlot(map, state, m, owner, ms.fill[k], poses[k], pick.pieces.front(), false,
-                            ObjectGuid::Empty);
+                            ObjectGuid::Empty, ms.fillStepMs);
                     break;
                 }
                 case Kind::Spread:
@@ -625,7 +651,7 @@ namespace BossMechanics::Telegraph
                             continue;
                         hosts.insert(it->second.follow);
                         SyncFillSlot(map, state, m, owner, ms.carrierFill[it->second.follow],
-                            PoseOf(unit->GetPosition()), pick.pieces.front(), false, it->second.follow);
+                            PoseOf(unit->GetPosition()), pick.pieces.front(), false, it->second.follow, ms.fillStepMs);
                     }
                     for (auto it = ms.carrierFill.begin(); it != ms.carrierFill.end();)
                     {
@@ -705,7 +731,8 @@ namespace BossMechanics::Telegraph
         Milliseconds const now = GameTime::GetGameTimeMS();
         MechanicState& ms = state.mechanics[m.id];
         ms.nextFollowAt = now + Milliseconds(GetConfig().followIntervalMs);
-        ms.nextFillAt = now + Milliseconds(GetConfig().fillStepMs);
+        ms.fillStepMs = FillStepFor(*reg, m, now);
+        ms.nextFillAt = now + Milliseconds(ms.fillStepMs);
 
         switch (m.kind)
         {
@@ -763,12 +790,12 @@ namespace BossMechanics::Telegraph
 
         if (!FillApplies(m))
             return;
-        // Every FillStepMs while the timer runs, and at once when the danger turns live (a mine arms, a persistent
-        // zone resolves).
+        // Every fill step (FillStepFor) while the timer runs, and at once when the danger turns live (a mine arms, a
+        // persistent zone resolves).
         MechanicState& ms = state.mechanics[m.id];
         if (DangerLive(m, now) != ms.liveShown || (!ms.fillFinal && now >= ms.nextFillAt))
         {
-            ms.nextFillAt = now + Milliseconds(cfg.fillStepMs);
+            ms.nextFillAt = now + Milliseconds(ms.fillStepMs ? ms.fillStepMs : cfg.fillStepMs);
             StepFill(map, state, *reg, m, ms, now);
         }
     }

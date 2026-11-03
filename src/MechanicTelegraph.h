@@ -10,8 +10,10 @@
  * Two layers per telegraph (M1 telegraph-fill fix):
  * - Outline (m.markers / m.carrierMarkers): rim + faint interior, the full hitbox from the first frame, never resized
  *   by the timer. The resolve casts from these.
- * - Fill (MechanicState::fill / carrierFill): the timer, stepped every BossMechanics.Telegraph.FillStepMs from
- *   createdAt to resolveAt (FillLeadMs early) and full while the danger is live (a resolved or persistent zone).
+ * - Fill (MechanicState::fill / carrierFill): the timer, stepped from createdAt to resolveAt (FillLeadMs early) and
+ *   full while the danger is live (a resolved or persistent zone). Each mechanic's step is FillStepInterval: short
+ *   enough that the fill's leading edge moves at most BossMechanics.Telegraph.FillStepYd per step, between 50 ms and
+ *   BossMechanics.Telegraph.FillStepMs.
  *   Circle / cone: grows from the centre / apex. Donut: a rim-only ring shrinks from the outer rim to the hole; live,
  *   the filled donut. Line: a scaled copy of the whole line grows from the source end, longer and wider together
  *   (scale only, no display swap while the timer runs). Travelling projectile lines get no fill (the projectile is

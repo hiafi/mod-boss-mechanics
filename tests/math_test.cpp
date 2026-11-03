@@ -2,6 +2,7 @@
 
 #include "check.h"
 #include "MechanicMath.h"
+#include <array>
 #include <map>
 #include <random>
 #include <set>
@@ -1166,6 +1167,236 @@ namespace
         CHECK(armed.pieces[0].scale == 4.f && armed.pieces[0].forward == 0.f);
         CHECK(Ids::DecodeMarkerDisplay(armed.pieces[0].display).shape == MarkerShape::DashedRing);
     }
+
+    // Round 4b Q13: the `.mech test lanes 6 4000 count=3 cross=1` layout (frame 40 x 40, lanes 6 wide, gaps >= 6, X
+    // lanes plus Y lanes, a cell at every crossing), over many random layouts and a rotated frame. For every lane and
+    // cell, both layers (outline, live fill, and the fill mid-timer): the hitbox is the lane / crossing rectangle,
+    // and the drawn rectangle (model x in [0, k], y in [-1/2, 1/2] at the piece's scale and pose) is that rectangle
+    // too: exactly for a cell (aspect 1 is a ladder step), and for a lane up to its ladder round-up at the far end.
+    // So the server draws each cell on its crossing; a cell that looks longer in game is the client's drawing.
+    void TestCrossingLayout()
+    {
+        // The drawn rectangle of one line piece, in frame coordinates: (fx lo, fx hi, fy lo, fy hi).
+        auto drawnRect = [](Frame const& f, Geo::Pose const& anchor, VisualPiece const& piece)
+        {
+            Geo::Pose const at = PieceWorldPose(anchor, piece);
+            float const k = PieceExtent(piece) / piece.scale;
+            std::array<float, 4> r{ 1e9f, -1e9f, 1e9f, -1e9f };
+            float const c = std::cos(f.angle);
+            float const sn = std::sin(f.angle);
+            for (float mx : { 0.f, k })
+                for (float my : { -0.5f, 0.5f })
+                {
+                    Geo::Vec3 const w = MarkerModelToWorld(at, piece.scale, mx, my);
+                    float const fx = c * (w.x - f.x) + sn * (w.y - f.y);
+                    float const fy = -sn * (w.x - f.x) + c * (w.y - f.y);
+                    r[0] = std::min(r[0], fx);
+                    r[1] = std::max(r[1], fx);
+                    r[2] = std::min(r[2], fy);
+                    r[3] = std::max(r[3], fy);
+                }
+            return r;
+        };
+        auto inRect = [](Frame const& f, Shape const& shape, Geo::Pose const& pose, float fx0, float fx1, float fy0,
+            float fy1)
+        {
+            // Points just inside the rectangle are in the hitbox, points just outside are not.
+            bool ok = true;
+            for (float a = 0.05f; a < 1.f; a += 0.1f)
+                for (float b = 0.05f; b < 1.f; b += 0.1f)
+                {
+                    Geo::Pose const q = FramePoint(f, fx0 + a * (fx1 - fx0), fy0 + b * (fy1 - fy0), 0.f);
+                    ok = ok && Geo::Contains(shape, pose, Geo::Vec3{ q.x, q.y, f.z });
+                }
+            float const midX = (fx0 + fx1) * 0.5f;
+            float const midY = (fy0 + fy1) * 0.5f;
+            for (auto [qx, qy] : { std::pair{ fx0 - 0.05f, midY }, std::pair{ fx1 + 0.05f, midY },
+                std::pair{ midX, fy0 - 0.05f }, std::pair{ midX, fy1 + 0.05f } })
+            {
+                Geo::Pose const q = FramePoint(f, qx, qy, 0.f);
+                ok = ok && !Geo::Contains(shape, pose, Geo::Vec3{ q.x, q.y, f.z });
+            }
+            return ok;
+        };
+
+        bool cellsExact = true;
+        bool cellsHit = true;
+        bool lanesExact = true;
+        bool lanesHit = true;
+        bool fillsInside = true;
+        int cells = 0;
+        for (std::uint32_t seed = 1; seed <= 200; ++seed)
+        {
+            std::mt19937 rng(seed);
+            std::uniform_real_distribution<float> dist(0.f, 1.f);
+            auto rnd = [&]() { return dist(rng); };
+            Frame f;
+            f.x = 300.f * dist(rng) - 150.f;
+            f.y = 300.f * dist(rng) - 150.f;
+            f.z = 12.f;
+            f.angle = Geo::kTwoPi * dist(rng);
+            f.sizeX = 40.f;
+            f.sizeY = 40.f;
+            std::vector<LaneRect> rects;
+            for (Axis axis : { Axis::X, Axis::Y })
+                for (float o : RandomLaneOffsets(FrameSpanAcross(f, axis), 3, 6.f, 6.f, rnd))
+                    rects.push_back({ axis, o, 6.f });
+            CHECK(rects.size() == 6);
+
+            for (LaneRect const& lane : rects)
+            {
+                LanePlacement const p = PlaceLane(f, lane);
+                Shape const shape = Shape::Line(p.length, p.width);
+                bool const x = lane.axis == Axis::X;
+                float const along0 = 0.f;
+                float const along1 = x ? f.sizeX : f.sizeY;
+                // The hitbox: [0, 40] along, [offset, offset + 6] across, in frame coordinates.
+                lanesHit = lanesHit && (x ? inRect(f, shape, p.pose, along0, along1, lane.offset, lane.offset + 6.f)
+                    : inRect(f, shape, p.pose, lane.offset, lane.offset + 6.f, along0, along1));
+                for (MarkerLayer layer : { MarkerLayer::Outline, MarkerLayer::Fill })
+                {
+                    VisualPick const pick = PickVisual(shape, 0, layer);
+                    CHECK(pick.pieces.size() == 1);
+                    std::array<float, 4> const r = drawnRect(f, p.pose, pick.pieces[0]);
+                    float const lo = x ? r[0] : r[2];
+                    float const hi = x ? r[1] : r[3];
+                    float const acrossLo = x ? r[2] : r[0];
+                    float const acrossHi = x ? r[3] : r[1];
+                    // Drawn from the frame edge to 40 yd, rounded up at most one ladder step (9%) at the far end.
+                    lanesExact = lanesExact && std::fabs(lo) < 1e-3f && hi >= 40.f - 1e-3f && hi <= 40.f * 1.0906f
+                        && std::fabs(acrossLo - lane.offset) < 1e-3f && std::fabs(acrossHi - lane.offset - 6.f) < 1e-3f;
+                }
+            }
+
+            for (LaneRect const& xl : rects)
+                for (LaneRect const& yl : rects)
+                {
+                    if (xl.axis != Axis::X || yl.axis != Axis::Y)
+                        continue;
+                    ++cells;
+                    LanePlacement const c = PlaceCrossing(f, xl, yl);
+                    Shape const shape = Shape::Line(c.length, c.width);
+                    cellsHit = cellsHit && inRect(f, shape, c.pose, yl.offset, yl.offset + 6.f, xl.offset,
+                        xl.offset + 6.f);
+                    VisualPick const outline = PickVisual(shape, 3, MarkerLayer::Outline);
+                    VisualPick const live = PickFill(shape, 3, 0.f, true);
+                    CHECK(outline.pieces.size() == 1 && live.pieces.size() == 1);
+                    CHECK(outline.pieces[0].display == D(3, MarkerShape::LineOutline, Ids::kLineUnitStep));   // 93308
+                    CHECK(live.pieces[0].display == D(3, MarkerShape::Line, Ids::kLineUnitStep));            // 92308
+                    for (VisualPiece const& piece : { outline.pieces[0], live.pieces[0] })
+                    {
+                        CHECK_NEAR(PieceExtent(piece), 6.f, 1e-5);
+                        CHECK_NEAR(piece.scale, 6.f, 1e-6);
+                        std::array<float, 4> const r = drawnRect(f, c.pose, piece);
+                        cellsExact = cellsExact && std::fabs(r[0] - yl.offset) < 1e-3f
+                            && std::fabs(r[1] - yl.offset - 6.f) < 1e-3f && std::fabs(r[2] - xl.offset) < 1e-3f
+                            && std::fabs(r[3] - xl.offset - 6.f) < 1e-3f;
+                    }
+                    // The timer fill (a cell never runs one: NoFillTimer; checked for completeness) stays inside.
+                    for (float fr : { 0.1f, 0.5f, 0.9f })
+                        fillsInside = fillsInside && FillInsideOutline(shape, c.pose, PickFill(shape, 3, fr, false));
+                }
+        }
+        CHECK(cells == 200 * 9);
+        CHECK(cellsExact);
+        CHECK(cellsHit);
+        CHECK(lanesExact);
+        CHECK(lanesHit);
+        CHECK(fillsInside);
+    }
+
+    // Round 4b Q8 / Q15: fill pacing by distance.
+    void TestFillPacing()
+    {
+        // How far the leading edge travels.
+        CHECK_NEAR(FillTravel(Shape::Line(30.f, 4.f)), 32.f, 1e-4);              // one piece, aspect 8 at width 4
+        CHECK_NEAR(FillTravel(Shape::Line(6.f, 6.f)), 6.f, 1e-4);
+        Shape ex = Shape::Line(30.f, 3.f);
+        ex.excludeStart = 5.f;
+        CHECK_NEAR(FillTravel(ex), PieceExtent(PickVisual(ex, 0, MarkerLayer::Fill).pieces[0]), 1e-4);   // from 5 yd
+        Shape const multi = Shape::Line(100.f, 1.5f);                             // 96 + 4 yd
+        VisualPick const mp = PickVisual(multi, 0, MarkerLayer::Fill);
+        CHECK(mp.pieces.size() == 2);
+        CHECK_NEAR(FillTravel(multi), mp.pieces[1].forward + PieceExtent(mp.pieces[1]), 1e-3);
+        CHECK(FillTravel(multi) >= 100.f - 1e-3f);
+        CHECK_NEAR(FillTravel(Shape::Circle(5.f)), 5.f, 1e-6);
+        CHECK_NEAR(FillTravel(Shape::Cone(90.f, 20.f)), 20.f, 1e-6);
+        CHECK_NEAR(FillTravel(Shape::Cone(300.f, 20.f)), 20.f, 1e-6);           // drawn as a disc
+        CHECK_NEAR(FillTravel(Shape::Donut(6.f, 12.f)), 12.f - DonutTimerEnd(12.f, 3), 1e-5);          // ratio 0.50
+        CHECK_NEAR(FillTravel(Shape::Donut(1.f, 12.f)), 12.f, 1e-6);            // below the ladder: a disc
+        CHECK(FillTravel(Shape::Line(0.f, 4.f)) == 0.f);
+
+        // The interval: 0.4 yd per step, between 50 ms and FillStepMs.
+        CHECK(FillStepInterval(Ms(4000), 32.f, 0.4f, 150) == 50);                // 30 x 4 line: 50 ms (Q15's feel)
+        CHECK(FillStepInterval(Ms(4000), 100.f, 0.4f, 150) == 50);               // capped at 50 ms
+        CHECK(FillStepInterval(Ms(4000), 5.f, 0.4f, 150) == 150);                // 5 yd circle: FillStepMs
+        CHECK(FillStepInterval(Ms(4000), 16.f, 0.4f, 150) == 100);
+        CHECK(FillStepInterval(Ms(6000), 32.f, 0.4f, 150) == 75);
+        CHECK(FillStepInterval(Ms(4000), 32.f, 0.f, 150) == 150);                // pacing off
+        CHECK(FillStepInterval(Ms(0), 32.f, 0.4f, 150) == 150);                  // no warning
+        CHECK(FillStepInterval(Ms(4000), 0.f, 0.4f, 150) == 150);                // nothing to time
+        CHECK(FillStepInterval(Ms(4000), 32.f, 0.4f, 50) == 50);                 // FillStepMs 50: always 50
+        CHECK(FillStepInterval(Ms(4000), 32.f, 0.4f, 300) == 50);
+
+        // The schedule the telegraph runs (one step per interval from the spawn, FillLeadMs 150): the leading edge
+        // never moves more than 0.4 yd per step unless the 50 ms floor holds it, and the last step before the resolve
+        // asks for the full fill.
+        std::vector<Shape> shapes;
+        for (float len : { 2.f, 6.f, 12.f, 30.f, 60.f, 100.f, 300.f })
+            shapes.push_back(Shape::Line(len, 4.f));
+        for (float r : { 1.f, 5.f, 20.f, 40.f })
+            shapes.push_back(Shape::Circle(r));
+        shapes.push_back(Shape::Cone(90.f, 30.f));
+        shapes.push_back(Shape::Donut(4.f, 30.f));
+        bool paced = true;
+        bool full = true;
+        for (Shape const& shape : shapes)
+            for (std::int64_t warn : { 1000, 2500, 4000, 8000 })
+            {
+                float const travel = FillTravel(shape);
+                std::uint32_t const step = FillStepInterval(Ms(warn), travel, 0.4f, 150);
+                CHECK(step >= 50 && step <= 150);
+                float const floorMove = travel * 50.f / static_cast<float>(warn);
+                float last = -1.f;
+                float lastF = 0.f;
+                for (std::int64_t t = 0; t < warn; t += step)
+                {
+                    float const f = FillFraction(Ms(0), Ms(warn), Ms(t), Ms(150));
+                    if (last >= 0.f && (f - last) * travel > std::max(0.4f, floorMove) + 1e-3f)
+                        paced = false;
+                    last = f;
+                    lastF = f;
+                }
+                full = full && lastF == 1.f;
+            }
+        CHECK(paced);
+        CHECK(full);
+    }
+
+    // Round 4b Q16: the projectile shrink moves the drawn start in whole widths (at least 1 yd), never past the tail.
+    void TestProjectileShrink()
+    {
+        CHECK(ShrunkExcludeStart(-2.f, 0.f, 30.f, 4.f) == 0.f);                  // tail not on the line yet
+        CHECK(ShrunkExcludeStart(3.9f, 0.f, 30.f, 4.f) == 0.f);
+        CHECK(ShrunkExcludeStart(4.f, 0.f, 30.f, 4.f) == 4.f);
+        CHECK(ShrunkExcludeStart(11.f, 0.f, 30.f, 4.f) == 8.f);
+        CHECK(ShrunkExcludeStart(40.f, 0.f, 30.f, 4.f) == 30.f);                 // past the end: capped at the length
+        CHECK(ShrunkExcludeStart(31.f, 0.f, 30.f, 3.f) == 30.f);                 // 30: nothing left to draw
+        CHECK(ShrunkExcludeStart(9.f, 5.f, 30.f, 3.f) == 8.f);                   // steps from the excluded start
+        CHECK(ShrunkExcludeStart(2.7f, 0.f, 30.f, 0.5f) == 2.f);                 // thin line: 1 yd steps
+        // Never past the tail, never before the real start, and a 30 x 4 projectile at 10 yd/s re-picks its outline
+        // only when the drawn start moves (once per 4 yd: at most 8 starts over the line, not one per follow step).
+        std::set<float> starts;
+        bool ok = true;
+        for (float tail = -2.f; tail <= 32.f; tail += 2.f)          // the tail every 200 ms at 10 yd/s
+        {
+            float const st = ShrunkExcludeStart(tail, 0.f, 30.f, 4.f);
+            ok = ok && st >= 0.f && (tail <= 0.f || st <= tail + 1e-4f) && st <= 30.f;
+            starts.insert(st);
+        }
+        CHECK(ok);
+        CHECK(starts.size() <= 9);
+    }
 }
 
 int main()
@@ -1183,5 +1414,8 @@ int main()
     TestLayers();
     TestFillFraction();
     TestFillPick();
+    TestCrossingLayout();
+    TestFillPacing();
+    TestProjectileShrink();
     return Report("math_test");
 }

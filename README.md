@@ -176,9 +176,14 @@ Every telegraph draws two layers:
 | Outline | rim (0.9) + faint interior (0.2) | the full hitbox from the first frame; never resized by the timer |
 | Fill | rim (0.9) + solid interior (0.35) | the timer: grows into the outline over the warning, full at the resolve |
 
-The fill is stepped every `Telegraph.FillStepMs` (150 ms) from the registration to the resolve, computed
-`Telegraph.FillLeadMs` (150 ms) ahead so the client's scale blend lands it on the outline at the resolve, not after;
-it is never bigger than the outline. Per shape:
+The fill is stepped from the registration to the resolve, computed `Telegraph.FillLeadMs` (150 ms) ahead so the
+client's scale blend lands it on the outline at the resolve, not after; it is never bigger than the outline. The step
+is paced by distance (`FillStepInterval`, round 4b): often enough that the fill's leading edge (a line's far end, a
+disc's rim, a cone's arc, the donut timer ring) moves at most `Telegraph.FillStepYd` (0.4 yd) per step, never more
+often than every 50 ms and never less often than `Telegraph.FillStepMs` (150 ms). The client's scale blend is shorter
+than a long step, so a big fill stepped slowly moved in visible jumps ("comes in segments"); a 30 x 4 line over 4 s
+now steps every 50 ms (0.4 yd), a 5 yd circle over 4 s every 150 ms. Keep `FillLeadMs` at least `FillStepMs`: then the
+last step before the resolve already asks for the full fill. `FillStepYd = 0` steps every `FillStepMs`. Per shape:
 
 - Circle, Stack/Soak/Spot discs, Spread/RunOut rings: a disc grows from the centre.
 - Cone: grows from the apex (uniform scale keeps the angle).
@@ -215,10 +220,11 @@ resizes send one value update per fill marker per step (~7 per second), like a m
   last piece rounded up to the ladder (`Rules::kLineNeverShorter`), so pieces never overlap and the only overshoot is
   the far end of the last piece (at most 9%, 19% below 1 width, and up to a quarter width for a line shorter than
   that).
-- Line models are symmetric about the marker (the client draws a model centred on its bounds) and made of two quads:
-  the back half x in [-k, 0] samples a transparent part of the texture, the front half x in [0, k] a body band that is
-  the same all along its length. So a line runs from the marker forward, both its ends are hard geometric edges (no
-  texture edge to blur behind a joint) and every aspect shares one texture (M1-FIX-LINE-FILL).
+- Line models are one quad, symmetric about the marker (the client draws a model centred on its bounds): x in
+  [-k, k] with the source quad's UVs, v growing with +X, on a texture that is transparent on rows v < 1/2. So a line
+  runs x in [0, k] from the marker forward, and every aspect shares one texture. Its far end is the quad's edge; its
+  start is the texture edge at v = 1/2, soft by half a texel of the active mip (round 4b reverted the two-quad model
+  of M1-FIX-LINE-FILL, which drew only part of the line in game).
   `PieceWorldPose` / `MarkerModelToWorld` are the placement the host test pins against `Geo::Contains`.
 - Lanes: `ExceptOne`'s last lane is clamped inside the frame and overlaps the one before it; its marker draws only
   the strip the others leave uncovered (`CoverLaneDrawnStrip`, `ApplyDrawStrip`), its hitbox stays the whole lane.
@@ -243,8 +249,11 @@ the live anchor; the marker trails by up to one interval.
 | 1 | `MotionMaster::MoveFollow(unit, 0, 0)` once | circles/rings on a unit only; cones and lines still use mode 0 |
 | 2 | `NearTeleportTo` every interval | jumpy, always correct |
 
-`ShrinkProjectileLines = 1` shortens a single-pass projectile line's marker behind the projectile's tail (cosmetic;
-pieces are re-picked and respawned when their count changes).
+`ShrinkProjectileLines = 1` (the default since round 4b) shortens a single-pass projectile line's marker behind the
+projectile's tail (cosmetic; pieces are re-picked and respawned when their count changes). The drawn start moves in
+steps of the line width, at least 1 yd (`ShrunkExcludeStart`): each step swaps the outline's model, which the client
+redraws with a brief flicker, so fewer, bigger steps flicker less. A swapped piece jumps to its new start in the same
+tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 
 ## `.mech` (GM, in game)
 
@@ -315,9 +324,10 @@ resolve hits). Keys that do not fit the shape are listed back as ignored.
 | `BossMechanics.Telegraph.FollowMode` | 0 | 0 spline step, 1 MoveFollow, 2 teleport |
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
 | `BossMechanics.Telegraph.Lift` | 0.1 | marker height above the anchor (yd) |
-| `BossMechanics.Telegraph.ShrinkProjectileLines` | 0 | shorten projectile markers behind the projectile |
+| `BossMechanics.Telegraph.ShrinkProjectileLines` | 1 | shorten projectile markers behind the projectile |
 | `BossMechanics.Telegraph.Fill` | 1 | 0: no fill timer (the fill still shows a live zone; mines unchanged) |
-| `BossMechanics.Telegraph.FillStepMs` | 150 | fill resize interval (min 50) |
+| `BossMechanics.Telegraph.FillStepMs` | 150 | longest fill step (min 50) |
+| `BossMechanics.Telegraph.FillStepYd` | 0.4 | fill edge moves at most this per step (>= 50 ms; 0 = fixed step) |
 | `BossMechanics.Telegraph.FillLeadMs` | 150 | fill computed this far ahead (client scale blend; max 2000) |
 | `BossMechanics.MaxActivePerMap` | 256 | registrations above it are refused with a warning |
 | `BossMechanics.OpenWorld.CandidateRadius` | 100 | open world: farther from the owner never takes part (0 = map) |

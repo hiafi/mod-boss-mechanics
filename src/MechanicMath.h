@@ -54,6 +54,10 @@ namespace BossMechanics
         constexpr float kRunOutTargetMarkerRadiusYd = 1.5f;
         // Telegraph fill: a fill piece smaller than this (yd) is not drawn yet (no near-zero creature scale).
         constexpr float kFillMinScaleYd = 0.1f;
+        // Telegraph fill pacing (round 4b): never step the fill more often than this (ms), whatever FillStepYd asks.
+        constexpr std::uint32_t kFillMinStepMs = 50;
+        // ShrinkProjectileLines: the drawn start moves in steps of the line width, but never smaller than this (yd).
+        constexpr float kShrinkMinStepYd = 1.f;
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -818,6 +822,12 @@ namespace BossMechanics
         return std::clamp(f, 0.f, 1.f);
     }
 
+    // The donut timer ring's last radius (its band then ends on the drawn hole's edge, on the danger side).
+    inline float DonutTimerEnd(float outer, std::uint32_t ratioStep)
+    {
+        return std::min(outer, Ids::kDonutRatios[ratioStep] * outer / (1.f - Ids::kTimerRingBandFrac));
+    }
+
     // The fill layer at timer fraction f. One entry per full-size fill piece (same order, so slot k always belongs
     // to piece k); display 0 = nothing drawn in that slot yet. `active` (the danger is live: resolved, an armed mine,
     // a running persistent zone) returns the full fill. Never bigger than the outline at any f, and never a display
@@ -848,7 +858,7 @@ namespace BossMechanics
             VisualPiece& piece = pick.pieces.front();
             Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(piece.display);
             float const outer = shape.radius;
-            float const end = std::min(outer, Ids::kDonutRatios[parts.step] * outer / (1.f - Ids::kTimerRingBandFrac));
+            float const end = DonutTimerEnd(outer, parts.step);
             piece.display = Ids::MarkerDisplay(parts.color, Ids::MarkerShape::TimerRing);
             piece.scale = outer + f * (end - outer);
             tooSmall(piece);
@@ -864,6 +874,53 @@ namespace BossMechanics
             tooSmall(piece);
         }
         return pick;
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Fill pacing (round 4b) and the projectile shrink
+    // ------------------------------------------------------------------------------------------------------------
+
+    // How far the fill's leading edge travels from f = 0 to the full fill (yd): a line's far end from its source end
+    // (every piece included), a disc's radius, a cone's length, a donut timer ring's way from the outer rim to its end.
+    inline float FillTravel(Shape const& shape)
+    {
+        VisualPick const full = PickVisual(shape, 0, MarkerLayer::Fill);
+        if (full.pieces.empty())
+            return 0.f;
+        if (shape.type == ShapeType::Donut && !full.filled)
+        {
+            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(full.pieces.front().display);
+            return shape.radius - DonutTimerEnd(shape.radius, parts.step);
+        }
+        VisualPiece const& last = full.pieces.back();
+        return last.forward - full.pieces.front().forward + PieceExtent(last);
+    }
+
+    // The fill step interval (ms) of one mechanic: short enough that the fill's leading edge moves at most `stepYd`
+    // per step over the warning (`travelYd` in `warn`), never shorter than Rules::kFillMinStepMs (nor than maxStepMs)
+    // and never longer than `maxStepMs` (BossMechanics.Telegraph.FillStepMs). The client blends each scale change in
+    // over less than a long step, so a big fill stepped slowly visibly jumps (round 4b, Q8); a small one needs no more
+    // than maxStepMs. stepYd <= 0 (pacing off), no travel or no warning: maxStepMs.
+    inline std::uint32_t FillStepInterval(Ms warn, float travelYd, float stepYd, std::uint32_t maxStepMs)
+    {
+        if (stepYd <= 0.f || travelYd <= 0.f || warn <= Ms(0))
+            return maxStepMs;
+        double const lo = std::min(Rules::kFillMinStepMs, maxStepMs);
+        double const ms = std::floor(static_cast<double>(warn.count()) * stepYd / travelYd);
+        return static_cast<std::uint32_t>(std::clamp(ms, lo, static_cast<double>(maxStepMs)));
+    }
+
+    // ShrinkProjectileLines: the drawn start of a projectile line whose projectile tail is at `tail` (yd along the
+    // line). Rounded down to whole steps of the line width (at least Rules::kShrinkMinStepYd) from the line's own
+    // start, so the outline is re-picked (a display swap: the client re-instances the model, which flickers) once per
+    // width of travel rather than on every follow step. Rounded down, the drawn line never starts past the tail.
+    inline float ShrunkExcludeStart(float tail, float excludeStart, float length, float width)
+    {
+        if (tail <= excludeStart)
+            return excludeStart;
+        float const step = std::max(width, Rules::kShrinkMinStepYd);
+        float const start = excludeStart + std::floor((tail - excludeStart) / step) * step;
+        return std::min(start, length);
     }
 }
 

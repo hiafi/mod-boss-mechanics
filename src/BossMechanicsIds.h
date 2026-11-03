@@ -33,9 +33,11 @@
  *
  * Line ladder (M1-FIX-LINE-FILL): k_i = 2^((i - 8) / 4) for i 0..7 (1/4 up to 0.84) and 2^((i - 8) / 8) for i 8..56
  * (1 to 64), the same for both layers (LineAspect in MechanicMath.h); +57..+99 of each line block are spare. A line
- * model is two quads, symmetric about its origin: the back half x in [-k, 0] samples a transparent texel region,
- * the front half x in [0, k] (model +X = the marker's facing) a body band that is constant along the length, so both
- * ends are hard geometric edges and every aspect shares one texture.
+ * model is one quad, symmetric about its origin (x in [-k, k]; the client draws a model centred on its bounds), with
+ * the source quad's UVs: v grows with +X and the line texture is transparent on rows v < 1/2, so the line runs
+ * x in [0, k] from the marker forward (model +X = the marker's facing). Its far end is the quad's edge; its start is
+ * the texture's edge at v = 1/2, soft by half a texel of the active mip. Every aspect shares one texture. (The
+ * two-quad model of M1-FIX-LINE-FILL drew only part of the line in game and was reverted in round 4b.)
  *
  * 91000-91833 used, 91834-91999 spare (91990-91995: the asset script's opt-in diagnostic displays), 92000-92856 and
  * 93000-93856 used, the rest of 92000-93999 spare. The markers used 90500-90699 before the colors fix

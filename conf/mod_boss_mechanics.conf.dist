@@ -60,12 +60,14 @@ BossMechanics.Telegraph.Lift = 0.1
 
 #
 #    BossMechanics.Telegraph.ShrinkProjectileLines
-#        Description: Shorten a projectile line's marker behind the projectile (cosmetic).
-#        Default:     0 - Disabled
-#                     1 - Enabled
+#        Description: Shorten a projectile line's marker behind the projectile (cosmetic). The drawn start moves
+#                     in steps of the line width (at least 1 yd); each step swaps the marker's model, which the client
+#                     redraws with a brief flicker.
+#        Default:     1 - Enabled
+#                     0 - Disabled
 #
 
-BossMechanics.Telegraph.ShrinkProjectileLines = 0
+BossMechanics.Telegraph.ShrinkProjectileLines = 1
 
 #
 #    BossMechanics.Telegraph.Fill
@@ -82,12 +84,25 @@ BossMechanics.Telegraph.Fill = 1
 
 #
 #    BossMechanics.Telegraph.FillStepMs
-#        Description: How often the fill is resized, in milliseconds (minimum 50). The client blends each scale
-#                     change in, so the growth looks smooth between steps.
+#        Description: The longest fill step: how often the fill is resized at most, in milliseconds (minimum 50).
+#                     The client blends each scale change in over a short time, so a big fill stepped slowly moves
+#                     in visible jumps; FillStepYd shortens the step for those. Keep FillLeadMs at least this long,
+#                     so the last step before the hit already asks for the full fill.
 #        Default:     150
 #
 
 BossMechanics.Telegraph.FillStepMs = 150
+
+#
+#    BossMechanics.Telegraph.FillStepYd
+#        Description: Pace the fill by distance: each mechanic steps its fill often enough that the fill's leading
+#                     edge (a line's far end, a disc's rim, a cone's arc) moves at most this many yards per step,
+#                     never more often than every 50 ms and never less often than FillStepMs. A 30 yd line over 4 s
+#                     steps every 50 ms; a 5 yd circle over 4 s every FillStepMs. 0 steps every FillStepMs.
+#        Default:     0.4
+#
+
+BossMechanics.Telegraph.FillStepYd = 0.4
 
 #
 #    BossMechanics.Telegraph.FillLeadMs
