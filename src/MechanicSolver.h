@@ -2710,6 +2710,38 @@ namespace BossMechanics::Solver
         work.holdUntil = Detail::HoldUntil(in, work.answers, work.arriveAt, work.target);
         return work;
     }
+
+    // M4 §3.7 (the barrage's Fallback share): may a Fallback or NoPath escape walk on although the rest of its way
+    // fails the margins? Such a path never passed them (that is what made it a Fallback), so the escape re-check
+    // measured it against a bar it could not clear and solved again on every view rebuild, nearly always to another
+    // Fallback (STAGE-M4-P-REPORT §3). It holds when the rest of the way from where the bot stands now (`rest`, the
+    // motion under way: no start delay) spends no more time inside the exact hitboxes while they are hot (drift
+    // kept, no yard or time margin: Plan::exposure's measure) than the plan did, and its end lies outside every
+    // exact hitbox while hot from the arrival on to `horizonEnd`. `clearOnly`: only a clear plan (exposure 0)
+    // holds; a hot one is solved again (a re-solve may still find it a clean way).
+    inline bool FallbackHolds(Input const& in, Plan const& plan, std::vector<Geo::Vec3> const& rest, Ms horizonEnd,
+        bool clearOnly)
+    {
+        if (plan.outcome != Outcome::Fallback && plan.outcome != Outcome::NoPath)
+            return false;
+        if (rest.empty() || (clearOnly && plan.exposure > Ms(0)))
+            return false;
+        Input exact;
+        exact.bot = in.bot;
+        exact.speed = in.speed;
+        exact.now = in.now;
+        exact.params = in.params;
+        exact.params.marginMs = Ms(0);
+        exact.params.startDelay = Ms(0);
+        exact.hazards = in.hazards;
+        for (Hazard& h : exact.hazards)
+            h.marginYd = std::max(0.f, h.driftYd);
+        PathCheck const pc = Detail::WalkPath(exact, rest, in.now, true, true);
+        // One densification step of travel: the rest is sampled from another phase than the plan was.
+        if (pc.timeInsideHot > plan.exposure + Detail::TravelMs(Detail::kStepYd, Detail::Speed(in)))
+            return false;
+        return PointSafe(exact, plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd));
+    }
 }
 
 #endif

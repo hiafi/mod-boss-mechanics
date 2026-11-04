@@ -299,7 +299,8 @@ BossMechanics.Bots.MaxCandidates = 400
 #
 #    BossMechanics.Bots.MaxPathChecks
 #        Description: Most navmesh paths one solve pass computes (1-64). A solve runs up to three passes (clean,
-#                     clean at a reduced 0.25 yd margin, mine grace) plus one for a fallback.
+#                     clean at a reduced 0.25 yd margin, mine grace) plus one for a fallback. A larger budget does not
+#                     turn crowd Fallbacks into moves (M4: 12 and 16 gave the same outcomes as 8 under a barrage).
 #        Default:     8
 #
 
@@ -566,7 +567,9 @@ BossMechanics.Bots.Route.Enable = 1
 
 #
 #    BossMechanics.Bots.Route.PadYd
-#        Description: Route search: yards (0-40) added around the bot and its goal for the search box.
+#        Description: Route search: yards (0-40) added around the bot and its goal for the search box. When that box
+#                     finds no route but hazards cross its edge, it grows once round the obstacle they form (up to
+#                     32 yd per side): a bot deep in a U of mines walks back out of the mouth first.
 #        Default:     8
 #
 

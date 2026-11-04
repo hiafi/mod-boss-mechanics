@@ -125,6 +125,10 @@ namespace
         CHECK(Judge::BaitHitsPickOnly(0.f));
         CHECK_NEAR(Judge::BaitHitRadius(0.f), 0.5f, 1e-6);
         CHECK(!Judge::BaitHitsPickOnly(6.f));
+        CHECK(!Judge::HitIsFailure(Kind::Bait, true));
+        CHECK(Judge::HitIsFailure(Kind::Bait, false));
+        CHECK(Judge::HitIsFailure(Kind::Zone, true));
+        CHECK(Judge::HitIsFailure(Kind::Spread, false));
         CHECK_NEAR(Judge::BaitHitRadius(6.f), 6.f, 1e-6);
         CHECK_NEAR(Judge::BaitHitRadius(0.2f), 0.5f, 1e-6);
     }

@@ -1109,7 +1109,8 @@ namespace BossMechanics
             return;
         if (Player* p = target->ToPlayer())
         {
-            PlayerFailure(*m, p->GetGUID(), FailureEvent::Type::Hit, damage);
+            if (Judge::HitIsFailure(m->kind, p->GetGUID() == m->baitTarget))
+                PlayerFailure(*m, p->GetGUID(), FailureEvent::Type::Hit, damage);
             ApplyWeakened(*m, p);
         }
         if (m->onHit && OwnerPresent(*m))
@@ -1633,6 +1634,7 @@ namespace BossMechanics
         {
             ObjectGuid const target = farthest->GetGUID();
             r.picked = target;
+            m.baitTarget = target;
             Geo::Pose const tp = ToPose(farthest->GetPosition());
             Shape circle = Shape::Circle(Judge::BaitHitRadius(m.shape.radius));     // B4: Radius(yd)
             circle.zTolerance = m.shape.zTolerance;

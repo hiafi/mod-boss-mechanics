@@ -96,7 +96,8 @@ namespace BossMechanics
             // M3: the player kinds, the tank tasks and the route search (STAGE-M3-HANDOFF §3.8 telemetry).
             handler->PSendSysMessage("  m3: carrier solves {}, claim solves {}, pick solves {}, role solves {}, "
                 "violated {}, freezes {}, facings {}, facing blocks {}, facing breaks {}, tank re-facings {} "
-                "(stopped by a warning {}), parks {}, routes {} found {} failed (us last {} max {}), sight rays {}",
+                "(stopped by a warning {}), parks {}, routes {} ({} found, {} failed, us last {} max {}), "
+                "sight rays {}",
                 c.carrierSolves, c.claimSolves, c.pickSolves, c.roleSolves, c.violatedPlans, c.freezes,
                 c.facingsApplied, c.facingBlocks, c.facingBreaks, c.tankRefacings, c.refacingStops, c.parks,
                 c.routesFound + c.routesFailed, c.routesFound, c.routesFailed, c.routeUsLast, c.routeUsMax,
@@ -108,10 +109,10 @@ namespace BossMechanics
             for (auto const& [spell, n] : c.leakSpells)
                 leakSpells += Acore::StringFormat("{}{} x{}", leakSpells.empty() ? "" : ", ", spell, n);
             handler->PSendSysMessage("  m4: time (s) idle {:.1f} watch {:.1f} escape {:.1f} hold {:.1f} freeze {:.1f} "
-                "released {:.1f} | leaks: moves {}, casts {}, turns {} (spells {}) | fallback clear {} hot {} | route "
-                "loops {}", secs(c.msIdle), secs(c.msWatch), secs(c.msEscape), secs(c.msHold), secs(c.msFreeze),
+                "released {:.1f} | leaks: moves {}, casts {}, turns {} (spells {}) | fallback clear {} hot {} kept {} "
+                "| route loops {}", secs(c.msIdle), secs(c.msWatch), secs(c.msEscape), secs(c.msHold), secs(c.msFreeze),
                 secs(c.msReleased), c.leakMoves, c.leakCasts, c.leakTurns, leakSpells.empty() ? "-" : leakSpells,
-                c.fallbackClear, c.fallbackHot, c.routeLoops);
+                c.fallbackClear, c.fallbackHot, c.fallbackKept, c.routeLoops);
             CostStats const& k = st->cost;
             uint32 mechanics = 0;
             uint32 mechanicMax = 0;

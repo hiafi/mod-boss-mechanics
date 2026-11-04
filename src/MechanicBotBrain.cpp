@@ -998,17 +998,7 @@ namespace BossMechanics
         // keep hazards only (a route is for following, not for a region or a carried shape, WP-A note).
         void TrimRoute(Solver::Input const& in, Solver::Plan& plan, Geo::Vec3 const& goal)
         {
-            std::size_t cut = 0;
-            std::size_t const keep = Solver::RouteHandoff(in, plan, goal, &cut) + 1;
-            if (keep < plan.waypoints.size() && cut + 1 < plan.path.size())
-            {
-                plan.waypoints.resize(keep);
-                plan.path.resize(cut + 1);
-                plan.target = plan.waypoints.back();
-                plan.arriveAt = in.now + in.params.startDelay
-                    + Solver::Detail::TravelMs(Solver::Detail::PathLength(plan.path), Solver::Detail::Speed(in));
-            }
-            plan.holdUntil = plan.arriveAt;
+            Solver::TrimToHandoff(in, plan, goal);
             std::erase_if(plan.answers, [&in](uint32 id) { return !FindHazard(in, id); });
         }
 
@@ -1050,10 +1040,10 @@ namespace BossMechanics
             if (cfg.debug)
             {
                 c.debugNav.Add(nav);
-                LOG_INFO(kLog, "Bot {}: route to ({:.1f}, {:.1f}) {}: {} cells ({:.2f} yd), {} blocked, {} expansions, "
-                    "{} legs, {} oracle calls, {} retries, pass {}, {} us", bot->GetName(), goal.x, goal.y,
-                    rs.found ? "found" : "none", rs.cells, rs.cellYd, rs.blocked, rs.expansions, rs.legs,
-                    rs.oracleCalls, rs.retries, PassName(plan.stats.pass), us);
+                LOG_INFO(kLog, "Bot {}: route to ({:.1f}, {:.1f}) {}: {} cells ({:.2f} yd{}), {} blocked, {} "
+                    "expansions, {} legs, {} oracle calls, {} retries, pass {}, {} us", bot->GetName(), goal.x, goal.y,
+                    rs.found ? "found" : "none", rs.cells, rs.cellYd, rs.grown ? ", box grown" : "", rs.blocked,
+                    rs.expansions, rs.legs, rs.oracleCalls, rs.retries, PassName(plan.stats.pass), us);
             }
             if (!rs.found || plan.outcome != Solver::Outcome::Move || plan.waypoints.empty())
             {
@@ -1310,14 +1300,23 @@ namespace BossMechanics
                 Solver::Input reduced;
                 if (st.planReduced)
                     reduced = Solver::ReducedMargins(in);
-                Solver::PathCheck const pc = CheckMotion(st.planReduced ? reduced : in,
-                    RemainingPath(st.plan.path, pos));
+                std::vector<Geo::Vec3> const rest = RemainingPath(st.plan.path, pos);
+                Solver::PathCheck const pc = CheckMotion(st.planReduced ? reduced : in, rest);
                 // A route's end only has to be hazard-safe (stock follow takes over there); a solve's target must
                 // pass TargetOk.
                 bool const endOk = st.plan.waypoints.empty()
                     ? Solver::TargetOk(in, st.plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd))
                     : Solver::PointSafe(in, st.plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd));
                 resolve = !pc.ok || !endOk;
+                // M4 §3.7: a clear Fallback never passed the margins, so it failed this check on every rebuild and
+                // was solved again, nearly always to another Fallback, and the turn-arounds cost hits (the barrage
+                // crowd, STAGE-M4-P-REPORT §3). It walks on while the rest of its way stays out of the exact
+                // hitboxes and its end stays clear; a hot one is still solved again.
+                if (resolve && Solver::FallbackHolds(in, st.plan, rest, horizonEnd, true))
+                {
+                    resolve = false;
+                    ++st.counters.fallbackKept;
+                }
                 if (!resolve)
                     st.solveBypass = false;
             }

@@ -79,6 +79,9 @@ namespace BossMechanics
         // while one of its windows is open (clear), or it does (hot). fallbackClear + fallbackHot = Fallback outcomes.
         uint32 fallbackClear = 0;
         uint32 fallbackHot = 0;
+        // Escape re-checks of a clear Fallback whose rest failed the margins but stayed clear: walked on, not solved
+        // again (Solver::FallbackHolds, WP-P).
+        uint32 fallbackKept = 0;
         // Route searches for (about) the same goal within 5 s of a route's handoff to stock follow (§3.7, U minefield).
         uint32 routeLoops = 0;
         // M4 lock (STAGE-M4-HANDOFF §3.5, WP-X; MechanicBotLock.cpp).

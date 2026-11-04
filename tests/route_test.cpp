@@ -1,7 +1,9 @@
-// Standalone tests for src/MechanicRoute.h (STAGE-M3-HANDOFF §4 WP-E).
+// Standalone tests for src/MechanicRoute.h (STAGE-M3-HANDOFF §4 WP-E; M4 §3.7 the U minefield, WP-P).
 // Build: tests/run.sh.
 
 #include "check.h"
+#include "brain_model.h"
+#include "MechanicDrillPlan.h"
 #include "MechanicRoute.h"
 #include <algorithm>
 #include <chrono>
@@ -254,6 +256,7 @@ namespace
         CHECK(st.oracleCalls == 0);
         CHECK(oracle.calls == 0);
         CHECK(st.expansions > 0 && st.expansions < st.cells);
+        CHECK(st.grown == 0);       // the search never reached the box's edge: a real enclosure (M4 §3.7)
         CHECK(plan.path.empty());
         CHECK(plan.waypoints.empty());
         CHECK(Dist(plan.target, in.bot) < 0.01f);
@@ -725,6 +728,176 @@ namespace
     //   y = 24   . . . o o o o o o o o o o
     //   y = 12   o o o o o o o o o o . . .
     //            bot (0, 0)
+    // ---- M4 §3.7: the U minefield follow cycle ------------------------------------------------------------------
+    //
+    // `.mech minefield layout=u` at its defaults (gap 8, depth 12, radius 3: 14 mines, opening toward the GM), the
+    // followers in and at the mouth of the U, the leader beyond its wall walking away. The brain model
+    // (tests/brain_model.h) runs the follow cycle: stock follow is a straight line to the follow point (leader + 2 yd
+    // at the bot's angle); a line across a mine asks TryReroute, else HoldHere with a route pending; the route
+    // (TrimToHandoff) is walked as an Escape and handed back to stock follow at its handoff waypoint.
+    struct FollowResult
+    {
+        std::uint32_t behind = 0, routes = 0, routesFound = 0, routesGrown = 0, routeLoops = 0, detonations = 0;
+    };
+
+    Input UMineInput()
+    {
+        Input in = MakeInput({ 0.f, 0.f, 0.f });
+        std::vector<Vec3> const mines = Drill::UMinefield({ 0.f, 0.f, 0.f }, 0.f, 8.f, 12.f, 3.f);
+        for (std::size_t i = 0; i < mines.size(); ++i)
+            in.hazards.push_back(MakeHazard(100 + static_cast<std::uint32_t>(i), Shape::Circle(3.f),
+                Pose{ mines[i].x, mines[i].y, 0.f, 0.f }, Solver::MakeMineArmed(Ms(0), Solver::kForever, Ms(500))));
+        return in;
+    }
+
+    FollowResult RunFollow(Input const& base, RouteParams const& rp, Vec3 leader, float heading, Ms walkFor,
+        std::vector<Vec3> const& starts, Ms runFor = Ms(40000))
+    {
+        BrainModel::World world;
+        world.cfg.route = rp;
+        world.hazards = base.hazards;
+        for (Vec3 const& p : starts)
+        {
+            BrainModel::Bot b;
+            b.pos = p;
+            world.bots.push_back(b);
+        }
+        auto followOf = [&leader](std::size_t i)
+        {
+            float const angle = 2.5f + 0.4f * static_cast<float>(i);
+            return Vec3{ leader.x + 2.f * std::cos(angle), leader.y + 2.f * std::sin(angle), 0.f };
+        };
+        world.follow = [&followOf](std::size_t i, Vec3& to)
+        {
+            to = followOf(i);
+            return true;
+        };
+        Ms const start{ 1000 };
+        for (Ms now = start; now < start + runFor; now += world.cfg.step)
+        {
+            if (now < start + walkFor)
+            {
+                leader.x += std::cos(heading) * 0.7f;
+                leader.y += std::sin(heading) * 0.7f;
+            }
+            world.Step(now);
+        }
+        FollowResult r;
+        for (std::size_t i = 0; i < world.bots.size(); ++i)
+            r.behind += Dist(world.bots[i].pos, followOf(i)) > 4.f;
+        BrainModel::Counters const c = world.Total();
+        r.routes = c.routes;
+        r.routesFound = c.routesFound;
+        r.routesGrown = c.routesGrown;
+        r.routeLoops = c.routeLoops;
+        r.detonations = c.hits;
+        return r;
+    }
+
+    // The M3 playtest's "one bot left behind a U, 289 routes, 0 detonations" (the `.mech bots` line printed the
+    // route total, then the counts shifted one place: STAGE-M4-P-REPORT). The bots that stood deep in the U never
+    // got a route: the follow box (bot and goal padded by Route.PadYd 8) holds no way out of the mouth, which lies
+    // behind them, and a bot in the inner corner had every grid neighbor blocked. Every search failed, the bot held
+    // HoldCapMs and searched again. The fix: the box grows round the obstacle it clipped (RouteParams::growYd), the
+    // blocked cells next to the start are freed when the bot can walk to them (FreeAroundStart).
+    void TestUMinefieldFollow()
+    {
+        Input const base = UMineInput();
+        CHECK(base.hazards.size() == 14);
+        // Pocket (two deep, one in the inner corner), mid-pocket, the mouth.
+        std::vector<Vec3> const starts{ { 8.f, -2.f, 0.f }, { 8.05f, 2.85f, 0.f }, { 6.f, 0.5f, 0.f },
+            { 3.f, 0.f, 0.f }, { -2.f, 0.f, 0.f } };
+        Vec3 const leader{ 20.f, 0.f, 0.f };
+
+        // The first search of a deep bot: no route inside the plain box; the grown box has one, round an arm.
+        {
+            Input in = base;
+            in.bot = starts[0];
+            in.now = kNow;
+            Vec3 const goal{ 22.f, 1.f, 0.f };
+            StraightOracle oracle;
+            RouteParams plain;
+            plain.growYd = 0.f;
+            RouteStats first;
+            CHECK(Solver::Route(in, goal, oracle, plain, &first).outcome == Outcome::Safe);
+            CHECK(!first.found && first.grown == 0);
+            RouteStats st;
+            Plan const p = Solver::Route(in, goal, oracle, RouteParams(), &st);
+            CHECK(p.outcome == Outcome::Move);
+            CHECK(st.found && st.grown == 1);
+            CHECK(Deepest(in, p.path, 100) >= 0.25f - 1e-3f);
+            float minX = 1e9f;
+            for (Vec3 const& q : p.path)
+                minX = std::min(minX, q.x);
+            CHECK(minX < -3.75f);       // out of the mouth first: past the mouth mines' outline
+            std::printf("route U follow: deep bot, plain box %u cells, %u expansions: none; grown box %u cells "
+                "(%.2f yd), %u legs, %u expansions in all\n", first.cells, first.expansions, st.cells, st.cellYd,
+                st.legs, st.expansions);
+        }
+        // The inner corner: every neighbor cell of the start is blocked by the grid; the bot can still walk away.
+        {
+            Input in = base;
+            in.bot = starts[1];
+            in.now = kNow;
+            CHECK(Solver::TargetOk(in, in.bot, kNow, kNow + in.params.horizon));
+            StraightOracle oracle;
+            RouteStats st;
+            Plan const p = Solver::Route(in, { 22.f, 1.f, 0.f }, oracle, RouteParams(), &st);
+            CHECK(p.outcome == Outcome::Move && st.found);
+        }
+
+        // The whole cycle, the leader walking off at 35°: every bot catches up, none detonates, no route loop.
+        FollowResult const fixed = RunFollow(base, RouteParams(), leader, 0.6f, Ms(4000), starts);
+        CHECK(fixed.behind == 0);
+        CHECK(fixed.detonations == 0);
+        CHECK(fixed.routeLoops == 0);
+        CHECK(fixed.routesFound >= 3);
+        CHECK(fixed.routesGrown >= 3);
+        CHECK(fixed.routesFound + 1 >= fixed.routes);
+        // Without the growth (the M3 search box) the deep bots stay behind, searching every HoldCapMs.
+        RouteParams plain;
+        plain.growYd = 0.f;
+        FollowResult const old = RunFollow(base, plain, leader, 0.6f, Ms(4000), starts);
+        CHECK(old.behind >= 3);
+        CHECK(old.routes > 30);
+        CHECK(old.detonations == 0);
+        std::printf("route U follow: grown: %u behind, %u routes (%u found, %u grown), %u loops, %u detonations; "
+            "plain box: %u behind, %u routes (%u found)\n", fixed.behind, fixed.routes, fixed.routesFound,
+            fixed.routesGrown, fixed.routeLoops, fixed.detonations, old.behind, old.routes, old.routesFound);
+
+        // Fuzz: leader start, heading and walk time; four followers in and around the U.
+        std::uint32_t seed = 11;
+        auto rnd = [&seed]()
+        {
+            seed = seed * 1664525u + 1013904223u;
+            return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24);
+        };
+        FollowResult sum;
+        int const runs = 120;
+        for (int it = 0; it < runs; ++it)
+        {
+            float const heading = (rnd() - 0.5f) * 3.f;
+            Ms const walk{ 1000 + static_cast<int>(8000.f * rnd()) };
+            Vec3 const from{ 17.f + 6.f * rnd(), (rnd() - 0.5f) * 16.f, 0.f };
+            std::vector<Vec3> fuzzStarts;
+            for (int k = 0; k < 4; ++k)
+                fuzzStarts.push_back({ -3.f + 12.f * rnd(), (rnd() - 0.5f) * 7.f, 0.f });
+            FollowResult const r = RunFollow(base, RouteParams(), from, heading, walk, fuzzStarts);
+            sum.behind += r.behind;
+            sum.routes += r.routes;
+            sum.routesFound += r.routesFound;
+            sum.routesGrown += r.routesGrown;
+            sum.routeLoops += r.routeLoops;
+            sum.detonations += r.detonations;
+        }
+        CHECK(sum.behind == 0);
+        CHECK(sum.detonations == 0);
+        CHECK(sum.routeLoops == 0);
+        std::printf("route U follow fuzz: %d runs x 4 bots: %u behind, %u routes (%u found, %u grown), %u loops, "
+            "%u detonations\n", runs, sum.behind, sum.routes, sum.routesFound, sum.routesGrown, sum.routeLoops,
+            sum.detonations);
+    }
+
     void MakeBench(Input& in, Vec3& goal)
     {
         in = MakeInput({ 0.f, 0.f, 0.f });
@@ -793,13 +966,15 @@ namespace
         CHECK(st.oracleCalls == in.params.maxPathChecks);
         CHECK(wall.calls == in.params.maxPathChecks);
         CHECK(plan.outcome == Outcome::Move || plan.outcome == Outcome::Safe);
+        CHECK(st.grown == 0);
         std::snprintf(detail, sizeof(detail),
             "%u cells, 30 mines, %u expansions, %u oracle calls, %u retries, %u pull checks", st.cells, st.expansions,
             st.oracleCalls, st.retries, st.pullChecks);
         CHECK(Bench("snake + pillar", [&] { Solver::Route(in, goal, wall, RouteParams()); }, detail) < 1000);
 
         // 3. The bot inside a closed ring of 30 mines in a 4,096-cell box: every reachable cell expanded, no oracle
-        // call.
+        // call. The box cuts the ring, so the search reaches its edge: the box grows round the ring once (M4 §3.7) and
+        // the second search finds the enclosure.
         Input ring = MakeInput({ 0.f, 0.f, 0.f });
         for (std::uint32_t i = 0; i < 30; ++i)
         {
@@ -809,9 +984,10 @@ namespace
         RouteStats rs;
         Solver::Route(ring, goal, straight, RouteParams(), &rs);
         CHECK(!rs.found);
-        CHECK(rs.cells == 4096);
-        std::snprintf(detail, sizeof(detail), "%u cells (%u blocked), %u expansions", rs.cells, rs.blocked,
-            rs.expansions);
+        CHECK(rs.grown == 1);
+        CHECK(rs.oracleCalls == 0);
+        std::snprintf(detail, sizeof(detail), "%u cells (%u blocked, grown %u), %u expansions", rs.cells, rs.blocked,
+            rs.grown, rs.expansions);
         CHECK(Bench("enclosed", [&] { Solver::Route(ring, goal, straight, RouteParams()); }, detail) < 1000);
 
         // 4. The goal inside a closed ring of 30 lasting mines (STAGE-M3-R-REPORT m-12): sealed, no A*.
@@ -828,6 +1004,39 @@ namespace
         std::snprintf(detail, sizeof(detail), "%u cells (%u blocked), %u expansions", rs.cells, rs.blocked,
             rs.expansions);
         CHECK(Bench("goal enclosed", [&] { Solver::Route(sealed, goal, straight, RouteParams()); }, detail) < 1000);
+
+        // 5. M4 §3.7: a bot deep in the layout=u minefield, its goal 30 yd past the wall. The plain box has no way out
+        // (the search reaches its edge), the grown box routes out of the mouth: two searches.
+        Input u = UMineInput();
+        u.bot = { 8.f, -2.f, 0.f };
+        u.now = kNow;
+        u.params.maxPathChecks = 8;
+        Vec3 const uGoal{ 38.f, 1.f, 0.f };
+        Plan const up = Solver::Route(u, uGoal, straight, RouteParams(), &rs);
+        CHECK(rs.found && rs.grown == 1);
+        std::snprintf(detail, sizeof(detail), "%u cells (%u blocked), %u expansions, %u legs", rs.cells, rs.blocked,
+            rs.expansions, rs.legs);
+        CHECK(Bench("U minefield, grown box", [&] { Solver::Route(u, uGoal, straight, RouteParams()); }, detail)
+            < 1000);
+        // 6. The same with a navmesh pillar across the grown route's first leg: the plain box, then the grown box and
+        // its retry after the rejected leg (three searches, the most one route search does now).
+        CHECK(!up.waypoints.empty());
+        if (!up.waypoints.empty())
+        {
+            Vec3 const& w0 = up.waypoints.front();
+            Vec3 const mid{ (u.bot.x + w0.x) / 2.f, (u.bot.y + w0.y) / 2.f, 0.f };
+            float const len = std::max(Dist(u.bot, w0), 0.01f);
+            float const nx = -(w0.y - u.bot.y) / len;
+            float const ny = (w0.x - u.bot.x) / len;
+            WallOracle pillar;
+            pillar.walls = { { { mid.x - nx, mid.y - ny, 0.f }, { mid.x + nx, mid.y + ny, 0.f } } };
+            Solver::Route(u, uGoal, pillar, RouteParams(), &rs);
+            CHECK(rs.grown == 1 && rs.retries == 1 && pillar.rejected >= 1);
+            std::snprintf(detail, sizeof(detail), "%u cells, %u expansions, %u oracle calls, %u retries, found %d",
+                rs.cells, rs.expansions, rs.oracleCalls, rs.retries, static_cast<int>(rs.found));
+            CHECK(Bench("U minefield, grown box + pillar", [&] { Solver::Route(u, uGoal, pillar, RouteParams()); },
+                detail) < 1000);
+        }
 
         // 5. 30 Lines (30 x 3 yd) or 30 cones (60°, 25 yd) over the box (STAGE-M3-R-REPORT M-5), hot later than the
         // bot passes: rasterized, then a clean route; and a barrage of 24 projectile lines across the way.
@@ -877,6 +1086,7 @@ int main()
     TestRasterizeExact();
     TestCornerCutFuzz();
     TestGoalSealed();
+    TestUMinefieldFollow();
     TestBenchmark();
     return Report("route_test");
 }

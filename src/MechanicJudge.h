@@ -114,6 +114,13 @@ namespace BossMechanics
             return radius <= 0.f;
         }
 
+        // A hit is a ledger failure unless it is the job: the Bait landing on the player it chose is the bait taken
+        // (that player still takes the damage and the Weakened stack); anyone else inside the landing circle failed.
+        constexpr bool HitIsFailure(Kind k, bool isBaitTarget)
+        {
+            return !(k == Kind::Bait && isBaitTarget);
+        }
+
         // Stack Cluster(n) (B3): how many of the other players stand within `circle` of `at`.
         inline std::uint32_t ClusterCount(Shape const& circle, Geo::Vec3 const& at,
             std::vector<Geo::Vec3> const& others)

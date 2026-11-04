@@ -543,10 +543,13 @@ while Idle on a map with mechanics) and runs the mode machine:
 - **Escape**: walking the solver's path. Within 0.6 yd at a spot that is safe (or once our spline has ended), or the
   move we sent ended short at a spot that is safe anyway -> Hold. (An exit lies 0.5 yd beyond the margin, so a bot
   stopped 0.6 yd short would still stand in it.) Path or target turned unsafe -> re-solve; a plan from the
-  reduced-margin pass is re-checked at the reduced margins. No progress (0.5 yd) for 500 ms since the escape began or
-  the bot last moved (re-sends do not restart this clock; refused sends count as no progress) -> re-solve; the same
-  target again -> released. Rooted, stunned or polymorphed with no progress -> released until it can move. One escape
-  past 2 x its planned travel + 1.5 s, or an unbroken run of escapes past 10 s -> released.
+  reduced-margin pass is re-checked at the reduced margins. A clear Fallback (its path spends no time inside an exact
+  hitbox while hot) never passed the margins, so it walks on while the rest of its way stays clear and its end stays
+  outside every exact hitbox; a hot one is solved again (`Solver::FallbackHolds`, M4: re-solving a clear Fallback on
+  every view rebuild turned bots round in a crowd and cost hits). No progress (0.5 yd) for 500 ms since the escape
+  began or the bot last moved (re-sends do not restart this clock; refused sends count as no progress) -> re-solve;
+  the same target again -> released. Rooted, stunned or polymorphed with no progress -> released until it can move.
+  One escape past 2 x its planned travel + 1.5 s, or an unbroken run of escapes past 10 s -> released.
 - **Released** (Watch for 1.5 s, or until a root ends): the stock AI has the bot back. Nothing is locked, no cast is
   broken and an unsafe spot is not solved, so a stuck or rooted bot heals, casts and follows; then it tries again.
 - **Hold**: at the safe spot until `holdUntil` (latest window end it answers, capped at `HoldCapMs`) -> Watch. Spot
@@ -654,7 +657,15 @@ the greedy one-hop re-route makes no progress, e.g. behind a U-shaped wall of ov
   0.25 yd) plus half a cell diagonal at the time the bot would get there (a zone over by then does not block), for the
   hazards hot before the bot could walk twice the way, or the way plus twice `Route.PadYd`. Each hazard pose tests only
   the cells of its own outline, row by row (a circle, and half-planes for a line or a cone of at most 180 degrees), with
-  the exact distance. Regions and carried shapes do not count. The bot's and the goal's cells are never blocked.
+  the exact distance. Regions and carried shapes do not count. The bot's and the goal's cells are never blocked, and
+  a blocked cell within two cells of the bot is freed when the bot can walk straight to it (the grid's half diagonal
+  boxed in a bot standing within a cell of a margin, M4).
+- **Grown box (M4):** no route in the box although the search (or the sealed-off goal's cells) reached its edge,
+  while hazards cross that edge: the box grows once round the obstacle they form (the hazards whose outline, bounds
+  plus margin, crosses the edge, and every hazard within 3 yd of one of them), at most `RouteParams::growYd` (32 yd)
+  per side, and the search runs again. A bot deep in a U of mines has its way out behind it, out of the mouth and
+  round an arm, which the bot-goal box does not hold (the M3 playtest's bot left behind). A true enclosure never
+  reaches the edge and never grows.
 - **Search:** a goal walled in by lasting hazards is found by a small flood fill first (no route, no A*); else
   8-connected A*, no corner cutting, octile heuristic, no route longer than the box's perimeter, at most
   `Route.MaxExpansions` expansions. Non-finite input or a goal over 500 yd away: no route.
@@ -666,8 +677,10 @@ the greedy one-hop re-route makes no progress, e.g. behind a U-shaped wall of ov
   `RouteHandoff` gives the first waypoint from which the straight line to the goal is clean at the full margin.
 - **Cost (host, tests/route_test, medians):** 4,096 cells, 30 mines, 6 legs: about 0.4 ms; the same with a rejected
   leg, a second search and all 8 path calls: about 0.75 ms; bot enclosed: about 0.06 ms; goal enclosed: about
-  0.02 ms; 30 lines (30 x 3 yd): about 0.27 ms; 30 cones (60 degrees, 25 yd): about 0.45 ms; 24 projectile lines:
-  about 0.55 ms. `Route.MaxCells` and `Route.MaxExpansions` are capped at 16,384 (a larger box costs more).
+  0.02 ms; 30 lines (30 x 3 yd): about 0.27 ms; 30 cones (60 degrees, 25 yd): about 0.47 ms; 24 projectile lines:
+  about 0.56 ms. M4: bot enclosed by a ring the box cuts (grown once, two searches): about 0.14 ms; a bot deep in the
+  layout=u minefield (grown box): about 0.15 ms, with a rejected leg and the retry (three searches): about 0.21 ms.
+  `Route.MaxCells` and `Route.MaxExpansions` are capped at 16,384 (a larger box costs more).
 
 ### Player kinds (view)
 
@@ -827,8 +840,9 @@ M4 adds three lines (the same numbers reach the sim through `Sim::ReadBotStats`)
 - `m4`: seconds in each mode (idle, watch, escape, hold, freeze, released; a released bot counts as released only),
   the lock leaks (moves, casts and turns the lock should have stopped, seen from the outcome, with the spell id x
   count of each leaked cast or movement spell; rules in `src/MechanicLeaks.h`), Fallback outcomes split by exposure
-  (clear: the path spends no time inside an exact hitbox while it is hot; hot: it does), and route loops (a route
-  search for about the same goal within 5 s of a route's handoff to stock follow);
+  (clear: the path spends no time inside an exact hitbox while it is hot; hot: it does), the Escape re-checks of a
+  clear Fallback that walked on (kept), and route loops (a route search for about the same goal within 5 s of a
+  route's handoff to stock follow);
 - `cost`: navmesh path calls with their mean, p95 and max microseconds, probes and sight rays with their max, the
   lane-frame candidates and the path calls spent on them, path calls per mechanic (max and mean, plus those of plans
   that answer no mechanic);
