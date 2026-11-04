@@ -10,6 +10,7 @@
  *   old; it also fires while the instance loads and for unchanged states; deferred to the next tick so JustDied can
  *   still read the ledger, and dropped if the instance refused the change).
  * - Player leaves the map: OnPlayerLeaveAll drops their Weakened.
+ * - Bots (M2): right after each registry Tick, the after-tick hook the bot glue installs (SetBotAfterTick).
  */
 
 #include "AllCreatureScript.h"
@@ -27,12 +28,16 @@
 #include "Player.h"
 #include "UnitScript.h"
 #include "WorldScript.h"
+#include <atomic>
 
 using namespace BossMechanics;
 
 namespace
 {
     constexpr char const* kLog = "module.bossmechanics";
+
+    // Set by the bot glue (startup or the first world tick); read on the map threads, hence atomic.
+    std::atomic<BotAfterTickFn> sBotAfterTick{ nullptr };
 
     // Ends `unit`'s encounter now, when it owns one on its map.
     void EndEncounterOf(Unit* unit)
@@ -43,6 +48,11 @@ namespace
         if (reg && reg->FindEncounter(unit->GetGUID()))
             reg->EndEncounter(unit->GetGUID());
     }
+}
+
+void BossMechanics::SetBotAfterTick(BotAfterTickFn fn)
+{
+    sBotAfterTick.store(fn, std::memory_order_release);
 }
 
 class BossMechanicsWorldScript : public WorldScript
@@ -70,7 +80,10 @@ public:
         if (GetConfig().debug && reg->Size())
             LOG_INFO(kLog, "Map {} instance {}: tick diff {} ms, {} mechanics", map->GetId(), map->GetInstanceId(),
                 diff, reg->Size());
-        reg->Tick(GameTime::GetGameTimeMS());
+        Milliseconds const now = GameTime::GetGameTimeMS();
+        reg->Tick(now);
+        if (BotAfterTickFn fn = sBotAfterTick.load(std::memory_order_acquire))
+            fn(map, *reg, now);
     }
 
     void OnPlayerLeaveAll(Map* map, Player* player) override

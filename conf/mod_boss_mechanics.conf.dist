@@ -174,3 +174,279 @@ BossMechanics.MaxActivePerMap = 256
 #
 
 BossMechanics.OpenWorld.CandidateRadius = 100
+
+########################################
+# Bots (needs mod-playerbots; ignored without it)
+########################################
+#
+#    BossMechanics.Bots.Enable
+#        Description: Teach playerbots to dodge registered mechanics (Zones; Frontals the tank exemption does not
+#                     cover). Read once, at the first world tick: changing it needs a restart.
+#        Default:     1 - Enabled
+#                     0 - Disabled (nothing is registered with playerbots)
+#
+
+BossMechanics.Bots.Enable = 1
+
+#
+#    BossMechanics.Bots.AvoidAoeInInstances
+#        Description: Also give every bot inside a dungeon or raid the stock "avoid aoe" strategy, whether or not it
+#                     has a real player as master. Removed again on leaving, unless the stock rule would add it.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Bots.AvoidAoeInInstances = 1
+
+#
+#    BossMechanics.Bots.OpenWorldTestScope
+#        Description: Outside instances, give the boss mechanics strategy to bots grouped with a GM who ran
+#                     `.mech test` on their map (for playtests in the open world).
+#        Default:     1 - Enabled
+#                     0 - Disabled (instances only)
+#
+
+BossMechanics.Bots.OpenWorldTestScope = 1
+
+#
+#    BossMechanics.Bots.GateSweepMs
+#        Description: How often every online bot is checked for the strategy, in milliseconds (100-60000). The sweep
+#                     repairs a strategy reset mid-fight, so this is also the longest such gap.
+#        Default:     1000
+#
+
+BossMechanics.Bots.GateSweepMs = 1000
+
+#
+#    BossMechanics.Bots.FastTickMs
+#        Description: Longest gap between AI updates of a bot a mechanic concerns, in milliseconds (0-1000). Bots
+#                     without a real master otherwise think only every 0.5-3 s. 0 wakes them on every map update.
+#        Default:     100
+#
+
+BossMechanics.Bots.FastTickMs = 100
+
+#
+#    BossMechanics.Bots.StartDelayMs
+#        Description: Delay the solver assumes before a bot starts moving, in milliseconds (0-2000).
+#        Default:     150
+#
+
+BossMechanics.Bots.StartDelayMs = 150
+
+#
+#    BossMechanics.Bots.SafetyMarginYd
+#        Description: Distance bots keep from every hazard edge, in yards (0.25-5). The lower bound is half the
+#                     0.5 yd path sampling step, so a path cannot clip a cone or line corner between two samples.
+#        Default:     0.75
+#
+
+BossMechanics.Bots.SafetyMarginYd = 0.75
+
+#
+#    BossMechanics.Bots.SafetyMarginMs
+#        Description: Each hazard's dangerous time is widened by this much at both ends, in milliseconds (0-2000).
+#        Default:     300
+#
+
+BossMechanics.Bots.SafetyMarginMs = 300
+
+#
+#    BossMechanics.Bots.PostResolveHoldMs
+#        Description: A one-shot Zone is still treated as live this long after it should have hit, in milliseconds
+#                     (0-5000): the hit lands on the next full map update, which can come a little late.
+#        Default:     500
+#
+
+BossMechanics.Bots.PostResolveHoldMs = 500
+
+#
+#    BossMechanics.Bots.GraceMarginMs
+#        Description: When a bot has to cross an armed mine (no clean path exists), it may spend at most the mine's
+#                     grace time minus this inside it, in milliseconds (0-5000).
+#        Default:     250
+#
+
+BossMechanics.Bots.GraceMarginMs = 250
+
+#
+#    BossMechanics.Bots.HorizonMs
+#        Description: Dangers starting later than this from now are ignored by a solve, in milliseconds
+#                     (1000-60000).
+#        Default:     10000
+#
+
+BossMechanics.Bots.HorizonMs = 10000
+
+#
+#    BossMechanics.Bots.HoldCapMs
+#        Description: Longest a bot holds its safe spot against a lasting danger (a persistent zone, an armed mine)
+#                     before its normal movement may try again, in milliseconds (0-60000).
+#        Default:     3000
+#
+
+BossMechanics.Bots.HoldCapMs = 3000
+
+#
+#    BossMechanics.Bots.MaxCandidates
+#        Description: Most candidate spots one solve scores (16-4000).
+#        Default:     400
+#
+
+BossMechanics.Bots.MaxCandidates = 400
+
+#
+#    BossMechanics.Bots.MaxPathChecks
+#        Description: Most navmesh paths one solve pass computes (1-64). A solve runs up to three passes (clean,
+#                     clean at a reduced 0.25 yd margin, mine grace) plus one for a fallback.
+#        Default:     8
+#
+
+BossMechanics.Bots.MaxPathChecks = 8
+
+#
+#    BossMechanics.Bots.GridStepYd
+#        Description: Spacing of the candidate grid laid over a lane room frame, in yards (0.5-10).
+#        Default:     2
+#
+
+BossMechanics.Bots.GridStepYd = 2
+
+#
+#    BossMechanics.Bots.MinSolveIntervalMs
+#        Description: Shortest time between two solves of one bot, in milliseconds (0-5000). The first solve after a
+#                     new or changed mechanic is never delayed.
+#        Default:     150
+#
+
+BossMechanics.Bots.MinSolveIntervalMs = 150
+
+#
+#    BossMechanics.Bots.MovingAnchorRecheckMs
+#        Description: While a danger that follows a unit concerns a bot, its position is re-read this often, in
+#                     milliseconds (50-5000).
+#        Default:     250
+#
+
+BossMechanics.Bots.MovingAnchorRecheckMs = 250
+
+#
+#    BossMechanics.Bots.RoleSlackMs
+#        Description: A holding bot out of its role range (melee range, ranged band, follow distance) this long
+#                     looks for a better safe spot, in milliseconds (0-60000).
+#        Default:     1000
+#
+
+BossMechanics.Bots.RoleSlackMs = 1000
+
+#
+#    BossMechanics.Bots.RangedDistanceYd
+#        Description: Ranged bots and healers prefer safe spots between 8 yards and this + 6 yards from their
+#                     anchor (8-40).
+#        Default:     22
+#
+
+BossMechanics.Bots.RangedDistanceYd = 22
+
+#
+#    BossMechanics.Bots.FacingSlackDeg
+#        Description: Cones and lines that turn with their unit are also checked this many degrees to either side
+#                     (0-90), in case the unit turns during the warning.
+#        Default:     15
+#
+
+BossMechanics.Bots.FacingSlackDeg = 15
+
+#
+#    BossMechanics.Bots.Debug
+#        Description: Log one line per bot solve (category module.bossmechanics.bots) with why candidates and
+#                     navmesh calls failed, sum those counts in .mech bots, and check the bots' view of each hazard
+#                     against the registry's own timing.
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#
+
+BossMechanics.Bots.Debug = 0
+
+#
+#    BossMechanics.Bots.Fallibility.Enable
+#        Description: Make bots human: they notice mechanics late, sometimes very late, and sometimes ignore one until
+#                     shortly before it hits. The rolls are fixed per bot and mechanic for a given seed.
+#        Default:     0 - Disabled (bots react perfectly)
+#                     1 - Enabled
+#
+
+BossMechanics.Bots.Fallibility.Enable = 0
+
+#
+#    BossMechanics.Bots.Fallibility.ReactionMs
+#        Description: Base delay before a bot sees a new mechanic, in milliseconds (0-5000).
+#        Default:     350
+#
+
+BossMechanics.Bots.Fallibility.ReactionMs = 350
+
+#
+#    BossMechanics.Bots.Fallibility.JitterMs
+#        Description: Each bot adds its own fixed extra delay between 0 and this, in milliseconds (0-5000).
+#        Default:     250
+#
+
+BossMechanics.Bots.Fallibility.JitterMs = 250
+
+#
+#    BossMechanics.Bots.Fallibility.LateChancePct
+#        Description: Chance in percent (0-100) that a bot notices a given mechanic LateExtraMs later still.
+#        Default:     5
+#
+
+BossMechanics.Bots.Fallibility.LateChancePct = 5
+
+#
+#    BossMechanics.Bots.Fallibility.LateExtraMs
+#        Description: The extra delay of a late reaction, in milliseconds (0-5000).
+#        Default:     700
+#
+
+BossMechanics.Bots.Fallibility.LateExtraMs = 700
+
+#
+#    BossMechanics.Bots.Fallibility.WrongSideChancePct
+#        Description: Chance in percent (0-100) that a bot ignores a given mechanic until RealiseMs before it hits.
+#        Default:     3
+#
+
+BossMechanics.Bots.Fallibility.WrongSideChancePct = 3
+
+#
+#    BossMechanics.Bots.Fallibility.RealiseMs
+#        Description: How long before the danger a "wrong side" bot realises its mistake, in milliseconds (0-10000).
+#        Default:     700
+#
+
+BossMechanics.Bots.Fallibility.RealiseMs = 700
+
+#
+#    BossMechanics.Bots.Fallibility.ScaleNormal
+#        Description: Multiplies the delays and chances above on normal-difficulty maps (0-10).
+#        Default:     1.0
+#
+
+BossMechanics.Bots.Fallibility.ScaleNormal = 1.0
+
+#
+#    BossMechanics.Bots.Fallibility.ScaleHeroic
+#        Description: Multiplies the delays and chances above on heroic maps (0-10).
+#        Default:     1.0
+#
+
+BossMechanics.Bots.Fallibility.ScaleHeroic = 1.0
+
+#
+#    BossMechanics.Bots.Fallibility.Seed
+#        Description: Seed for the rolls; the same seed gives the same mistakes. 0 draws a new random seed at every
+#                     config load (logged when Fallibility.Enable = 1).
+#        Default:     0
+#
+
+BossMechanics.Bots.Fallibility.Seed = 0

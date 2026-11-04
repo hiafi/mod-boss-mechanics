@@ -22,6 +22,49 @@ namespace BossMechanics
         Teleport = 2        // NearTeleportTo every interval (jumpy, always correct)
     };
 
+    // D1 (M2 handoff §3.8): human-like reaction delays and mistakes for bots. All off by default.
+    struct BotFallibilityConfig
+    {
+        bool enable = false;                                    // BossMechanics.Bots.Fallibility.Enable
+        uint32 reactionMs = 350;                                // .ReactionMs
+        uint32 jitterMs = 250;                                  // .JitterMs
+        float lateChancePct = 5.f;                              // .LateChancePct
+        uint32 lateExtraMs = 700;                               // .LateExtraMs
+        float wrongSideChancePct = 3.f;                         // .WrongSideChancePct
+        uint32 realiseMs = 700;                                 // .RealiseMs
+        float scaleNormal = 1.f;                                // .ScaleNormal
+        float scaleHeroic = 1.f;                                // .ScaleHeroic
+        uint64 seed = 0;                                        // .Seed as configured (0 = random per load)
+        uint64 effectiveSeed = 0;                               // the seed in use: .Seed, or drawn at load when 0
+    };
+
+    // Bots (M2 handoff §3.2). Cached here by LoadConfig; the bot glue never reads sConfigMgr.
+    struct BotConfig
+    {
+        bool enable = true;                                     // BossMechanics.Bots.Enable
+        bool avoidAoeInInstances = true;                        // BossMechanics.Bots.AvoidAoeInInstances
+        bool openWorldTestScope = true;                         // BossMechanics.Bots.OpenWorldTestScope
+        uint32 gateSweepMs = 1000;                              // BossMechanics.Bots.GateSweepMs
+        uint32 fastTickMs = 100;                                // BossMechanics.Bots.FastTickMs
+        uint32 startDelayMs = 150;                              // BossMechanics.Bots.StartDelayMs
+        float safetyMarginYd = 0.75f;                           // BossMechanics.Bots.SafetyMarginYd
+        uint32 safetyMarginMs = 300;                            // BossMechanics.Bots.SafetyMarginMs
+        uint32 postResolveHoldMs = 500;                         // BossMechanics.Bots.PostResolveHoldMs
+        uint32 graceMarginMs = 250;                             // BossMechanics.Bots.GraceMarginMs
+        uint32 horizonMs = 10000;                               // BossMechanics.Bots.HorizonMs
+        uint32 holdCapMs = 3000;                                // BossMechanics.Bots.HoldCapMs
+        uint32 maxCandidates = 400;                             // BossMechanics.Bots.MaxCandidates
+        uint32 maxPathChecks = 8;                               // BossMechanics.Bots.MaxPathChecks
+        float gridStepYd = 2.f;                                 // BossMechanics.Bots.GridStepYd
+        uint32 minSolveIntervalMs = 150;                        // BossMechanics.Bots.MinSolveIntervalMs
+        uint32 movingAnchorRecheckMs = 250;                     // BossMechanics.Bots.MovingAnchorRecheckMs
+        uint32 roleSlackMs = 1000;                              // BossMechanics.Bots.RoleSlackMs
+        float rangedDistanceYd = 22.f;                          // BossMechanics.Bots.RangedDistanceYd
+        float facingSlackDeg = 15.f;                            // BossMechanics.Bots.FacingSlackDeg
+        bool debug = false;                                     // BossMechanics.Bots.Debug
+        BotFallibilityConfig fallibility;                       // BossMechanics.Bots.Fallibility.*
+    };
+
     struct ModuleConfig
     {
         bool enable = true;                                     // BossMechanics.Enable
@@ -41,6 +84,7 @@ namespace BossMechanics
         uint32 fillLeadMs = 150;                                // BossMechanics.Telegraph.FillLeadMs
         uint32 maxActivePerMap = 256;                           // BossMechanics.MaxActivePerMap
         float openWorldCandidateRadius = 100.f;                 // BossMechanics.OpenWorld.CandidateRadius (0 = map)
+        BotConfig bots;                                         // BossMechanics.Bots.*
 
         ModuleConfig();
     };
