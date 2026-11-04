@@ -9,6 +9,7 @@
 #include "MechanicBotStrategy.h"
 #include "GameTime.h"
 #include "MechanicBotBrain.h"
+#include "MechanicBotFacing.h"
 #include "MechanicBotLock.h"
 #include "MechanicBotState.h"
 #include "MotionMaster.h"
@@ -48,7 +49,7 @@ namespace
     {
         if (st.escapeSentAt == Milliseconds(0))
             return false;
-        Geo::Vec3 const& t = st.plan.target;
+        Geo::Vec3 const t = BotBrain::MoveTarget(st);
         if (Geo::Dist2d(st.issuedTarget.x, st.issuedTarget.y, t.x, t.y) > 0.1f)
             return false;   // re-planned since the last attempt
         if (st.escapeIssuedAt != Milliseconds(0))
@@ -78,6 +79,8 @@ void MechanicBotStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         { NextAction("boss mechanic move", ACTION_EMERGENCY + 6) }));
     triggers.push_back(new TriggerNode("boss mechanic hold",
         { NextAction("boss mechanic hold", ACTION_EMERGENCY + 5) }));
+    triggers.push_back(new TriggerNode("boss mechanic face",
+        { NextAction("boss mechanic face", ACTION_EMERGENCY + 4) }));
 }
 
 void MechanicBotStrategy::InitMultipliers(std::vector<Multiplier*>& multipliers)
@@ -94,7 +97,14 @@ bool MechanicBotRepositionTrigger::IsActive()
 bool MechanicBotHoldTrigger::IsActive()
 {
     MechanicBotState* st = Think(botAI, _state);
-    return st && st->mode == MechanicBotMode::Hold && BotBrain::HasForeignMotion(bot);
+    return st && (st->mode == MechanicBotMode::Hold || st->mode == MechanicBotMode::Freeze)
+        && BotBrain::HasForeignMotion(bot);
+}
+
+bool MechanicBotFaceTrigger::IsActive()
+{
+    MechanicBotState* st = Think(botAI, _state);
+    return st && st->faceOwed && BotFacing::FacingOff(bot, st->faceAngle);
 }
 
 bool MechanicBotMoveAction::isUseful()
@@ -116,7 +126,8 @@ bool MechanicBotMoveAction::Execute(Event /*event*/)
     last.msTime = 0;
     last.lastdelayTime = 0;
 
-    Geo::Vec3 const target = st->plan.target;
+    // Route (M3): the current waypoint; each leg is the oracle-validated one, so MoveTo paths it the same way.
+    Geo::Vec3 const target = BotBrain::MoveTarget(*st);
     Milliseconds const now = Now();
     st->escapeSentAt = now;
     st->issuedTarget = target;
@@ -132,7 +143,7 @@ bool MechanicBotMoveAction::Execute(Event /*event*/)
 bool MechanicBotHoldAction::isUseful()
 {
     MechanicBotState* st = _state.Get(botAI);
-    return st && st->mode == MechanicBotMode::Hold;
+    return st && (st->mode == MechanicBotMode::Hold || st->mode == MechanicBotMode::Freeze);
 }
 
 bool MechanicBotHoldAction::Execute(Event /*event*/)
@@ -143,9 +154,34 @@ bool MechanicBotHoldAction::Execute(Event /*event*/)
     bot->StopMoving();
     // Also drops a persistent MoveFollow (stock follow, mod-dungeon-clear's follow-tank).
     bot->GetMotionMaster()->Clear();
+    // Look-away (M3): the chosen facing, not the victim (the face action keeps it).
+    MechanicBotState* st = _state.Get(botAI);
+    if (st && st->faceOwed)
+    {
+        if (BotFacing::FacingOff(bot, st->faceAngle))
+            BotFacing::Apply(bot, st->faceAngle);
+        return true;
+    }
     if (Unit* face = BotBrain::FacingTarget(bot))
         if (!bot->HasInArc(CAST_ANGLE_IN_FRONT, face))
             bot->SetFacingToObject(face);
+    return true;
+}
+
+bool MechanicBotFaceAction::isUseful()
+{
+    MechanicBotState* st = _state.Get(botAI);
+    // A move turns the bot along its spline: the facing is applied once it stands.
+    return st && st->faceOwed && !(bot->movespline && bot->movespline->Initialized() && !bot->movespline->Finalized());
+}
+
+bool MechanicBotFaceAction::Execute(Event /*event*/)
+{
+    MechanicBotState* st = _state.Get(botAI);
+    if (!st || !st->faceOwed || !BotFacing::FacingOff(bot, st->faceAngle))
+        return false;
+    BotFacing::Apply(bot, st->faceAngle);
+    ++st->counters.facingsApplied;
     return true;
 }
 

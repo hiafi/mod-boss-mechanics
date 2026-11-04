@@ -16,6 +16,7 @@
 #include "MechanicBotBrain.h"
 #include "MechanicBotContexts.h"
 #include "MechanicBotReportHook.h"
+#include "MechanicBotView.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -129,7 +130,13 @@ void BotGate::Reconcile(Player* player)
         if (hasNonCombat)
             botAI->ChangeStrategy("-boss mechanics", BOT_STATE_NON_COMBAT);
         if (MechanicBotState* st = BotBrain::StateOf(botAI))
+        {
+            // M3: its reservations go with it (world thread, no map updates: the registry may be written).
+            if (st->reserved && player->IsInWorld())
+                if (Registry* reg = Registry::Get(player->GetMap()))
+                    DropReservations(*reg, player->GetGUID());
             st->Reset();
+        }
     }
 
     if (wantAvoidAoe)
@@ -212,7 +219,7 @@ class BossMechanicsBotPlayerScript : public PlayerScript
 {
 public:
     BossMechanicsBotPlayerScript() : PlayerScript("BossMechanicsBotPlayerScript",
-        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_MAP_CHANGED }) { }
+        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_BEFORE_LOGOUT }) { }
 
     void OnPlayerLogin(Player* player) override
     {
@@ -222,6 +229,16 @@ public:
     void OnPlayerMapChanged(Player* player) override
     {
         BotGate::Reconcile(player);
+    }
+
+    // M3: a bot logging out leaves the reservation board of its map (still in world here; the session update runs
+    // on the world thread before the maps update, or on that map's own thread).
+    void OnPlayerBeforeLogout(Player* player) override
+    {
+        if (!player || !player->IsInWorld() || !GET_PLAYERBOT_AI(player))
+            return;
+        if (Registry* reg = Registry::Get(player->GetMap()))
+            DropReservations(*reg, player->GetGUID());
     }
 };
 
