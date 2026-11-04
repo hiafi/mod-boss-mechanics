@@ -114,11 +114,13 @@ namespace BossMechanics
             return radius <= 0.f;
         }
 
-        // A hit is a ledger failure unless it is the job: the Bait landing on the player it chose is the bait taken
-        // (that player still takes the damage and the Weakened stack); anyone else inside the landing circle failed.
-        constexpr bool HitIsFailure(Kind k, bool isBaitTarget)
+        // A resolve hit is the job, not a failure, when it is the Bait landing on the player it chose: the bait taken
+        // (user ruling 2026-11-04). That player still takes the damage and any rider (the drill's Shadow Scar), but no
+        // ledger failure and no Weakened stack. Anyone else inside the landing circle, and every other kind's hit,
+        // failed: a ledger Hit plus Weakened when the mechanic has it.
+        constexpr bool HitIsJob(Kind k, bool isBaitTarget)
         {
-            return !(k == Kind::Bait && isBaitTarget);
+            return k == Kind::Bait && isBaitTarget;
         }
 
         // Stack Cluster(n) (B3): how many of the other players stand within `circle` of `at`.

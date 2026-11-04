@@ -320,7 +320,7 @@ namespace BossMechanics
         bool finished = false;          // all resolves done: pruned at the end of this tick
         bool fizzled = false;           // removed without damage (mine cap or lifetime)
         bool detonateRequested = false;
-        ObjectGuid baitTarget;          // Bait: the player its landing is aimed at (Judge::HitIsFailure)
+        ObjectGuid baitTarget;          // Bait: the player its landing is aimed at (Judge::HitIsJob)
         Milliseconds holdWindow{ 0 };   // HoldStill
         Geo::Pose lastPose;             // last known anchor pose (used when a unit anchor is gone)
         ResolveContext ctx;

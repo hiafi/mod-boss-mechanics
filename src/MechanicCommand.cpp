@@ -1,7 +1,7 @@
 /*
  * mod-boss-mechanics: the `.mech` GM command (STAGE-M1-HANDOFF §3.10). SEC_GAMEMASTER, in game only.
  *
- *   .mech test <shape> <size> <ms> [key=value ...]
+ *   .mech test <shape> <size> <ms> [key=value ...]     (rider=<spell>: the module's spells 205000-205099 only)
  *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
  *   .mech palette <get-out color> <get-in color> [cross-lane color] [cell color]
  *                                                    (red yellow blue purple orange green teal white black)
@@ -57,6 +57,7 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Random.h"
+#include "SpellMgr.h"
 #include "StringConvert.h"
 #include "TemporarySummon.h"
 #include "Tokenize.h"
@@ -353,6 +354,7 @@ namespace
         uint8 school = 0;
         bool weak = false;
         bool once = false;
+        uint32 rider = 0;       // rider=<spell>: cast on every unit hit, the job hit included (module block only)
         Milliseconds persist{ 0 };
         Milliseconds tick{ 1000 };
         std::optional<Color> color;
@@ -434,6 +436,8 @@ namespace
                     ref.TankDamage(spec.tankPct);
             }
             ref.School(spec.school);
+            if (spec.rider)
+                ref.Rider(spec.rider);
         }
         if (spec.once)
             ref.WeakenedOncePerPlayer();
@@ -954,7 +958,8 @@ namespace
     }
 
     constexpr char const* kTestUsage = "Usage: .mech test <shape> <size> <ms> [key=value ...]; shapes: circle donut "
-        "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot";
+        "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot; "
+        "rider=<spell> takes only the module's spells 205000-205099";
 
     // What a `.mech test` line is parsed against (M4): the reference unit stands in for the GM (`anchor=me`, the
     // "nothing selected" case, the facing of lanes, lines and `shift=`), `scope` is the scope player whose group the
@@ -1184,6 +1189,16 @@ namespace
             // Weakened lands only from resolve hits: the get-in kinds never cast one (key echoed as ignored)
             spec.weak = opt.Bool("weak", false);
             spec.once = opt.Bool("once", false);
+            // rider=<spell>: cast on every player hit, the Bait's job hit included (the drill's rotation debuff).
+            // Only the module's reserved block (205000-205099), so a GM cannot cast arbitrary spells through it.
+            if (opt.Has("rider"))
+            {
+                Optional<uint32> rider = Acore::StringTo<uint32>(opt.Str("rider", ""));
+                if (!rider || !Ids::InSpellBlock(*rider) || !sSpellMgr->GetSpellInfo(*rider))
+                    return Acore::StringFormat("rider= takes only a spell of the module's block {}-{}",
+                        Ids::SPELL_BLOCK_FIRST, Ids::SPELL_BLOCK_LAST);
+                spec.rider = *rider;
+            }
         }
         spec.persist = opt.Ms("persist", Milliseconds(0));
         spec.tick = opt.Ms("tick", Milliseconds(1000));

@@ -94,7 +94,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Spread(owner, r, warn)`, `RunOut(owner, target, r, warn)` | Circle on each carrier; hits the other players inside |
 | `Stack(owner, at, r, warn)`, `Soak(owner, at, r, count, warn)` | Get-in circles; results to `onResolve` |
 | `Stack(owner, spec, warn)`, `Soak(owner, spec, count, warn)` | Any shape (`ZoneSpec`; a lane: `Shapes::LineFacing`) |
-| `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player |
+| `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player; that player taking it is the job |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
@@ -198,6 +198,10 @@ fight does not reset the boss's penalty). `.mech weakened n` stacks belong to no
 - Only hits the resolve spell lands apply Weakened (`Rules::kWeakenedOnNonHitFailures = false`, harness ruling
   2026-11-02). `MissedStack`, `MissedBait`, `Moved` and `OffSpot` go to the failure ledger only. Flip the constant
   in `src/MechanicMath.h` to make those failures apply a stack too on a `.Weakened()` mechanic.
+- Doing the mechanic is never a failure (user ruling 2026-11-04): the Bait landing on the player it chose is the job,
+  so that player gets no ledger `Hit` and no Weakened, though the damage and any `Rider(spellId)` still land
+  (`Judge::HitIsJob`). Anyone else inside the landing circle failed: a `Hit`, plus Weakened on a `.Weakened()` Bait.
+  A bait rotation therefore counts its own debuff, never Weakened (the drill's stand-in: Baited 205008).
 - `WeakenedOncePerPlayer()`: one stack per player per mechanic (a persistent zone ticking several times).
 - `Weakened()` fits only the kinds that cast the resolve spell (Zone, Frontal, Spread, RunOut, Bait); on Stack, Soak,
   HoldStill or Spot it logs "does not fit" and is ignored.
@@ -381,6 +385,7 @@ are never touched. Invite the bots you test with.
 | soak | radius | `need=` (2; 0 = nobody takes it), `order=`, `shape=line`, `persist=` |
 | frontal | length | on the selected creature, its victim exempt; `angle=` (90), `rear=1`, `line=1` `width=` (4) |
 | bait | others' range | `rule=fewest\|farthest` (fewest), `aura=` (205000), `r=` (6, the landing circle), `order=` |
+| | | the baiter gets no Weakened, so `rule=fewest` needs `aura=` + `rider=` of a rotation debuff (205008) |
 | holdstill | window (s) | `tol=` (0.3 yd); every eligible player |
 | spot | radius | `ring=` (10): one spot per group member on a ring around the anchor point |
 
@@ -391,15 +396,16 @@ tick). The frame is centred on the anchor point, X along the GM's facing. With `
 yellow and the cells purple (outline only until they burn) unless `color=` sets one color for everything.
 
 Common keys: `dmg=` flat (0 = telegraph only), `pct=` (20, percent of reference health), `tankpct=`,
-`school=physical|holy|fire|nature|frost|shadow|arcane` (physical), `weak=0/1` (0), `once=1`, `persist=<ms>`,
-`tick=<ms>` (1000), `anchor=point|me|target|member` (point: the selected unit's position, else the GM's; facing =
-the GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1, max 50), `every=` (1000 ms;
-repeats are registered from the test owner's scheduler), `scatter=` (0 yd: random offset per repeat, point anchors),
-`tele=0` (no marker), `at=member` and `seed=<n>` (see below). Damage keys do not apply to stack, soak, holdstill and
-spot, nor do `weak=`/`once=` (Weakened lands only from resolve hits). Keys that do not fit the shape are listed
-back as ignored, except the placement keys `anchor=`, `at=`, `shift=`, `scatter=` and `pick=`: they are read for
-every shape and simply have no effect where the shape does not use them (spread, runout, bait and holdstill take
-their players from the group, frontal is always on the selected creature).
+`school=physical|holy|fire|nature|frost|shadow|arcane` (physical), `weak=0/1` (0), `once=1`, `rider=<spell>` (cast on
+every player hit, a Bait's job hit included; only the module's own spells 205000-205099, so a GM cannot cast arbitrary
+spells through it), `persist=<ms>`, `tick=<ms>` (1000), `anchor=point|me|target|member` (point: the selected unit's
+position, else the GM's; facing = the GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1,
+max 50), `every=` (1000 ms; repeats are registered from the test owner's scheduler), `scatter=` (0 yd: random offset per
+repeat, point anchors), `tele=0` (no marker), `at=member` and `seed=<n>` (see below). Damage keys do not apply to stack,
+soak, holdstill and spot, nor do `weak=`/`once=`/`rider=` (Weakened and riders land only from resolve hits). Keys that
+do not fit the shape are listed back as ignored, except the placement keys `anchor=`, `at=`, `shift=`, `scatter=` and
+`pick=`: they are read for every shape and simply have no effect where the shape does not use them (spread, runout, bait
+and holdstill take their players from the group, frontal is always on the selected creature).
 
 M3 keys (STAGE-M3-HANDOFF §3.11):
 
@@ -470,8 +476,10 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
   - `cookie` (CK4-CK6; 31 s): chowder cone 60 / 8 yd on a random non-tank (follows its facing, 3 breaths 2 s apart
     from 2 s); Gut Bomb RunOut 8 on a non-tank (5 s); Fish Stew: RunOut 4 on a non-tank at three drops 2 s apart, a
     4 yd puddle (1.5 s warning, 8 s) where the eater stands at each drop. Tags 4, 6, 5, 7 (puddles).
-  - `fenrus` (FN6; 10 s): Bait, fewest Weakened stacks, landing r 6, everyone else within 10 yd, `weak=1` so the next
-    pick rotates. The test owner (the Bait's reference) moves to the creature before each bait, so it follows the
+  - `fenrus` (FN6; 10 s): Bait, fewest Baited (205008, the drill's rotation debuff) stacks, landing r 6, everyone
+    else within 10 yd. `rider=205008` gives everyone the landing hits a Baited stack, the baiter included, so the next
+    pick rotates; `weak=1` gives Weakened only to the others caught in the circle (the baiter doing the job gets
+    none). The test owner (the Bait's reference) moves to the creature before each bait, so it follows the
     creature when the tank drags it. Tag 1.
   - `alexei` (AB2-AB8; 13 slots of 12 s): each rule alone with a 3 s warning and a 6 s window (No running: HoldStill
     6 s, 1 yd tolerance; Assembly: cluster 2, 6 yd; Keep your distance: Spread 8; Out of bounds: a 7 yd circle on
@@ -926,6 +934,7 @@ same rule).
 | --- | --- |
 | 205000 | Weakened (`spell_boss_mechanics_weakened`) |
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
+| 205008 | Baited (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' bait rotation aura (`rider=`, `aura=`) |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
 | 91000-91833 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |

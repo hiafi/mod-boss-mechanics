@@ -136,12 +136,13 @@ namespace BossMechanics::Drill
                     { 19000, "runout 4 2000 at=member pick=same tag=5" },
                     { 21000, "circle 4 1500 at=member pick=same persist=8000 tick=1000 tag=7" },
                 } },
-            // Shadowfang Keep, Fenrus (FN6): Shadow Leap, Bait on the fewest Weakened stacks (standing in for FN7),
-            // 6 yd landing circle, 2 s emote, everyone else within 10 yd of him; the baiter gains a stack, so the
-            // next pick rotates.
-            { "fenrus", "Bait every 10 s: fewest Weakened stacks baits, landing r 6, others within 10, weak=1", 10000,
-                true, {
-                    { 0, "bait 10 2000 rule=fewest aura=205000 r=6 weak=1 tag=1" },
+            // Shadowfang Keep, Fenrus (FN6): Shadow Leap, Bait on the fewest Baited stacks (205008, the drill's
+            // stand-in for the rotation debuff), 6 yd landing circle, 2 s emote, everyone else within 10 yd of him.
+            // The rider gives everyone hit a Baited stack, the baiter included, so the next pick rotates; the baiter
+            // doing the job gets no Weakened, the others caught in the circle do (user ruling 2026-11-04).
+            { "fenrus", "Bait every 10 s: fewest Baited stacks baits, landing r 6, others within 10, Weakened only "
+                "for the others hit", 10000, true, {
+                    { 0, "bait 10 2000 rule=fewest aura=205008 r=6 rider=205008 weak=1 tag=1" },
                 } },
             // Scholomance, Alexei Barov (AB2-AB8): every rule alone (3 s warning, 6 s window), then every heroic pair
             // (4 s warning). Out of bounds: a 7 yd persistent circle on the group for the window. Line up: a 4 x 40 yd

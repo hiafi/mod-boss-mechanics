@@ -2,6 +2,7 @@
 // centroid, shift, spot ring, centered lane) and a desk check of every `.mech drill` against the boss doc rows it
 // reproduces (shapes, sizes, timings, the separations Alexei's pairs need). Build: tests/run.sh.
 
+#include "BossMechanicsIds.h"
 #include "check.h"
 #include "MechanicDrill.h"
 #include <algorithm>
@@ -274,8 +275,10 @@ namespace
                 CHECK(Is(s.line, "pick", "same"));
     }
 
-    // Shadowfang FN6 (Shadow Leap: Bait, fewest FN7 stacks, circle 6 yd on the landing, 2 s emote); othersRange 10
-    // and weak=1 per the handoff, so the pick rotates.
+    // Shadowfang FN6 (Shadow Leap: Bait, fewest rotation-debuff stacks, circle 6 yd on the landing, 2 s emote);
+    // othersRange 10. The rotation reads Baited 205008, which the rider lands on everyone hit (baiter included), so
+    // the pick rotates; weak=1 only reaches the others caught in the circle (the baiter's hit is the job).
+    // Never Weakened as the rule's aura: the baiter never gains it, so the pick would never move.
     void TestFenrus()
     {
         Drill::Def const& d = *Drill::Find("fenrus");
@@ -283,8 +286,15 @@ namespace
         CHECK(d.steps.size() == 1);
         Parsed const p = Parse(d.steps[0].line);
         CHECK(p.shape == "bait" && p.size == 10.f && p.ms == 2000.f);
-        CHECK(Is(p.line, "rule", "fewest") && Is(p.line, "aura", "205000"));
+        CHECK(Is(p.line, "rule", "fewest") && Is(p.line, "aura", "205008"));
         CHECK(Key(p.line, "r", 0.f) == 6.f && Is(p.line, "weak", "1"));
+        CHECK(Is(p.line, "rider", "205008"));
+        CHECK(Key(p.line, "aura", 0.f) == static_cast<float>(Ids::SPELL_BAITED_DRILL));
+        CHECK(Key(p.line, "rider", 0.f) == static_cast<float>(Ids::SPELL_BAITED_DRILL));
+        CHECK(Key(p.line, "aura", 0.f) != static_cast<float>(Ids::SPELL_WEAKENED));
+        CHECK(Ids::InSpellBlock(Ids::SPELL_BAITED_DRILL));
+        CHECK(Ids::InSpellBlock(205000) && Ids::InSpellBlock(205099));
+        CHECK(!Ids::InSpellBlock(204999) && !Ids::InSpellBlock(205100) && !Ids::InSpellBlock(0));
     }
 
     // Scholomance AB2-AB8: each rule alone, then each heroic pair; never Assembly with Keep your distance or desks;

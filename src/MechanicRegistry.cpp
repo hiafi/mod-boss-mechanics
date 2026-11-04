@@ -1109,9 +1109,12 @@ namespace BossMechanics
             return;
         if (Player* p = target->ToPlayer())
         {
-            if (Judge::HitIsFailure(m->kind, p->GetGUID() == m->baitTarget))
+            // The job (the Bait's chosen player taking the landing) is neither a failure nor a Weakened stack.
+            if (!Judge::HitIsJob(m->kind, p->GetGUID() == m->baitTarget))
+            {
                 PlayerFailure(*m, p->GetGUID(), FailureEvent::Type::Hit, damage);
-            ApplyWeakened(*m, p);
+                ApplyWeakened(*m, p);
+            }
         }
         if (m->onHit && OwnerPresent(*m))
         {
