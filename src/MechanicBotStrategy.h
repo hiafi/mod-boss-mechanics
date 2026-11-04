@@ -7,10 +7,14 @@
  * | trigger  | boss mechanic hold         | MechanicBotHoldTrigger        | checkInterval 1      |
  * | action   | boss mechanic move         | MechanicBotMoveAction         | ACTION_EMERGENCY + 6 |
  * | action   | boss mechanic hold         | MechanicBotHoldAction         | ACTION_EMERGENCY + 5 |
+ * | trigger  | boss mechanic face         | MechanicBotFaceTrigger        | checkInterval 1      |
+ * | action   | boss mechanic face         | MechanicBotFaceAction         | ACTION_EMERGENCY + 4 |
  * | (mult.)  | boss mechanic lock         | MechanicBotLockMultiplier     | MechanicBotLock.h    |
  *
- * Both triggers run the brain (MechanicBotBrain::Update, once per game-time ms) and read the mode it leaves. The
- * move action is a MovementAction so it can use the protected MoveTo; the lock multiplier exempts it by type.
+ * The triggers run the brain (MechanicBotBrain::Update, once per game-time ms) and read the mode it leaves. The
+ * move action is a MovementAction so it can use the protected MoveTo; the lock multiplier exempts it by type (and
+ * drops it while the bot is frozen). The face trigger and action (M3, STAGE-M3-HANDOFF §3.8) hold the look-away
+ * facing.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_BOT_STRATEGY_H
@@ -65,11 +69,23 @@ private:
     BossMechanics::MechanicBotStateRef _state;
 };
 
-// Hold: active while something other than us moves the bot (follow, chase, a stock MovePoint).
+// Hold / Freeze: active while something other than us moves the bot (follow, chase, a stock MovePoint).
 class MechanicBotHoldTrigger : public Trigger
 {
 public:
     explicit MechanicBotHoldTrigger(PlayerbotAI* botAI) : Trigger(botAI, "boss mechanic hold", 1) { }
+
+    bool IsActive() override;
+
+private:
+    BossMechanics::MechanicBotStateRef _state;
+};
+
+// Face (M3): active while a look-away facing is owed and the bot is off it by more than 5 degrees.
+class MechanicBotFaceTrigger : public Trigger
+{
+public:
+    explicit MechanicBotFaceTrigger(PlayerbotAI* botAI) : Trigger(botAI, "boss mechanic face", 1) { }
 
     bool IsActive() override;
 
@@ -93,6 +109,19 @@ class MechanicBotHoldAction : public Action
 {
 public:
     explicit MechanicBotHoldAction(PlayerbotAI* botAI) : Action(botAI, "boss mechanic hold") { }
+
+    bool isUseful() override;
+    bool Execute(Event event) override;
+
+private:
+    BossMechanics::MechanicBotStateRef _state;
+};
+
+// Turns the bot to the owed facing (SetOrientation + SendMovementFlagUpdate, as ServerFacade::SetFacingTo).
+class MechanicBotFaceAction : public Action
+{
+public:
+    explicit MechanicBotFaceAction(PlayerbotAI* botAI) : Action(botAI, "boss mechanic face") { }
 
     bool isUseful() override;
     bool Execute(Event event) override;

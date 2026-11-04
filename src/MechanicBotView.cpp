@@ -1,5 +1,6 @@
 /*
- * mod-boss-mechanics: the bots' view of the registry and the navmesh path oracle (STAGE-M2-HANDOFF §3.5, WP-B).
+ * mod-boss-mechanics: the bots' view of the registry and the navmesh path oracle (STAGE-M2-HANDOFF §3.5, WP-B), the
+ * player kinds, reservations and line of sight (STAGE-M3-HANDOFF §3.4, §3.6, WP-V).
  */
 
 #include "MechanicBotView.h"
@@ -8,7 +9,10 @@
 #include "Log.h"
 #include "Map.h"
 #include "MapDefines.h"
+#include "MechanicAssign.h"
 #include "MechanicRegistry.h"
+#include "MechanicViewRules.h"
+#include "ModelIgnoreFlags.h"
 #include "MoveSpline.h"
 #include "ObjectAccessor.h"
 #include "PathGenerator.h"
@@ -19,6 +23,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -214,6 +220,798 @@ namespace BossMechanics
             float const oy = fy < 0.f ? -fy : (fy > f.sizeY ? fy - f.sizeY : 0.f);
             return std::hypot(ox, oy);
         }
+
+        // ------------------------------------------------------------------------------------------------------------
+        // Player kinds (M3, §3.4): regions, allies, carried shapes, synthetic hazards, Freeze, tasks
+        // ------------------------------------------------------------------------------------------------------------
+
+        // Self-check of a region: the solver's containment (margin 0, the live pose) at three interior points and one
+        // point outside must agree with Registry::ContainsPoint for `who`. `outside` = also test the exterior point.
+        uint32 RegionSelfCheck(Registry const& reg, ActiveMechanic const& m, Shape const& shape, Geo::Pose const& pose,
+            ObjectGuid who, bool outside)
+        {
+            std::vector<Geo::Vec3> points;
+            for (Geo::Vec3 const& p : SamplePoints(shape, pose))
+                points.push_back(p);
+            if (outside)
+            {
+                float const back = Geo::ShapeFacing(shape, pose) + Geo::kPi;
+                float const d = Geo::Bounds(shape) + 1.f;
+                points.push_back({ pose.x + std::cos(back) * d, pose.y + std::sin(back) * d, pose.z });
+            }
+            uint32 mismatches = 0;
+            for (Geo::Vec3 const& p : points)
+            {
+                bool const got = Solver::SignedDistance(shape, pose, p) <= 0.f;
+                if (got != Geo::Contains(shape, pose, p))
+                    continue;   // on the edge (the two tests differ by their epsilon): not comparable
+                bool const expect = reg.ContainsPoint(m, Position(p.x, p.y, p.z), who);
+                if (got == expect)
+                    continue;
+                ++mismatches;
+                LOG_WARN(kLog, "Self-check: {} {} ({}) at ({:.2f}, {:.2f}): solver {}, registry {}", KindName(m.kind),
+                    m.id, ShapeName(shape.type), p.x, p.y, got ? "inside" : "outside",
+                    expect ? "inside" : "outside");
+            }
+            return mismatches;
+        }
+
+        // The judge window of a player kind (§3.2 "Timing"): [resolveAt, resolveAt + hold] (from = now when a
+        // detonation is pending), lasting Stack/Soak [resolveAt, until], HoldStill [resolveAt, expireAt].
+        void PlayerWindow(ActiveMechanic const& m, Milliseconds now, Milliseconds hold, Milliseconds& from,
+            Milliseconds& to)
+        {
+            Milliseconds const at = m.detonateRequested && !m.resolved ? std::min(now, m.resolveAt) : m.resolveAt;
+            if (m.kind == Kind::HoldStill)
+            {
+                from = m.resolveAt;
+                to = m.expireAt;
+            }
+            else if (m.persist)
+            {
+                from = at;
+                to = m.persist->until >= Registry::kForever ? Solver::kForever : m.persist->until;
+            }
+            else
+            {
+                from = at;
+                to = at + hold;
+            }
+        }
+
+        Solver::Timing WindowTiming(ActiveMechanic const& m, Milliseconds from, Milliseconds to)
+        {
+            return m.persist ? Solver::MakeInterval(from, to) : Solver::MakeInstant(from, to - from);
+        }
+
+        bool Has(std::vector<ObjectGuid> const& list, ObjectGuid const& g)
+        {
+            return std::find(list.begin(), list.end(), g) != list.end();
+        }
+
+        Reservation const* ReservationOf(ActiveMechanic const& m, ObjectGuid const& g, Milliseconds now)
+        {
+            for (Reservation const& r : m.reservations)
+                if (r.bot == g && r.until > now)
+                    return &r;
+            return nullptr;
+        }
+
+        // One pass over the player kinds for one bot (RefreshAllies, and BuildInput through it).
+        class PlayerPass
+        {
+        public:
+            PlayerPass(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
+                BotViewHooks const* hooks, Solver::Input& in, BotViewInfo& info)
+                : _reg(reg), _bot(bot), _self(bot->GetGUID()), _now(now), _opt(opt), _hooks(hooks), _in(in),
+                _info(info) { }
+
+            void Run(PerceptionFilter const* perceive, bool countHidden)
+            {
+                for (Solver::Hazard const& h : _in.hazards)
+                    _baseHazards.emplace(h.id, &h - _in.hazards.data());
+
+                std::vector<Solver::Hazard> extra;
+                _reg.ForEachActive(_now - _opt.postResolveHold, [&](ActiveMechanic const& m)
+                {
+                    if (m.IsShapeKind())
+                    {
+                        ShapeTasks(m);
+                        ShapeKind(m, extra, perceive, countHidden);
+                        return;
+                    }
+                    if (!Perceived(m, perceive, countHidden))
+                        return;
+                    switch (m.kind)
+                    {
+                        case Kind::Spread:
+                        case Kind::RunOut:
+                            Carriers(m, extra);
+                            break;
+                        case Kind::Stack:
+                            if (m.IsCluster())
+                                Cluster(m);
+                            else
+                                StackOrSoak(m, extra);
+                            break;
+                        case Kind::Soak:
+                            StackOrSoak(m, extra);
+                            break;
+                        case Kind::Bait:
+                            Bait(m, extra);
+                            break;
+                        case Kind::HoldStill:
+                            HoldStill(m);
+                            break;
+                        case Kind::Spot:
+                            SpotKind(m);
+                            break;
+                        default:
+                            break;
+                    }
+                });
+                for (Solver::Hazard& h : extra)
+                    _in.hazards.push_back(std::move(h));
+            }
+
+        private:
+            bool Perceived(ActiveMechanic const& m, PerceptionFilter const* perceive, bool countHidden)
+            {
+                if (!perceive || !*perceive)
+                    return true;
+                Milliseconds until = Solver::kForever;
+                if ((*perceive)(m.id, until))
+                    return true;
+                if (countHidden)
+                    ++_info.hidden;
+                _info.nextPerceptionAt = std::min(_info.nextPerceptionAt, until);
+                return false;
+            }
+
+            void AddTask(ActiveMechanic const& m, BotTaskRole role, Milliseconds from, Milliseconds to, uint8 slot = 0)
+            {
+                BotTask t;
+                t.mechanicId = m.id;
+                t.kind = m.kind;
+                t.role = role;
+                t.from = from;
+                t.to = to;
+                t.slot = slot;
+                _info.tasks.push_back(t);
+            }
+
+            std::vector<ObjectGuid> const& Eligible(ActiveMechanic const& m)
+            {
+                if (_eligibleFor != m.id)
+                {
+                    _eligible = _reg.EligiblePlayers(m);
+                    _eligibleFor = m.id;
+                }
+                return _eligible;
+            }
+
+            bool IsBot(ObjectGuid const& g) const
+            {
+                return g == _self || (_hooks && _hooks->isBot && _hooks->isBot(g));
+            }
+
+            // Where `g` will stand at m's judge time (§3.4). nullopt: no reservation and the unit is not here.
+            std::optional<ViewRules::Spot> SpotOf(ActiveMechanic const& m, ObjectGuid const& g)
+            {
+                ViewRules::SpotInputs s;
+                if (Reservation const* r = ReservationOf(m, g, _now))
+                {
+                    s.hasReservation = true;
+                    s.reserved = ToVec(r->point);
+                    s.reservedFacing = r->facing;
+                    return ViewRules::PlannedSpot(s, _opt.humanSlackYd, _opt.movingAnchorRecheck);
+                }
+                Unit const* u = ObjectAccessor::GetUnit(*_bot, g);
+                if (!u || !u->IsInWorld() || u->GetMap() != _bot->GetMap())
+                    return std::nullopt;
+                s.isBot = IsBot(g);
+                if (s.isBot && g != _self && _hooks && _hooks->plannedSpot)
+                    s.hasPlan = _hooks->plannedSpot(g, s.plan, s.planFacing);
+                s.now = ToVec(u->GetPosition());
+                s.nowFacing = u->GetOrientation();
+                s.moving = UnitMoves(u);
+                s.speed = u->GetSpeed(MOVE_RUN);
+                return ViewRules::PlannedSpot(s, _opt.humanSlackYd, _opt.movingAnchorRecheck);
+            }
+
+            // Index of g's ally entry in Input::allies (one per player and spot).
+            std::optional<uint32> AllyIndex(ActiveMechanic const& m, ObjectGuid const& g)
+            {
+                std::optional<ViewRules::Spot> spot = SpotOf(m, g);
+                if (!spot)
+                    return std::nullopt;
+                uint64 const raw = g.GetRawValue();
+                for (std::size_t i = 0; i < _in.allies.size(); ++i)
+                {
+                    Solver::Ally const& a = _in.allies[i];
+                    if (a.guid == raw && Geo::Dist2d(a.p.x, a.p.y, spot->p.x, spot->p.y) < 0.01f
+                        && a.slackYd == spot->slackYd)
+                        return static_cast<uint32>(i);
+                }
+                _in.allies.push_back({ raw, spot->p, spot->slackYd });
+                return static_cast<uint32>(_in.allies.size() - 1);
+            }
+
+            std::vector<uint32> AllyIndices(ActiveMechanic const& m, std::vector<ObjectGuid> const& players,
+                ObjectGuid const& skip = ObjectGuid::Empty)
+            {
+                std::vector<uint32> out;
+                for (ObjectGuid const& g : players)
+                {
+                    if (g == _self || (!skip.IsEmpty() && g == skip))
+                        continue;
+                    if (std::optional<uint32> idx = AllyIndex(m, g))
+                        out.push_back(*idx);
+                }
+                return out;
+            }
+
+            // A moving unit's drift before `from` (as the M2 hazards: at least one recheck, at most 1 s).
+            float DriftOf(Unit const* u, Milliseconds from) const
+            {
+                if (!u || !UnitMoves(u))
+                    return 0.f;
+                Milliseconds const lead = std::clamp(from - _now, _opt.movingAnchorRecheck,
+                    std::max(kMaxDriftLead, _opt.movingAnchorRecheck));
+                return u->GetSpeed(MOVE_RUN) * std::chrono::duration<float>(lead).count();
+            }
+
+            // The poses of a get-in region on m's shape: the anchor's planned spot when the anchor is a group bot
+            // with a plan; the live pose and its drift pose when the anchor is a moving unit; else the live pose.
+            std::vector<Geo::Pose> RegionPoses(ActiveMechanic const& m, Shape const& shape, Geo::Pose const& live,
+                Milliseconds from)
+            {
+                if (!m.anchor.IsUnit() || m.anchor.unit == _self)
+                    return { live };
+                if (std::optional<ViewRules::Spot> spot = SpotOf(m, m.anchor.unit); spot && spot->Planned())
+                {
+                    Geo::Pose p = live;
+                    p.x = spot->p.x;
+                    p.y = spot->p.y;
+                    p.z = spot->p.z;
+                    if (m.anchor.followFacing && !m.to)
+                        p.o = spot->facing;
+                    return { p };
+                }
+                Unit const* u = ObjectAccessor::GetUnit(*_bot, m.anchor.unit);
+                NoteMoving(u);
+                float const drift = ViewRules::RegionDriftYd(shape, DriftOf(u, from));
+                return ViewRules::MovingPoses(live, u ? u->GetOrientation() : live.o, drift);
+            }
+
+            // A region or carried shape follows a moving unit: the brain rebuilds the view every
+            // MovingAnchorRecheckMs and tracks the region (STAGE-M3-R-REPORT m-6).
+            void NoteMoving(Unit const* u)
+            {
+                if (u && UnitMoves(u))
+                    _info.movingAnchors = true;
+            }
+
+            void AddRegion(ActiveMechanic const& m, Shape const& shape, std::vector<Geo::Pose> poses,
+                Milliseconds from, Milliseconds to)
+            {
+                Solver::Region r;
+                r.id = m.id;
+                r.shape = shape;
+                r.poses = std::move(poses);
+                r.marginYd = ViewRules::RegionMarginYd(shape, _opt.safetyMarginYd);
+                r.from = from;
+                r.to = to;
+                _in.regions.push_back(std::move(r));
+            }
+
+            // ---- shape kinds ----
+
+            void ShapeTasks(ActiveMechanic const& m)
+            {
+                bool const exempt = m.tankExempt && _reg.ExemptVictim(m) == _self;
+                Unit const* victim = _bot->GetVictim();
+                bool const parks = m.park && victim && victim->GetGUID() == m.ParkedUnit();
+                if (!exempt && !parks)
+                    return;
+                Milliseconds firstAt{ 0 };
+                Solver::Timing const t = TimingOf(m, _now, _opt.postResolveHold, firstAt);
+                Milliseconds const to = std::max(t.from, t.to);
+                if (exempt)
+                {
+                    _info.tankFrontals.push_back(m.id);
+                    AddTask(m, BotTaskRole::Tank, t.from, to);
+                }
+                if (parks)
+                {
+                    _info.parks.push_back(m.id);
+                    AddTask(m, BotTaskRole::Parker, t.from, to);
+                }
+            }
+
+            // Tank and parking tasks are never hidden (they are not dodges); a carried shape goes through the
+            // perception filter; the planned-spot pose only copies a hazard BuildInput kept (it already passed it).
+            void ShapeKind(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra,
+                PerceptionFilter const* perceive, bool countHidden)
+            {
+                bool const onMe = m.anchor.IsUnit() && m.anchor.unit == _self;
+                bool const atMe = !onMe && m.to && m.to->IsUnit() && m.to->unit == _self;
+                if (onMe || atMe)
+                {
+                    if (Perceived(m, perceive, countHidden))
+                        CarriedShape(m, onMe);
+                    return;
+                }
+                PlannedPose(m, extra);
+            }
+
+            // A Zone anchored on the bot (OnBot) or aimed at it (AimedAtBot): keep the allies out of it (§3.4).
+            void CarriedShape(ActiveMechanic const& m, bool onMe)
+            {
+                Geo::Pose pose;
+                Shape const shape = _reg.EffectiveShape(m, pose);
+                Milliseconds firstAt{ 0 };
+                Solver::Carried c;
+                c.id = m.id;
+                c.shape = shape;
+                c.mode = onMe ? Solver::Carried::Mode::OnBot : Solver::Carried::Mode::AimedAtBot;
+                c.source = pose;
+                c.marginYd = _opt.safetyMarginYd;
+                c.angleMarginDeg = _opt.lookAwayMarginDeg;
+                c.timing = TimingOf(m, _now, _opt.postResolveHold, firstAt);
+                if (onMe)
+                {
+                    bool const directed = shape.type == ShapeType::Line
+                        || (shape.type == ShapeType::Cone && shape.angleDeg < 360.f);
+                    c.chooseFacing = directed && m.anchor.followFacing && !m.to;
+                    c.fixedFacing = m.anchor.followFacing ? _bot->GetOrientation() : m.anchor.point.GetOrientation();
+                    if (m.to)
+                        c.fixedFacing = pose.o;     // Line(me, unit): aimed by the other end
+                    Unit const* victim = _bot->GetVictim();
+                    c.preferredFacing = victim && victim->IsInWorld() && victim->GetMap() == _bot->GetMap()
+                        ? _bot->GetAbsoluteAngle(victim) : _bot->GetOrientation();
+                }
+                if (!onMe && m.anchor.IsUnit())
+                    NoteMoving(ObjectAccessor::GetUnit(*_bot, m.anchor.unit));
+                ObjectGuid const exempt = m.tankExempt ? _reg.ExemptVictim(m) : ObjectGuid::Empty;
+                c.allies = AllyIndices(m, Eligible(m), exempt);
+                _in.carried.push_back(std::move(c));
+                AddTask(m, BotTaskRole::Carrier, firstAt, std::max(firstAt, TimingEndOf(_in.carried.back().timing)));
+            }
+
+            static Milliseconds TimingEndOf(Solver::Timing const& t)
+            {
+                return std::max(t.from, t.to);
+            }
+
+            // A Zone anchored on (or aimed at) another group bot with a plan: one more pose at its planned spot
+            // (§3.4), as a synthetic copy of the registry hazard (only when that hazard is in the view).
+            void PlannedPose(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
+            {
+                auto base = _baseHazards.find(m.id);
+                if (base == _baseHazards.end())
+                    return;
+                Solver::Hazard const& h = _in.hazards[base->second];
+                if (h.poses.empty())
+                    return;
+                Geo::Pose planned = h.poses.front();
+                bool found = false;
+                if (m.to && m.to->IsUnit())
+                {
+                    std::optional<ViewRules::Spot> spot = SpotOf(m, m.to->unit);
+                    if (spot && spot->Planned())
+                    {
+                        Geo::Pose src = planned;
+                        if (m.anchor.IsUnit() && m.anchor.unit != m.to->unit)
+                            if (std::optional<ViewRules::Spot> from = SpotOf(m, m.anchor.unit);
+                                from && from->Planned())
+                            {
+                                src.x = from->p.x;
+                                src.y = from->p.y;
+                                src.z = from->p.z;
+                            }
+                        if (Geo::Dist2d(src.x, src.y, spot->p.x, spot->p.y) > 0.01f)
+                            src.o = std::atan2(spot->p.y - src.y, spot->p.x - src.x);
+                        planned = src;
+                        found = true;
+                    }
+                }
+                else if (m.anchor.IsUnit())
+                {
+                    std::optional<ViewRules::Spot> spot = SpotOf(m, m.anchor.unit);
+                    if (spot && spot->Planned())
+                    {
+                        planned.x = spot->p.x;
+                        planned.y = spot->p.y;
+                        planned.z = spot->p.z;
+                        if (m.anchor.followFacing)
+                            planned.o = spot->facing;
+                        found = true;
+                    }
+                }
+                if (!found)
+                    return;
+                Solver::Hazard copy = h;
+                copy.synthetic = true;
+                copy.poses.clear();
+                copy.poses.push_back(planned);
+                if (h.poses.size() == 3)    // a turning anchor: keep its +-slack around the planned facing
+                {
+                    // A planned facing is a look-away the carrier holds itself (ViewRules::PlannedFacingSlackDeg).
+                    float const slack = Geo::DegToRad(ViewRules::PlannedFacingSlackDeg(
+                        Geo::RadToDeg(std::fabs(Geo::WrapPi(h.poses[2].o - h.poses[0].o))), _opt.lookAwayMarginDeg));
+                    Geo::Pose left = planned;
+                    left.o = Geo::WrapPi(planned.o - slack);
+                    Geo::Pose right = planned;
+                    right.o = Geo::WrapPi(planned.o + slack);
+                    copy.poses.push_back(left);
+                    copy.poses.push_back(right);
+                }
+                extra.push_back(std::move(copy));
+            }
+
+            // ---- Spread / RunOut ----
+
+            void Carriers(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
+            {
+                std::vector<ObjectGuid> const& eligible = Eligible(m);
+                bool const meEligible = Has(eligible, _self);
+                if (m.selfTrigger.auraSpell && meEligible
+                    && std::find(_info.selfTriggerAuras.begin(), _info.selfTriggerAuras.end(),
+                        m.selfTrigger.auraSpell) == _info.selfTriggerAuras.end())
+                    _info.selfTriggerAuras.push_back(m.selfTrigger.auraSpell);
+
+                std::vector<ObjectGuid> const carriers = _reg.Carriers(m);
+                bool const meCarrier = Has(carriers, _self);
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Solver::Timing const timing = WindowTiming(m, from, to);
+                float const r = m.shape.radius;
+                float const zTol = m.shape.zTolerance;
+
+                if (m.kind == Kind::RunOut && m.measuredFrom == MeasuredFrom::Owner)
+                {
+                    // Only the carrier is hit, and only within r of the owner: a circle hazard on the owner.
+                    if (!meCarrier || !meEligible)
+                        return;
+                    Unit const* owner = ObjectAccessor::GetUnit(*_bot, m.owner);
+                    Geo::Pose const op = owner ? Geo::Pose{ owner->GetPositionX(), owner->GetPositionY(),
+                        owner->GetPositionZ(), owner->GetOrientation() } : m.lastPose;
+                    float const drift = DriftOf(owner, from);
+                    ViewRules::Spot spot;
+                    spot.p = { op.x, op.y, op.z };
+                    spot.slackYd = drift;
+                    extra.push_back(ViewRules::CarrierHazard(m.id, r, zTol, spot, _opt.safetyMarginYd, timing));
+                    AddTask(m, BotTaskRole::Carrier, from, to);
+                    return;
+                }
+
+                if (meCarrier)
+                {
+                    // My circle hits every eligible player but me (players only, decision §7.8).
+                    _in.carried.push_back(ViewRules::CarriedCircle(m.id, r, zTol, _opt.safetyMarginYd, timing,
+                        AllyIndices(m, eligible)));
+                    std::vector<uint64> raws;
+                    raws.reserve(carriers.size());
+                    for (ObjectGuid const& c : carriers)
+                        raws.push_back(c.GetRawValue());
+                    uint32 const slot = Assign::SlotOf(raws, _self.GetRawValue());
+                    if (_in.slotCount == 0)
+                    {
+                        _in.slot = slot;
+                        _in.slotCount = static_cast<uint32>(carriers.size());
+                    }
+                    AddTask(m, BotTaskRole::Carrier, from, to, static_cast<uint8>(std::min<uint32>(slot, 255)));
+                }
+                if (!meEligible)
+                    return;
+                // Every other carrier's circle hits me: a hazard at its planned spot (the other side of §3.2).
+                for (ObjectGuid const& c : carriers)
+                {
+                    if (c == _self)
+                        continue;
+                    Unit const* cu = ObjectAccessor::GetUnit(*_bot, c);
+                    if (!cu || !cu->IsAlive())
+                        continue;
+                    if (std::optional<ViewRules::Spot> spot = SpotOf(m, c))
+                    {
+                        extra.push_back(ViewRules::CarrierHazard(m.id, r, zTol, *spot, _opt.safetyMarginYd, timing));
+                        if (_opt.debug && !spot->Planned())
+                            _info.selfCheckMismatches += RegionSelfCheck(_reg, m, Shape::Circle(r),
+                                { cu->GetPositionX(), cu->GetPositionY(), cu->GetPositionZ(), 0.f }, _self, false);
+                    }
+                }
+                if (!meCarrier)
+                    AddTask(m, BotTaskRole::Avoider, from, to);
+            }
+
+            // ---- Stack, Soak ----
+
+            void StackOrSoak(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
+            {
+                std::vector<ObjectGuid> const& eligible = Eligible(m);
+                if (!Has(eligible, _self))
+                    return;
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Geo::Pose live;
+                Shape const shape = _reg.EffectiveShape(m, live);
+                bool const onMe = m.anchor.IsUnit() && m.anchor.unit == _self;
+                if (_opt.debug)
+                    _info.selfCheckMismatches += RegionSelfCheck(_reg, m, shape, live, _self, true);
+
+                if (m.kind == Kind::Stack)
+                {
+                    if (onMe)
+                    {
+                        AddTask(m, BotTaskRole::Leader, from, to);  // the others come to me: hold
+                        return;
+                    }
+                    AddRegion(m, shape, RegionPoses(m, shape, live, from), from, to);
+                    AddTask(m, BotTaskRole::Member, from, to);
+                    return;
+                }
+
+                // Soak: who claims (§3.6), the same answer on every bot.
+                float const margin = ViewRules::RegionMarginYd(shape, _opt.safetyMarginYd);
+                std::vector<Assign::Claimant> players;
+                for (ObjectGuid const& g : eligible)
+                {
+                    Player const* p = ObjectAccessor::GetPlayer(_bot->GetMap(), g);
+                    if (!p)
+                        continue;
+                    Assign::Claimant c;
+                    c.guid = g.GetRawValue();
+                    c.bot = IsBot(g);
+                    c.insideNow = _reg.ContainsPoint(m, p->GetPosition(), g);
+                    c.stacks = m.ordering.auraSpell ? p->GetAuraCount(m.ordering.auraSpell) : 0;
+                    float const sd = Solver::SignedDistance(shape, live, ToVec(p->GetPosition()));
+                    float const way = std::isfinite(sd) ? std::max(0.f, sd + margin) : 0.f;
+                    c.etaMs = ViewRules::SoakEtaMs(_now, way, p->GetSpeed(MOVE_RUN), _opt.params.startDelay);
+                    for (Reservation const& r : m.reservations)
+                        if (r.bot == g && r.claim && r.until > _now)
+                            c.claimedSince = r.since.count();
+                    players.push_back(c);
+                }
+                Assign::SoakRule rule;
+                rule.count = m.soakCount;
+                rule.ordered = m.ordering.auraSpell != 0;
+                rule.ascending = m.ordering.ascending;
+                rule.capStacks = m.ordering.capStacks;
+                rule.deadlineMs = (from - _opt.params.marginMs).count();
+                // A lasting soak whose window is open: a claimer trailing its moving circle keeps the claim
+                // (STAGE-M3-R-REPORT m-5).
+                rule.keepSticky = m.persist && _now >= from - _opt.params.marginMs;
+                std::vector<uint64> const claimers = Assign::SoakClaimers(players, rule);
+                auto const mine = std::find(claimers.begin(), claimers.end(), _self.GetRawValue());
+                if (mine != claimers.end())
+                {
+                    uint8 const rank = static_cast<uint8>(std::min<std::ptrdiff_t>(mine - claimers.begin(), 255));
+                    if (!onMe)
+                        AddRegion(m, shape, RegionPoses(m, shape, live, from), from, to);
+                    AddTask(m, BotTaskRole::Claimer, from, to, rank);
+                    return;
+                }
+                if (onMe)
+                    return;     // anchored on me and not mine to take: nothing I can do
+                // Not a claimer (or count 0): keep out of it (decision §7.3).
+                Solver::Hazard h;
+                h.id = m.id;
+                h.shape = shape;
+                h.poses.push_back(live);
+                float drift = 0.f;
+                if (m.anchor.IsUnit())
+                {
+                    std::optional<ViewRules::Spot> spot = SpotOf(m, m.anchor.unit);
+                    if (spot && spot->Planned())
+                    {
+                        Geo::Pose p = live;
+                        p.x = spot->p.x;
+                        p.y = spot->p.y;
+                        p.z = spot->p.z;
+                        h.poses.push_back(p);
+                    }
+                    else
+                        drift = DriftOf(ObjectAccessor::GetUnit(*_bot, m.anchor.unit), from);
+                }
+                h.marginYd = _opt.safetyMarginYd + drift;
+                h.driftYd = drift;
+                h.timing = WindowTiming(m, from, to);
+                h.synthetic = true;
+                extra.push_back(std::move(h));
+                AddTask(m, BotTaskRole::Avoider, from, to);
+            }
+
+            // Stack Cluster(n): a sticky leader (slot 0 claim on the board, else the medoid); the others gather
+            // within r/2 of its planned spot (ViewRules::ClusterMemberRadius).
+            void Cluster(ActiveMechanic const& m)
+            {
+                std::vector<ObjectGuid> const& eligible = Eligible(m);
+                if (!Has(eligible, _self))
+                    return;
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                std::vector<Assign::Point> points;
+                for (ObjectGuid const& g : eligible)
+                    if (Player const* p = ObjectAccessor::GetPlayer(_bot->GetMap(), g))
+                        points.push_back({ g.GetRawValue(), p->GetPositionX(), p->GetPositionY() });
+                uint64 sticky = 0;
+                Milliseconds stickySince = Solver::kForever;
+                for (Reservation const& r : m.reservations)
+                    if (r.claim && r.slot == 0 && r.until > _now && r.since < stickySince && Has(eligible, r.bot))
+                    {
+                        sticky = r.bot.GetRawValue();
+                        stickySince = r.since;
+                    }
+                uint64 const leader = Assign::ClusterLeader(points, sticky);
+                if (!leader)
+                    return;
+                if (leader == _self.GetRawValue())
+                {
+                    AddTask(m, BotTaskRole::Leader, from, to, 0);
+                    return;
+                }
+                ObjectGuid const leaderGuid(leader);
+                std::optional<ViewRules::Spot> spot = SpotOf(m, leaderGuid);
+                if (!spot)
+                    return;
+                Shape circle = Shape::Circle(ViewRules::ClusterMemberRadius(m.shape.radius));
+                circle.zTolerance = m.shape.zTolerance;
+                Geo::Pose const center{ spot->p.x, spot->p.y, spot->p.z, 0.f };
+                std::vector<Geo::Pose> poses{ center };
+                if (!spot->Planned())
+                {
+                    Unit const* u = ObjectAccessor::GetUnit(*_bot, leaderGuid);
+                    NoteMoving(u);
+                    poses = ViewRules::MovingPoses(center, u ? u->GetOrientation() : 0.f,
+                        ViewRules::RegionDriftYd(circle, DriftOf(u, from)));
+                }
+                AddRegion(m, circle, std::move(poses), from, to);
+                AddTask(m, BotTaskRole::Member, from, to, 1);
+            }
+
+            // ---- Bait ----
+
+            void Bait(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
+            {
+                std::vector<ObjectGuid> const& eligible = Eligible(m);
+                if (!Has(eligible, _self))
+                    return;
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Solver::Timing const timing = WindowTiming(m, from, to);
+
+                // The pick: a sticky claim on the board (the picker's), else the registry's live rule (§3.6).
+                ObjectGuid pick;
+                Milliseconds pickSince = Solver::kForever;
+                for (Reservation const& r : m.reservations)
+                    if (r.claim && r.until > _now && r.since < pickSince && Has(eligible, r.bot))
+                    {
+                        pick = r.bot;
+                        pickSince = r.since;
+                    }
+                if (pick.IsEmpty())
+                    pick = _reg.BaitPick(m);
+
+                Unit const* owner = ObjectAccessor::GetUnit(*_bot, m.owner);
+                Geo::Pose const op = owner ? Geo::Pose{ owner->GetPositionX(), owner->GetPositionY(),
+                    owner->GetPositionZ(), owner->GetOrientation() } : m.lastPose;
+                float const ownerDrift = DriftOf(owner, from);
+                NoteMoving(owner);
+                bool const pickOnly = Judge::BaitHitsPickOnly(m.shape.radius);
+                float const hitR = Judge::BaitHitRadius(m.shape.radius);
+                float const zTol = m.shape.zTolerance;
+
+                if (pick == _self)
+                {
+                    // Run out past everyone: a circle on the owner beyond othersRange and every human, away from
+                    // every other player's landing spot, as far as the solver can reach.
+                    std::vector<float> humans;
+                    for (ObjectGuid const& g : eligible)
+                    {
+                        if (g == _self || IsBot(g))
+                            continue;
+                        if (Unit const* u = ObjectAccessor::GetUnit(*_bot, g))
+                            humans.push_back(Geo::Dist2d(op.x, op.y, u->GetPositionX(), u->GetPositionY())
+                                + _opt.humanSlackYd);
+                    }
+                    ViewRules::Spot ownerSpot;
+                    ownerSpot.p = { op.x, op.y, op.z };
+                    ownerSpot.slackYd = ownerDrift;
+                    extra.push_back(ViewRules::CarrierHazard(m.id, ViewRules::BaitPickerRadius(m.othersRange, humans),
+                        zTol, ownerSpot, _opt.safetyMarginYd, timing));
+                    if (!pickOnly)
+                        for (ObjectGuid const& g : eligible)
+                            if (g != _self)
+                                if (std::optional<ViewRules::Spot> spot = SpotOf(m, g))
+                                    extra.push_back(ViewRules::CarrierHazard(m.id, hitR, zTol, *spot,
+                                        _opt.safetyMarginYd, timing));
+                    _in.far.present = true;
+                    _in.far.from = { op.x, op.y, op.z };
+                    AddTask(m, BotTaskRole::Picker, from, to);
+                    return;
+                }
+
+                // Everyone else: within othersRange of the owner, out of the picker's landing circle.
+                if (m.othersRange > 0.f)
+                {
+                    Shape range = Shape::Circle(m.othersRange);
+                    range.zTolerance = zTol;
+                    AddRegion(m, range, ViewRules::MovingPoses(op, op.o, ViewRules::RegionDriftYd(range, ownerDrift)),
+                        from, to);
+                }
+                if (!pickOnly && !pick.IsEmpty())
+                    if (std::optional<ViewRules::Spot> spot = SpotOf(m, pick))
+                        extra.push_back(ViewRules::CarrierHazard(m.id, hitR, zTol, *spot, _opt.safetyMarginYd,
+                            timing));
+                AddTask(m, BotTaskRole::Member, from, to);
+            }
+
+            // ---- HoldStill, Spot ----
+
+            void HoldStill(ActiveMechanic const& m)
+            {
+                bool const listed = m.targets.empty() ? Has(Eligible(m), _self) : m.targets.count(_self) > 0;
+                if (!listed)
+                    return;
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Milliseconds const freezeFrom = from - _opt.params.marginMs;
+                ViewRules::MergeFreeze(_in.freeze, freezeFrom, to, _opt.freezeSettle, _now);
+                AddTask(m, BotTaskRole::Frozen, freezeFrom, to);
+            }
+
+            void SpotKind(ActiveMechanic const& m)
+            {
+                auto it = m.spots.find(_self);
+                if (it == m.spots.end())
+                    return;
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Shape circle = Shape::Circle(m.shape.radius);
+                circle.zTolerance = m.shape.zTolerance;
+                Geo::Pose const pose{ it->second.GetPositionX(), it->second.GetPositionY(), it->second.GetPositionZ(),
+                    0.f };
+                if (_opt.debug)
+                    _info.selfCheckMismatches += RegionSelfCheck(_reg, m, circle, pose, _self, true);
+                AddRegion(m, circle, { pose }, from, to);
+                AddTask(m, BotTaskRole::Member, from, to);
+            }
+
+            Registry const& _reg;
+            Player const* _bot;
+            ObjectGuid const _self;
+            Milliseconds const _now;
+            BotViewOptions const& _opt;
+            BotViewHooks const* _hooks;
+            Solver::Input& _in;
+            BotViewInfo& _info;
+            std::unordered_map<uint32, std::size_t> _baseHazards;   // registry hazard id -> index in _in.hazards
+            uint32 _eligibleFor = 0;
+            std::vector<ObjectGuid> _eligible;
+        };
+
+        void RunPlayerPass(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
+            BotViewHooks const* hooks, Solver::Input& in, BotViewInfo& info, PerceptionFilter const* perceive,
+            bool countHidden)
+        {
+            std::erase_if(in.hazards, [](Solver::Hazard const& h) { return h.synthetic; });
+            in.regions.clear();
+            in.allies.clear();
+            in.carried.clear();
+            in.far = Solver::FarFrom();
+            in.freeze = Solver::Freeze();
+            in.slot = 0;
+            in.slotCount = 0;
+            info.tasks.clear();
+            info.selfTriggerAuras.clear();
+            info.tankFrontals.clear();
+            info.parks.clear();
+            info.reservationRevision = reg.ReservationRevision();
+            if (!bot)
+                return;
+            PlayerPass(reg, bot, now, opt, hooks, in, info).Run(perceive, countHidden);
+        }
     }
 
     BotViewOptions BotViewOptions::FromConfig(BotConfig const& cfg)
@@ -224,6 +1022,10 @@ namespace BossMechanics
         o.facingSlackDeg = cfg.facingSlackDeg;
         o.movingAnchorRecheck = Milliseconds(cfg.movingAnchorRecheckMs);
         o.debug = cfg.debug;
+        o.humanSlackYd = cfg.humanSlackYd;
+        o.lookAwayMarginDeg = cfg.lookAwayMarginDeg;
+        o.freezeSettle = Milliseconds(cfg.freezeSettleMs);
+        o.params.w.region = cfg.regionComfortWeight;
         o.params.startDelay = Milliseconds(cfg.startDelayMs);
         o.params.marginMs = Milliseconds(cfg.safetyMarginMs);
         o.params.horizon = Milliseconds(cfg.horizonMs);
@@ -236,7 +1038,7 @@ namespace BossMechanics
     }
 
     BotViewInfo BuildInput(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
-        Solver::Input& out, PerceptionFilter const* perceive)
+        Solver::Input& out, PerceptionFilter const* perceive, BotViewHooks const* hooks)
     {
         BotViewInfo info;
         info.revision = reg.Revision();
@@ -245,7 +1047,10 @@ namespace BossMechanics
         out.now = now;
         out.params = opt.params;
         if (!bot)
+        {
+            RunPlayerPass(reg, bot, now, opt, hooks, out, info, perceive, true);
             return info;
+        }
 
         out.bot = ToVec(bot->GetPosition());
         out.speed = bot->GetSpeed(MOVE_RUN);
@@ -335,10 +1140,109 @@ namespace BossMechanics
             lf.freeLanes = ls.freeLanes;
             out.lanes.push_back(std::move(lf));
         });
+
+        RunPlayerPass(reg, bot, now, opt, hooks, out, info, perceive, true);
         return info;
     }
 
-    NavOracle::NavOracle(Unit const* bot, NavOracleStats* stats) : _bot(bot), _stats(stats)
+    void RefreshAllies(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
+        BotViewHooks const* hooks, Solver::Input& input, BotViewInfo* info, PerceptionFilter const* perceive)
+    {
+        input.now = now;
+        if (bot)
+        {
+            input.bot = ToVec(bot->GetPosition());
+            input.speed = bot->GetSpeed(MOVE_RUN);
+        }
+        BotViewInfo scratch;
+        RunPlayerPass(reg, bot, now, opt, hooks, input, info ? *info : scratch, perceive, false);
+    }
+
+    char const* BotTaskRoleName(BotTaskRole role)
+    {
+        switch (role)
+        {
+            case BotTaskRole::Carrier: return "carrier";
+            case BotTaskRole::Avoider: return "avoider";
+            case BotTaskRole::Claimer: return "claimer";
+            case BotTaskRole::Leader: return "leader";
+            case BotTaskRole::Picker: return "picker";
+            case BotTaskRole::Member: return "member";
+            case BotTaskRole::Frozen: return "frozen";
+            case BotTaskRole::Tank: return "tank";
+            case BotTaskRole::Parker: return "parker";
+        }
+        return "?";
+    }
+
+    void PublishReservations(Registry& reg, Player const* bot, BotViewInfo const& info, Solver::Plan const& plan,
+        Milliseconds now)
+    {
+        if (!bot)
+            return;
+        ObjectGuid const self = bot->GetGUID();
+        // The facing matters to the others only for a look-away facing or a shape that turns with the bot; anything
+        // else publishes 0, so the bot's turning never bumps the board (STAGE-M3-R-REPORT n-15).
+        bool turnsWithMe = plan.hasFacing;
+        if (!turnsWithMe)
+            reg.ForEachActive(now, [&](ActiveMechanic const& m)
+            {
+                turnsWithMe = turnsWithMe || (m.anchor.IsUnit() && m.anchor.unit == self && m.anchor.followFacing);
+            });
+        float const facing = plan.hasFacing ? plan.facing : (turnsWithMe ? bot->GetOrientation() : 0.f);
+        std::unordered_set<uint32> published;
+        for (BotTask const& t : info.tasks)
+        {
+            if (t.role == BotTaskRole::Tank || t.role == BotTaskRole::Parker || t.role == BotTaskRole::Frozen)
+                continue;
+            // A task ending now is pruned by this same update (STAGE-M3-R-REPORT n-13).
+            if (t.to <= now || !reg.Find(t.mechanicId))
+                continue;
+            Reservation r;
+            r.bot = self;
+            r.point = Position(plan.target.x, plan.target.y, plan.target.z, facing);
+            r.until = std::min(t.to, Registry::kForever);
+            r.facing = facing;
+            r.slot = t.slot;
+            r.claim = t.role == BotTaskRole::Claimer || t.role == BotTaskRole::Picker || t.role == BotTaskRole::Leader;
+            reg.Reserve(t.mechanicId, r);
+            published.insert(t.mechanicId);
+        }
+        // Mechanics the bot left (no longer eligible, no longer a claimer, ...): off the board.
+        std::vector<uint32> left;
+        reg.ForEachActive(Milliseconds(0), [&](ActiveMechanic const& m)
+        {
+            if (published.count(m.id))
+                return;
+            for (Reservation const& r : m.reservations)
+                if (r.bot == self)
+                {
+                    left.push_back(m.id);
+                    return;
+                }
+        });
+        for (uint32 id : left)
+            reg.Unreserve(id, self);
+    }
+
+    void DropReservations(Registry& reg, ObjectGuid bot)
+    {
+        std::vector<uint32> held;
+        reg.ForEachActive(Milliseconds(0), [&](ActiveMechanic const& m)
+        {
+            for (Reservation const& r : m.reservations)
+                if (r.bot == bot)
+                {
+                    held.push_back(m.id);
+                    return;
+                }
+        });
+        for (uint32 id : held)
+            reg.Unreserve(id, bot);
+    }
+
+    NavOracle::NavOracle(Unit const* bot, NavOracleStats* stats, uint32 maxSightChecks)
+        : _bot(bot), _stats(stats), _maxSightChecks(maxSightChecks)
     {
         // The polygon filter PathGenerator::CreateFilter gives a bot (a headless session): ground and water, no
         // lava, slime or steep slopes. Other players: everything walkable.
@@ -447,6 +1351,27 @@ namespace BossMechanics
         return false;
     }
 
+    bool NavOracle::InSight(Geo::Vec3 const& from, Geo::Vec3 const& to)
+    {
+        if (!_bot || !_bot->IsInWorld())
+            return true;
+        if (_sightRays >= _maxSightChecks)
+        {
+            if (_stats)
+                ++_stats->sightCapped;
+            return true;
+        }
+        ++_sightRays;
+        if (_stats)
+            ++_stats->sightRays;
+        float const lift = _bot->GetCollisionHeight();
+        bool const clear = _bot->GetMap()->isInLineOfSight(from.x, from.y, from.z + lift, to.x, to.y, to.z + lift,
+            _bot->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
+        if (!clear && _stats)
+            ++_stats->sightBlocked;
+        return clear;
+    }
+
     void NavOracleStats::Add(NavOracleStats const& o)
     {
         probes += o.probes;
@@ -466,15 +1391,19 @@ namespace BossMechanics
         empty += o.empty;
         endFar += o.endFar;
         farEnd += o.farEnd;
+        sightRays += o.sightRays;
+        sightBlocked += o.sightBlocked;
+        sightCapped += o.sightCapped;
     }
 
     std::string FormatNavStats(NavOracleStats const& s)
     {
         return Acore::StringFormat("probes {} (no mesh {}, off {}, snapped {}), paths {} (ok {}, incomplete {}, "
             "end moved {}, far end {}; no path {}, not using path {}, too long {}, shortcut {}, far start {}, "
-            "other {}, empty {}, end > {} yd {})", s.probes, s.probeNoMesh, s.probeOff, s.probeSnapped, s.calls, s.ok,
-            s.okIncomplete, s.okShifted, s.farEnd, s.noPath, s.notUsingPath, s.tooLong, s.shortcut, s.farStart,
-            s.otherType, s.empty, kMaxEndShiftYd, s.endFar);
+            "other {}, empty {}, end > {} yd {}), sight rays {} (blocked {}, capped {})", s.probes, s.probeNoMesh,
+            s.probeOff, s.probeSnapped, s.calls, s.ok, s.okIncomplete, s.okShifted, s.farEnd, s.noPath,
+            s.notUsingPath, s.tooLong, s.shortcut, s.farStart, s.otherType, s.empty, kMaxEndShiftYd, s.endFar,
+            s.sightRays, s.sightBlocked, s.sightCapped);
     }
 
     std::string FormatSolveStats(Solver::SolveStats const& s)

@@ -20,7 +20,9 @@
 #include "Duration.h"
 #include "MechanicBotView.h"
 #include "MechanicFallibility.h"
+#include "MechanicGeometry.h"
 #include "MechanicSolver.h"
+#include "ObjectGuid.h"
 #include "Value.h"
 #include <array>
 #include <unordered_map>
@@ -36,7 +38,8 @@ namespace BossMechanics
         Idle,       // nothing relevant: the strategy costs a revision compare per tick
         Watch,      // a hazard is relevant, the spot and the current motion are safe: the brain polices motion
         Escape,     // moving to plan.target (our move action; foreign movers and casts blocked)
-        Hold        // at a safe spot until plan.holdUntil (foreign movers blocked; casts that end in time allowed)
+        Hold,       // at a safe spot until plan.holdUntil (foreign movers blocked; casts that end in time allowed)
+        Freeze      // HoldStill window (M3): no move at all, ours included; casts and facing allowed
     };
 
     char const* ModeName(MechanicBotMode mode);
@@ -64,6 +67,24 @@ namespace BossMechanics
         uint32 solveUsLast = 0;
         uint32 solveUsMax = 0;
         uint64 solveUsTotal = 0;
+        // M3 (STAGE-M3-HANDOFF §3.8 telemetry).
+        uint32 carrierSolves = 0;   // solves while the bot carries a shape (Spread/RunOut, a Zone on or aimed at it)
+        uint32 claimSolves = 0;     // ...while it claims a Soak
+        uint32 pickSolves = 0;      // ...while it is the Bait picker
+        uint32 roleSolves = 0;      // role re-positions (healer sight) and region tracking (Input::roleSolve)
+        uint32 violatedPlans = 0;   // plans that knowingly break a player kind for a Zone (Plan::violated > 0)
+        uint32 freezes = 0;         // HoldStill windows entered
+        uint32 facingsApplied = 0;  // look-away / tank facings set by the face action
+        uint32 facingBlocks = 0;    // actions the lock dropped because they would turn the bot (look-away)
+        uint32 facingBreaks = 0;    // casts the waker broke because they would turn the bot (look-away)
+        uint32 tankRefacings = 0;   // tank moves that turn a remembered Frontal source away from the group
+        uint32 refacingStops = 0;   // ...stopped on the spot because a Frontal warning started (decision §7.5)
+        uint32 parks = 0;           // parking / drag-out moves
+        uint32 routesFound = 0;
+        uint32 routesFailed = 0;
+        uint32 routeUsLast = 0;
+        uint32 routeUsMax = 0;
+        uint32 sightRays = 0;       // line-of-sight rays spent by healer solves
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;
@@ -107,6 +128,52 @@ namespace BossMechanics
         Milliseconds noCastUntil{ 0 };                      // after a cast break: cast-time spells, item uses blocked
         Milliseconds lastCastBreakAt{ 0 };
         std::unordered_set<uint32> loggedFallback;          // mechanics a Fallback/NoPath was logged for
+
+        // ---- M3 (STAGE-M3-HANDOFF §3.7, §3.8) ----
+        BotViewInfo viewInfo;                               // tasks, self-trigger auras, tank frontals, parks
+        uint32 seenReservationRevision = 0;                 // Registry::ReservationRevision() of the current view
+        uint64 auraSignature = 0;                           // stacks of the self-trigger auras at the last view
+        bool reserved = false;                              // the bot may hold reservations (drop them on leaving)
+        Milliseconds freezeUntil{ 0 };                      // Freeze: left at freeze.to + SafetyMarginMs
+        Milliseconds freezeTo{ 0 };                         // ...the window's own end (before it: the mechanic must
+                                                            // still be there, STAGE-M3-R-REPORT m-1)
+        // Look-away (a cone or line carried with followFacing): the facing to hold over [lookFrom, lookTo].
+        bool lookOwed = false;                              // a chooseFacing carried shape is live
+        bool lookWindow = false;                            // ...and its window (+- SafetyMarginMs) is open now
+        float lookFacing = 0.f;
+        Milliseconds lookFrom{ 0 };
+        Milliseconds lookTo{ 0 };
+        bool lookPublished = false;                         // lookFacing went onto the reservation board
+        float lookPublishedFacing = 0.f;
+        // The face action's job: turn to faceAngle (look-away, or the tank back to its source after a re-facing).
+        bool faceOwed = false;
+        float faceAngle = 0.f;
+        // Tank facing: Frontal sources (creatures) this bot tanked a tank-exempt cone or line from, this fight, with
+        // every distinct shape of theirs that faces the victim (ViewRules::RememberFrontShape; rear and side shapes
+        // need no facing, STAGE-M3-R-REPORT M-1).
+        struct FrontalSource
+        {
+            ObjectGuid source;
+            std::vector<Shape> shapes;
+            float marginYd = 0.f;
+        };
+        std::vector<FrontalSource> frontalSources;
+        bool tankWarning = false;                           // a remembered source's Frontal is pending: hold
+        bool refacing = false;                              // the Escape is a tank re-facing walk (stopped by a
+                                                            // warning, decision §7.5)
+        Milliseconds lastTankCheckAt{ 0 };
+        // Parking: when the bot started parking for each zone (Park.HoldCapMs).
+        std::unordered_map<uint32, Milliseconds> parkSince;
+        bool parking = false;                               // Input::park is filled this step
+        // Route search (§3.8): asked by a failed, non-deferred re-route; run on a later brain step.
+        bool routePending = false;
+        Geo::Vec3 routeGoal;
+        Milliseconds routeAskedAt{ 0 };
+        Milliseconds lastRouteAt{ 0 };
+        std::size_t waypointIdx = 0;                        // plan.waypoints: the leg the move action walks
+        Milliseconds lastTrackAt{ 0 };                      // region tracking re-solves (MovingAnchorRecheckMs)
+        Milliseconds lastSightAt{ 0 };                      // healer line-of-sight checks
+        Milliseconds nextSightAt{ 0 };                      // ...none before this (a role solve that stayed backs off)
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

@@ -12,7 +12,9 @@
  * 3. casting or channelling: leaveBy is refreshed here (view only, no solve, no paths) and a cast or channel that
  *    would end after leaveBy - margin is interrupted (PlayerbotAI::RequestSpellInterrupt, consumed on the next AI
  *    tick), the bot woken, and cast-time spells and item uses locked for kNoCastAfterBreak. A released bot (stuck,
- *    rooted; MechanicBotBrain) is not interrupted.
+ *    rooted; MechanicBotBrain) is not interrupted; a frozen one (HoldStill, M3) has leaveBy = forever. M3 also
+ *    breaks a SPELL_FACING_FLAG_INFRONT cast on a target outside the look-away arc when a look-away window opens
+ *    before it ends (MechanicBotFacing).
  *
  * Only a cast in SPELL_STATE_PREPARING stops the bot's engine (PlayerbotAI::UpdateAI yields then). A channel is
  * SPELL_STATE_CASTING: the engine and the brain keep running through it, so the check here is redundant for channels
@@ -33,6 +35,7 @@
 #include "BossMechanicsConfig.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
+#include "MechanicBotFacing.h"
 #include "MechanicRegistry.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
@@ -101,12 +104,19 @@ namespace BossMechanics
                 continue;
 
             Milliseconds remaining{ 0 };
-            if (CurrentCast(bot, remaining))
+            if (Spell const* spell = CurrentCast(bot, remaining))
             {
                 Milliseconds const leaveBy = BotBrain::CastLeaveBy(botAI, *st, reg, now);
-                // n3: leaveBy already holds SafetyMarginMs once; the second margin is deliberate (MechanicBotLock.cpp).
-                if (Solver::CastAllowed(now, remaining, leaveBy, margin) || BotBrain::Released(botAI, *st, now))
+                if (BotBrain::Released(botAI, *st, now))
                     continue;
+                // n3: leaveBy already holds SafetyMarginMs once; the second margin is deliberate (MechanicBotLock.cpp).
+                // M3 look-away: a cast on a target outside the chosen arc whose re-facing (PlayerbotAI::UpdateAI turns
+                // a casting bot to its target every update) would run into a window.
+                bool const turnsAway = BotFacing::CastBreaksLookAway(bot, *st, spell, now, remaining);
+                if (Solver::CastAllowed(now, remaining, leaveBy, margin) && !turnsAway)
+                    continue;
+                if (turnsAway)
+                    ++st->counters.facingBreaks;
                 botAI->RequestSpellInterrupt();
                 Wake(botAI, *st);
                 if (now - st->lastCastBreakAt >= kCastBreakDedup)

@@ -62,6 +62,26 @@ namespace BossMechanics
             b.facingSlackDeg = GetClampedFloat("BossMechanics.Bots.FacingSlackDeg", 15.f, 0.f, 90.f);
             b.debug = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Debug", false);
 
+            // M3
+            b.humanSlackYd = GetClampedFloat("BossMechanics.Bots.HumanSlackYd", 1.f, 0.f, 5.f);
+            b.regionComfortWeight = GetClampedFloat("BossMechanics.Bots.RegionComfortWeight", 1.5f, 0.f, 20.f);
+            b.trackSlackYd = GetClampedFloat("BossMechanics.Bots.TrackSlackYd", 0.75f, 0.f, 5.f);
+            b.lookAwayMarginDeg = GetClampedFloat("BossMechanics.Bots.LookAway.MarginDeg", 10.f, 0.f, 45.f);
+            b.tankFacingEnable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.TankFacing.Enable", true);
+            b.parkEnable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Park.Enable", true);
+            b.parkDepthYd = GetClampedFloat("BossMechanics.Bots.Park.DepthYd", 1.f, 0.f, 10.f);
+            b.parkHoldCapMs = GetClampedU32("BossMechanics.Bots.Park.HoldCapMs", 8000, 0, 60000);
+            b.freezeSettleMs = GetClampedU32("BossMechanics.Bots.Freeze.SettleMs", 250, 0, 2000);
+            b.healerSightWeight = GetClampedFloat("BossMechanics.Bots.Healer.SightWeight", 10.f, 0.f, 50.f);
+            b.healerMaxSightChecks = GetClampedU32("BossMechanics.Bots.Healer.MaxSightChecks", 8, 0, 32);
+            b.routeEnable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Route.Enable", true);
+            b.routePadYd = GetClampedFloat("BossMechanics.Bots.Route.PadYd", 8.f, 0.f, 40.f);
+            b.routeCellYd = GetClampedFloat("BossMechanics.Bots.Route.CellYd", 1.f, 0.25f, 5.f);
+            b.routeMaxCells = GetClampedU32("BossMechanics.Bots.Route.MaxCells", 4096, 64, 16384);
+            b.routeMaxExpansions = GetClampedU32("BossMechanics.Bots.Route.MaxExpansions", 4096, 64, 16384);
+            b.routeMaxLegs = GetClampedU32("BossMechanics.Bots.Route.MaxLegs", 8, 1, 32);
+            b.routeRetryMs = GetClampedU32("BossMechanics.Bots.Route.RetryMs", 1000, 100, 60000);
+
             BotFallibilityConfig& f = b.fallibility;
             f.enable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Fallibility.Enable", false);
             f.reactionMs = GetClampedU32("BossMechanics.Bots.Fallibility.ReactionMs", 350, 0, 5000);

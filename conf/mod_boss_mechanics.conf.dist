@@ -450,3 +450,164 @@ BossMechanics.Bots.Fallibility.ScaleHeroic = 1.0
 #
 
 BossMechanics.Bots.Fallibility.Seed = 0
+
+#
+#    BossMechanics.Bots.HumanSlackYd
+#        Description: Bots plan around human players at their current spot plus this many yards (0-5): humans do
+#                     not publish where they are going.
+#        Default:     1.0
+#
+
+BossMechanics.Bots.HumanSlackYd = 1.0
+
+#
+#    BossMechanics.Bots.RegionComfortWeight
+#        Description: Get-in mechanics (Stack, Soak, Spot, lanes): score per yard a spot is short of standing 1 yard
+#                     inside the shape (0-20). Higher pulls bots deeper inside.
+#        Default:     1.5
+#
+
+BossMechanics.Bots.RegionComfortWeight = 1.5
+
+#
+#    BossMechanics.Bots.TrackSlackYd
+#        Description: A bot standing in a get-in shape that moves with a unit looks for a new spot when it is this
+#                     close (yards, 0-5) to the shape's inner edge.
+#        Default:     0.75
+#
+
+BossMechanics.Bots.TrackSlackYd = 0.75
+
+#
+#    BossMechanics.Bots.LookAway.MarginDeg
+#        Description: A bot carrying a cone or line keeps it this many extra degrees (0-45) away from every ally;
+#                     the allies check that cone at the carrier's facing +- the same (at most FacingSlackDeg).
+#                     Keep it at 10 or more: the carrier's facing may be 5 degrees off and its published facing
+#                     5 degrees old.
+#        Default:     10
+#
+
+BossMechanics.Bots.LookAway.MarginDeg = 10
+
+#
+#    BossMechanics.Bots.TankFacing.Enable
+#        Description: After a boss's first frontal, its tank keeps the boss faced away from the group between casts
+#                     and holds still during each warning (a walk under way stops when a warning starts). Only the
+#                     boss's cones and lines that face its victim count; rear and side ones need no facing.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Bots.TankFacing.Enable = 1
+
+#
+#    BossMechanics.Bots.Park.Enable
+#        Description: Tanks hold a boss inside a zone the boss script marks for parking, and drag it out of lasting
+#                     zones the group stands in.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Bots.Park.Enable = 1
+
+#
+#    BossMechanics.Bots.Park.DepthYd
+#        Description: Parking: the boss's predicted stop must lie at least this many yards (0-10) inside the zone
+#                     (or that far outside the zone when dragging it out).
+#        Default:     1.0
+#
+
+BossMechanics.Bots.Park.DepthYd = 1.0
+
+#
+#    BossMechanics.Bots.Park.HoldCapMs
+#        Description: Longest time a tank holds one parking spot, in milliseconds (0-60000).
+#        Default:     8000
+#
+
+BossMechanics.Bots.Park.HoldCapMs = 8000
+
+#
+#    BossMechanics.Bots.Freeze.SettleMs
+#        Description: Bots stop moving this many milliseconds (0-2000) before a hold-still window opens.
+#        Default:     250
+#
+
+BossMechanics.Bots.Freeze.SettleMs = 250
+
+#
+#    BossMechanics.Bots.Healer.SightWeight
+#        Description: Healer spot score per group member out of line of sight (0-50): the tank counts full, every
+#                     other member half. A spot costs about 1 per yard walked, so this is about how far a healer
+#                     walks to see the tank again (round a pillar 7 yd behind it: about 6-8 yd).
+#        Default:     10.0
+#
+
+BossMechanics.Bots.Healer.SightWeight = 10.0
+
+#
+#    BossMechanics.Bots.Healer.MaxSightChecks
+#        Description: Line-of-sight checks per healer solve (0-32); 0 turns the sight score off.
+#        Default:     8
+#
+
+BossMechanics.Bots.Healer.MaxSightChecks = 8
+
+#
+#    BossMechanics.Bots.Route.Enable
+#        Description: When the one-step reroute finds nothing (a U-shaped wall of hazards), a following bot searches
+#                     a grid route around the hazards.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BossMechanics.Bots.Route.Enable = 1
+
+#
+#    BossMechanics.Bots.Route.PadYd
+#        Description: Route search: yards (0-40) added around the bot and its goal for the search box.
+#        Default:     8
+#
+
+BossMechanics.Bots.Route.PadYd = 8
+
+#
+#    BossMechanics.Bots.Route.CellYd
+#        Description: Route search: the smallest grid cell in yards (0.25-5); cells grow to stay within MaxCells.
+#        Default:     1.0
+#
+
+BossMechanics.Bots.Route.CellYd = 1.0
+
+#
+#    BossMechanics.Bots.Route.MaxCells
+#        Description: Route search: most grid cells (64-16384). The search costs about 0.1 ms per 1000 cells on top
+#                     of the hazards' rasterization; it runs on the map thread.
+#        Default:     4096
+#
+
+BossMechanics.Bots.Route.MaxCells = 4096
+
+#
+#    BossMechanics.Bots.Route.MaxExpansions
+#        Description: Route search: most cells expanded before giving up (64-16384), per search (at most two).
+#        Default:     4096
+#
+
+BossMechanics.Bots.Route.MaxExpansions = 4096
+
+#
+#    BossMechanics.Bots.Route.MaxLegs
+#        Description: Route search: most straight legs in a route (1-32).
+#        Default:     8
+#
+
+BossMechanics.Bots.Route.MaxLegs = 8
+
+#
+#    BossMechanics.Bots.Route.RetryMs
+#        Description: Route search: per bot, at most one search per this many milliseconds (100-60000).
+#        Default:     1000
+#
+
+BossMechanics.Bots.Route.RetryMs = 1000

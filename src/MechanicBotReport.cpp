@@ -4,7 +4,8 @@
  *
  * Per bot in the GM's group on the GM's map (`all`: every bot on the map, to check the gate on bot-only groups): the
  * gate status (strategies installed), mode, target and distance, leaveBy - now, the counters, and the bot's failures
- * in the registry's ledger (every encounter on the map).
+ * in the registry's ledger (every encounter on the map). M3 adds the player-kind, tank and route counters, the bot's
+ * tasks, its live reservations, its look-away facing and its remembered Frontal sources.
  */
 
 #include "MechanicBotGuard.h"
@@ -92,6 +93,34 @@ namespace BossMechanics
                 outcome(Solver::Outcome::NoPath), c.pathChecks, c.lateArrivals, c.lateFallbacks, c.stuckResolves,
                 c.releases, c.motionStops, c.reroutes, c.lockBlocks, c.lockMoves, c.lockCasts, c.castBreaks, c.wakes,
                 c.solveUsLast, c.solveUsMax, mean);
+            // M3: the player kinds, the tank tasks and the route search (STAGE-M3-HANDOFF §3.8 telemetry).
+            handler->PSendSysMessage("  m3: carrier solves {}, claim solves {}, pick solves {}, role solves {}, "
+                "violated {}, freezes {}, facings {}, facing blocks {}, facing breaks {}, tank re-facings {} "
+                "(stopped by a warning {}), parks {}, routes {} found {} failed (us last {} max {}), sight rays {}",
+                c.carrierSolves, c.claimSolves, c.pickSolves, c.roleSolves, c.violatedPlans, c.freezes,
+                c.facingsApplied, c.facingBlocks, c.facingBreaks, c.tankRefacings, c.refacingStops, c.parks,
+                c.routesFound + c.routesFailed, c.routesFound, c.routesFailed, c.routeUsLast, c.routeUsMax,
+                c.sightRays);
+            std::string tasks;
+            for (BotTask const& t : st->viewInfo.tasks)
+                tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,
+                    KindName(t.kind), BotTaskRoleName(t.role), (t.from - now).count(), (t.to - now).count());
+            std::string board;
+            if (reg)
+                reg->ForEachActive(now, [&](ActiveMechanic const& m)
+                {
+                    for (Reservation const& r : m.reservations)
+                        if (r.bot == bot->GetGUID())
+                            board += Acore::StringFormat("{}{} at ({:.1f}, {:.1f}) facing {:.0f} slot {}{} until {} ms",
+                                board.empty() ? "" : "; ", m.id, r.point.GetPositionX(), r.point.GetPositionY(),
+                                r.facing * 180.f / static_cast<float>(M_PI), r.slot, r.claim ? " claim" : "",
+                                (r.until - now).count());
+                });
+            std::string const look = st->lookOwed ? Acore::StringFormat("{:.0f} deg{}", st->lookFacing * 180.f
+                / static_cast<float>(M_PI), st->lookWindow ? " (window)" : "") : std::string("-");
+            handler->PSendSysMessage("  tasks: {} | reservations: {} | look-away {} | frontal sources {}{}",
+                tasks.empty() ? "-" : tasks, board.empty() ? "-" : board, look, st->frontalSources.size(),
+                st->parking ? " | parking" : "");
             // Debug = 1 only (BossMechanics.Bots.Debug): why candidates and navmesh calls failed, summed.
             if (c.debugNav.probes || c.debugNav.calls)
             {

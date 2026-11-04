@@ -11,6 +11,12 @@
  * triggers on, so a bot never retreats into a spot it would immediately flee again. Both rules are adapted from
  * mod-dungeon-clear (Jared Wright, AGPL-3.0-or-later), Util/DcHazard.h, commit 7f67cb5.
  *
+ * M3 (STAGE-M3-HANDOFF §3.2, §3.5) adds the player kinds on top of the hazards: regions (be inside), allies and
+ * carried shapes (keep allies out of what the bot carries, picking a look-away facing), FarFrom, Freeze (HoldStill),
+ * Sight and Reach (soft role terms), and Park (tank parking). TargetOk is the M3 notion of "safe"; with every M3 input
+ * empty, Solve, Candidates and TargetOk give exactly the M2 results. Assignment (who soaks, the cluster leader, spread
+ * slots) lives in MechanicAssign.h.
+ *
  * Times are absolute GameTime milliseconds. Distances are yards; z only matters through a shape's zTolerance.
  */
 
@@ -63,6 +69,10 @@ namespace BossMechanics::Solver
         float marginYd = 0.f;               // SafetyMarginYd + drift of a moving anchor
         Timing timing;
         float driftYd = 0.f;                // the drift part of marginYd (kept by the reduced-margin pass)
+        // Built by the view from other players' planned spots (M3: a carrier's circle, a Bait landing circle, an
+        // avoided Soak, a Zone at its anchor's planned spot). RefreshAllies replaces these before every solve; the
+        // solver treats them like any other hazard.
+        bool synthetic = false;
     };
 
     struct LaneFrame
@@ -71,9 +81,74 @@ namespace BossMechanics::Solver
         std::vector<LaneRect> rects, freeLanes;
     };
 
+    // --------------------------------------------------------------------------------------------------------------
+    // Player kinds (STAGE-M3-HANDOFF §3.2, §3.5). All empty or absent by default: M2 inputs solve as before.
+    // --------------------------------------------------------------------------------------------------------------
+
+    // Be inside `shape` at every pose in `poses`, `marginYd` inside its edge, over [from, to] (Stack, claimed Soak,
+    // Spot, lane, Bait range). Hard unless `hard` is false (then a score term). The target must be reached by
+    // from − marginMs; once that is out of reach (late, or a lasting region already open) the nearest way in is
+    // accepted instead (arrival within the straight time to the region plus Detail::kLateSlackYd). A region whose
+    // window ended (to + marginMs < now) or that has no pose is ignored.
+    struct Region
+    {
+        std::uint32_t id = 0;
+        Shape shape;
+        std::vector<Geo::Pose> poses;
+        float marginYd = 0.f;
+        Ms from{ 0 }, to{ 0 };
+        bool hard = true;
+    };
+
+    // Another player's spot at a mechanic's judge time: a bot's planned spot, a human's current one.
+    struct Ally
+    {
+        std::uint64_t guid = 0;
+        Geo::Vec3 p;
+        float slackYd = 0.f;
+    };
+
+    // A shape that moves with the bot. No counted ally may be inside it, posed at the bot's spot, at its windows
+    // (allies count within marginYd + their slackYd). The target must be reached by timing.from − marginMs when that
+    // is still possible. Ignored once its window ended.
+    struct Carried
+    {
+        enum class Mode : std::uint8_t { OnBot, AimedAtBot };
+        std::uint32_t id = 0;
+        Shape shape;
+        Mode mode = Mode::OnBot;
+        Geo::Pose source;                   // AimedAtBot: the line's source; it points at the bot's spot
+        bool chooseFacing = false;          // OnBot cone/line with followFacing: the solver picks the facing
+        float preferredFacing = 0.f;        // ...nearest to this (radians, the bot's victim)
+        float fixedFacing = 0.f;            // OnBot, !chooseFacing: the facing it will have
+        float marginYd = 0.f;
+        float angleMarginDeg = 10.f;        // LookAway.MarginDeg
+        Timing timing;
+        std::vector<std::uint32_t> allies;  // indices into Input::allies that count
+    };
+
+    struct FarFrom { bool present = false; Geo::Vec3 from; float weightPerYd = 0.5f; };
+    struct Freeze { bool present = false; Ms from{ 0 }, to{ 0 }; Ms settle{ 250 }; };
+    // Score: weights[i] (1 when missing) per point not in sight; only Sight::maxChecks rays per solve.
+    struct Sight { std::vector<Geo::Vec3> points; std::vector<float> weights; std::uint32_t maxChecks = 8; };
+    // Score: weightPerYd per yard beyond maxYd from each point.
+    struct Reach { std::vector<Geo::Vec3> points; float maxYd = 0.f; float weightPerYd = 0.f; };
+    // Tank parking (§3.7): the boss chases the tank from `boss` and stops `stopYd` short of it, once the tank is
+    // beyond `triggerYd`; the stop must lie `depthYd` inside `zone` (inside = true) or that far outside every
+    // `avoid` shape (inside = false, drag out).
+    struct Park
+    {
+        bool present = false, inside = true;
+        Geo::Vec3 boss;
+        float stopYd = 0.f, triggerYd = 0.f, depthYd = 1.f;
+        Region zone;
+        std::vector<Hazard> avoid;
+    };
+
     struct Weights
     {
         float path = 1.f, role = 2.f, edge = 1.5f, crowd = 1.f, slackPerMs = 0.01f, stay = -1.f;
+        float region = 1.5f;                // per yard short of 1 yd inside a region (RegionComfortWeight)
     };
 
     struct RoleBand
@@ -98,6 +173,9 @@ namespace BossMechanics::Solver
         // Re-route: a target must be at least this much closer to the role anchor (the motion's end) than the bot,
         // so a clean pass never settles for a spot that makes no progress while a later pass could pass the hazard.
         float rerouteGainYd = 1.f;
+        // The slot ring (M3): with a carried circle and a role band, 16 candidates on the band's outer radius. Only
+        // a test switches it off (to prove it is needed).
+        bool slotRing = true;
     };
 
     struct Input
@@ -114,6 +192,21 @@ namespace BossMechanics::Solver
         // spot as a candidate and only with targets params.rerouteGainYd closer to the role anchor (the motion's
         // end), so the anchor pulls it around the hazard.
         bool reroute = false;
+
+        // Player kinds (M3).
+        std::vector<Region> regions;
+        std::vector<Ally> allies;
+        std::vector<Carried> carried;
+        FarFrom far;
+        Freeze freeze;
+        Sight sight;
+        Reach reach;
+        Park park;
+        // Slot ring rotation: slot × 360° / slotCount (Assign::SlotOf among the carriers; 0 = no rotation).
+        std::uint32_t slot = 0, slotCount = 0;
+        // Solve even when the bot's spot passes TargetOk (a role move: healer sight, reach): the spot competes as an
+        // ordinary candidate (with Weights::stay) and wins as Safe. Ignored while frozen and under `reroute`.
+        bool roleSolve = false;
     };
 
     // Walkable path from `from` to `to`: `out` gets the corner points, from the start (or its first corner) to the
@@ -129,6 +222,8 @@ namespace BossMechanics::Solver
         virtual ~PathOracle() = default;
         virtual bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) = 0;
         virtual bool Walkable(Geo::Vec3& /*p*/) { return true; }
+        // Line of sight between two points (the glue lifts both ends by their collision height). Only Sight asks.
+        virtual bool InSight(Geo::Vec3 const& /*from*/, Geo::Vec3 const& /*to*/) { return true; }
     };
 
     enum class Outcome : std::uint8_t
@@ -180,6 +275,12 @@ namespace BossMechanics::Solver
         std::vector<std::uint32_t> answers;
         std::uint32_t candidates = 0, pathChecks = 0;
         SolveStats stats;
+        // M3: the facing a chooseFacing carried shape needs at the target (radians, (-pi, pi]).
+        bool hasFacing = false;
+        float facing = 0.f;
+        std::vector<Geo::Vec3> waypoints;   // Route only (MechanicRoute.h)
+        std::uint32_t violated = 0;         // hard regions + carried shapes the plan breaks (Fallback only)
+        std::uint32_t sightChecks = 0;      // InSight rays spent
     };
 
     struct PathCheck
@@ -401,6 +502,114 @@ namespace BossMechanics::Solver
 
     namespace Detail
     {
+        // A shape posed once with its trigonometry done (STAGE-M3-F: CheckPath and the route grid test many points
+        // against the same pose). FrameSd equals SignedDistance up to float rounding; z is the caller's.
+        struct PoseFrame
+        {
+            Geo::Pose pose;
+            float ux = 1.f, uy = 0.f;           // cone and line axis (unit)
+            float ax = 0.f, ay = 0.f;           // cone edge ends, relative to the apex
+            float bx = 0.f, by = 0.f;
+            float cosHalf = 1.f;
+        };
+
+        inline PoseFrame PrepareFrame(Shape const& s, Geo::Pose const& pose)
+        {
+            PoseFrame r;
+            r.pose = pose;
+            float const f = Geo::ShapeFacing(s, pose);
+            r.ux = std::cos(f);
+            r.uy = std::sin(f);
+            if (s.type == ShapeType::Cone && s.angleDeg < 360.f)
+            {
+                float const half = Geo::DegToRad(s.angleDeg) * 0.5f;
+                r.cosHalf = std::cos(half);
+                r.ax = std::cos(f + half) * s.length;
+                r.ay = std::sin(f + half) * s.length;
+                r.bx = std::cos(f - half) * s.length;
+                r.by = std::sin(f - half) * s.length;
+            }
+            return r;
+        }
+
+        // Squared distance from (px, py) to the segment (0, 0) - (bx, by).
+        inline float SegmentDist2FromOrigin(float px, float py, float bx, float by)
+        {
+            float const l2 = bx * bx + by * by;
+            float const u = l2 > 0.f ? std::clamp((px * bx + py * by) / l2, 0.f, 1.f) : 0.f;
+            float const ex = px - u * bx;
+            float const ey = py - u * by;
+            return ex * ex + ey * ey;
+        }
+
+        inline float FrameSd(Shape const& s, PoseFrame const& r, float dx, float dy)
+        {
+            switch (s.type)
+            {
+                case ShapeType::Circle:
+                    return std::sqrt(dx * dx + dy * dy) - s.radius;
+                case ShapeType::Donut:
+                {
+                    float const d = std::sqrt(dx * dx + dy * dy);
+                    if (d >= s.radius)
+                        return d - s.radius;
+                    if (d <= s.inner)
+                        return s.inner - d;
+                    return -std::min(d - s.inner, s.radius - d);
+                }
+                case ShapeType::Cone:
+                {
+                    float const d = std::sqrt(dx * dx + dy * dy);
+                    if (s.angleDeg >= 360.f)
+                        return d - s.length;
+                    float const edges = std::sqrt(std::min(SegmentDist2FromOrigin(dx, dy, r.ax, r.ay),
+                        SegmentDist2FromOrigin(dx, dy, r.bx, r.by)));
+                    bool const withinAngle = d < 1e-6f || dx * r.ux + dy * r.uy >= d * r.cosHalf;
+                    if (withinAngle && d <= s.length)
+                        return -std::min(s.length - d, edges);
+                    if (withinAngle)
+                        return std::min(edges, d - s.length);
+                    return edges;
+                }
+                case ShapeType::Line:
+                {
+                    if (s.length <= s.excludeStart || s.width <= 0.f)
+                        return kInf;
+                    float const ls = dx * r.ux + dy * r.uy;
+                    float const lt = -dx * r.uy + dy * r.ux;
+                    float const cs = (s.excludeStart + s.length) * 0.5f;
+                    float const hs = (s.length - s.excludeStart) * 0.5f;
+                    float const qs = std::fabs(ls - cs) - hs;
+                    float const qt = std::fabs(lt) - s.width * 0.5f;
+                    float const ox = std::max(qs, 0.f);
+                    float const oy = std::max(qt, 0.f);
+                    return std::sqrt(ox * ox + oy * oy) + std::min(std::max(qs, qt), 0.f);
+                }
+            }
+            return kInf;
+        }
+
+        // Within (below) over prepared frames of h's poses.
+        inline bool WithinFrames(Hazard const& h, PoseFrame const* frames, std::size_t count, Geo::Vec3 const& p,
+            float* sdOut)
+        {
+            float const reach = Geo::Bounds(h.shape) + h.marginYd + 0.01f;
+            float best = kInf;
+            for (std::size_t k = 0; k < count; ++k)
+            {
+                Geo::Pose const& pose = frames[k].pose;
+                if (std::fabs(p.z - pose.z) > h.shape.zTolerance + Geo::kEdgeEpsilon)
+                    continue;
+                float const dx = p.x - pose.x;
+                float const dy = p.y - pose.y;
+                if (dx * dx + dy * dy > reach * reach)
+                    continue;
+                best = std::min(best, FrameSd(h.shape, frames[k], dx, dy));
+            }
+            *sdOut = best;
+            return best <= h.marginYd;
+        }
+
         // Does any pose of h put p within marginYd? Returns the smallest signed distance (minus margin when inside).
         inline bool Within(Hazard const& h, Geo::Vec3 const& p, float* sdOut = nullptr)
         {
@@ -551,12 +760,401 @@ namespace BossMechanics::Solver
     }
 
     // --------------------------------------------------------------------------------------------------------------
+    // Player kinds (M3): regions, carried shapes, freeze, parking
+    // --------------------------------------------------------------------------------------------------------------
+    namespace Detail
+    {
+        constexpr float kLateSlackYd = 3.f;         // a late region or carrier: arrival within the straight time + this
+        constexpr float kFacingStep = 1e-3f;        // a free facing sits this far (radians) beyond a blocked arc
+
+        inline bool HasPlayerKinds(Input const& in)
+        {
+            return !in.regions.empty() || !in.carried.empty() || in.freeze.present || in.park.present;
+        }
+
+        // The hazard horizon: a pending freeze extends it to the window's end (a Zone landing while frozen counts).
+        inline Ms EffectiveHorizon(Input const& in, Ms horizonEnd)
+        {
+            return in.freeze.present ? std::max(horizonEnd, in.freeze.to) : horizonEnd;
+        }
+
+        // Frozen: from freeze.from − settle on, Solve never moves the bot.
+        inline bool Frozen(Input const& in)
+        {
+            return in.freeze.present && in.now >= in.freeze.from - in.freeze.settle && in.now <= in.freeze.to;
+        }
+
+        // Largest signed distance over the poses (≤ −margin = inside every pose by the margin). +inf without poses.
+        inline float RegionSd(Shape const& shape, std::vector<Geo::Pose> const& poses, Geo::Vec3 const& p)
+        {
+            if (poses.empty())
+                return kInf;
+            float worst = -kInf;
+            for (Geo::Pose const& pose : poses)
+                worst = std::max(worst, SignedDistance(shape, pose, p));
+            return worst;
+        }
+
+        // Smallest signed distance over the poses (> m = outside every pose by m).
+        inline float MinSd(Shape const& shape, std::vector<Geo::Pose> const& poses, Geo::Vec3 const& p)
+        {
+            float best = kInf;
+            for (Geo::Pose const& pose : poses)
+                best = std::min(best, SignedDistance(shape, pose, p));
+            return best;
+        }
+
+        inline bool RegionLive(Input const& in, Region const& r)
+        {
+            return !r.poses.empty() && r.to + in.params.marginMs >= in.now;
+        }
+
+        inline bool InsideRegion(Region const& r, Geo::Vec3 const& p)
+        {
+            return RegionSd(r.shape, r.poses, p) <= -r.marginYd;
+        }
+
+        // The latest arrival a region accepts: from − marginMs, or, once that is out of reach, the straight time to
+        // its margin edge from the bot plus kLateSlackYd.
+        inline Ms RegionDue(Input const& in, Region const& r)
+        {
+            float const sd = RegionSd(r.shape, r.poses, in.bot);
+            float const way = std::isfinite(sd) ? std::max(0.f, sd + r.marginYd) : 0.f;
+            Ms const earliest = in.now + in.params.startDelay + TravelMs(way + kLateSlackYd, Speed(in));
+            return std::max(r.from - in.params.marginMs, earliest);
+        }
+
+        inline bool RegionOk(Input const& in, Region const& r, Geo::Vec3 const& p, Ms arrival)
+        {
+            return InsideRegion(r, p) && arrival <= RegionDue(in, r);
+        }
+
+        inline Ms TimingEnd(Timing const& t)
+        {
+            return std::max(t.from, t.to);
+        }
+
+        inline bool CarriedLive(Input const& in, Carried const& c)
+        {
+            return TimingEnd(c.timing) + in.params.marginMs >= in.now;
+        }
+
+        inline bool ChoosesFacing(Carried const& c)
+        {
+            return c.mode == Carried::Mode::OnBot && c.chooseFacing
+                && (c.shape.type == ShapeType::Cone || c.shape.type == ShapeType::Line);
+        }
+
+        // The latest arrival a carrier accepts: timing.from − marginMs, or once that is out of reach, the straight
+        // time for the shape's reach plus margin plus kLateSlackYd.
+        inline Ms CarriedDue(Input const& in, Carried const& c)
+        {
+            Ms const earliest = in.now + in.params.startDelay
+                + TravelMs(Geo::Bounds(c.shape) + c.marginYd + kLateSlackYd, Speed(in));
+            return std::max(c.timing.from - in.params.marginMs, earliest);
+        }
+
+        // The pose of a carried shape with the bot at `at` (OnBot: facing `facing`; AimedAtBot: from its source,
+        // pointing at `at`).
+        inline Geo::Pose CarriedPose(Carried const& c, Geo::Vec3 const& at, float facing)
+        {
+            if (c.mode == Carried::Mode::OnBot)
+                return { at.x, at.y, at.z, facing };
+            float const dx = at.x - c.source.x;
+            float const dy = at.y - c.source.y;
+            float const o = dx * dx + dy * dy > 1e-6f ? std::atan2(dy, dx) : c.source.o;
+            return { c.source.x, c.source.y, c.source.z, o };
+        }
+
+        // No counted ally inside the shape posed with the bot at `at` (exact SignedDistance check).
+        inline bool CarriedClear(Input const& in, Carried const& c, Geo::Vec3 const& at, float facing)
+        {
+            Geo::Pose const pose = CarriedPose(c, at, facing);
+            for (std::uint32_t idx : c.allies)
+            {
+                if (idx >= in.allies.size())
+                    continue;
+                Ally const& a = in.allies[idx];
+                if (SignedDistance(c.shape, pose, a.p) <= c.marginYd + a.slackYd)
+                    return false;
+            }
+            return true;
+        }
+
+        // Blocked facings of one chooseFacing shape at `at`, as arcs in [0, 2pi] of the bot's facing (the shape's
+        // facing offset taken out). false = every facing is blocked (an ally within the margin of the apex, or an
+        // arc of a full turn).
+        struct Arc
+        {
+            float lo, hi;
+        };
+
+        constexpr float kFacingEdgeDeg = 0.5f;
+
+        inline bool BlockedArcs(Input const& in, Carried const& c, Geo::Vec3 const& at, std::vector<Arc>& arcs)
+        {
+            bool const line = c.shape.type == ShapeType::Line;
+            float const offset = Geo::DegToRad(c.shape.facingOffsetDeg);
+            // A hair over the margin (kFacingEdgeDeg): the allies see this cone at the reserved facing ± the same
+            // margin (the view's planned pose), so an ally the carrier just clears sees itself clear too, never on
+            // the edge (STAGE-M3-R-REPORT m-8).
+            float const alpha = (line ? 0.f : Geo::DegToRad(c.shape.angleDeg) * 0.5f)
+                + Geo::DegToRad(std::max(0.f, c.angleMarginDeg) + kFacingEdgeDeg);
+            float const len = line ? Geo::Bounds(c.shape) : c.shape.length;
+            if (!line && c.shape.angleDeg >= 360.f)
+            {
+                for (std::uint32_t idx : c.allies)
+                    if (idx < in.allies.size()
+                        && SignedDistance(c.shape, { at.x, at.y, at.z, 0.f }, in.allies[idx].p)
+                            <= c.marginYd + in.allies[idx].slackYd)
+                        return false;
+                return true;
+            }
+            for (std::uint32_t idx : c.allies)
+            {
+                if (idx >= in.allies.size())
+                    continue;
+                Ally const& a = in.allies[idx];
+                if (std::fabs(a.p.z - at.z) > c.shape.zTolerance + Geo::kEdgeEpsilon)
+                    continue;
+                float const pad = c.marginYd + a.slackYd;
+                float const d = Dist2(at, a.p);
+                if (d > len + pad)
+                    continue;
+                if (d <= pad)
+                    return false;
+                float const side = line ? c.shape.width * 0.5f + pad : pad;
+                float const half = alpha + std::asin(std::min(1.f, side / d));
+                if (half >= Geo::kPi)
+                    return false;
+                float const beta = std::atan2(a.p.y - at.y, a.p.x - at.x) - offset;
+                float const lo = Geo::Wrap2Pi(beta - half);
+                float const hi = lo + 2.f * half;
+                if (hi > Geo::kTwoPi)
+                {
+                    arcs.push_back({ lo, Geo::kTwoPi });
+                    arcs.push_back({ 0.f, hi - Geo::kTwoPi });
+                }
+                else
+                    arcs.push_back({ lo, hi });
+            }
+            return true;
+        }
+
+        inline bool InArcs(std::vector<Arc> const& arcs, float f)
+        {
+            for (Arc const& a : arcs)
+                if (f >= a.lo - 1e-6f && f <= a.hi + 1e-6f)
+                    return true;
+            return false;
+        }
+
+        // The free facing nearest `preferred` (ties: the smaller angle in [0, 2pi)). false = none.
+        inline bool PickFacing(std::vector<Arc> const& arcs, float preferred, float& out)
+        {
+            float const pref = Geo::Wrap2Pi(preferred);
+            if (!InArcs(arcs, pref))
+            {
+                out = Geo::WrapPi(pref);
+                return true;
+            }
+            bool found = false;
+            float best = kInf;
+            float bestF = 0.f;
+            for (Arc const& a : arcs)
+                for (float e : { a.lo - kFacingStep, a.hi + kFacingStep })
+                {
+                    float const f = Geo::Wrap2Pi(e);
+                    if (InArcs(arcs, f))
+                        continue;
+                    float const d = std::fabs(Geo::WrapPi(f - pref));
+                    if (d < best - 1e-6f || (std::fabs(d - best) <= 1e-6f && f < bestF))
+                    {
+                        best = d;
+                        bestF = f;
+                        found = true;
+                    }
+                }
+            if (found)
+                out = Geo::WrapPi(bestF);
+            return found;
+        }
+
+        // A shape's middle: circle or donut center, half way along a cone's axis or a line's centerline.
+        inline Geo::Vec3 ShapeCenter(Shape const& s, Geo::Pose const& pose)
+        {
+            float const f = Geo::ShapeFacing(s, pose);
+            float along = 0.f;
+            if (s.type == ShapeType::Cone && s.angleDeg < 360.f)
+                along = s.length * 0.5f;
+            else if (s.type == ShapeType::Line)
+                along = (s.excludeStart + s.length) * 0.5f;
+            return { pose.x + std::cos(f) * along, pose.y + std::sin(f) * along, pose.z };
+        }
+
+        // Parking: where the boss stops when the tank stands at p (it does not move while p is within triggerYd).
+        inline bool ParkStopOk(Park const& pk, Geo::Vec3 const& s)
+        {
+            if (pk.inside)
+                return RegionSd(pk.zone.shape, pk.zone.poses, s) <= -pk.depthYd;
+            for (Hazard const& h : pk.avoid)
+                if (MinSd(h.shape, h.poses, s) < pk.depthYd)
+                    return false;
+            return true;
+        }
+
+        inline bool ParkOk(Input const& in, Geo::Vec3 const& p)
+        {
+            Park const& pk = in.park;
+            if (!pk.present)
+                return true;
+            float const d = Dist2(p, pk.boss);
+            if (d <= pk.triggerYd)
+                return ParkStopOk(pk, pk.boss);     // stay: the boss is already where it should be, in reach
+            if (pk.inside && MinSd(pk.zone.shape, pk.zone.poses, p) <= pk.zone.marginYd)
+                return false;                       // the tank stays outside the zone
+            float const k = pk.stopYd / std::max(d, 1e-3f);
+            Geo::Vec3 const stop{ p.x + (pk.boss.x - p.x) * k, p.y + (pk.boss.y - p.y) * k, pk.boss.z };
+            return ParkStopOk(pk, stop);
+        }
+
+        inline bool FreezeOk(Input const& in, Ms arrival)
+        {
+            if (!in.freeze.present || Frozen(in) || in.now > in.freeze.to)
+                return true;
+            return arrival <= in.freeze.from - in.freeze.settle;
+        }
+    }
+
+    // Every live hard region holds p (by its margin), reached in time (Region).
+    inline bool RegionsOk(Input const& in, Geo::Vec3 const& p, Ms arrival)
+    {
+        for (Region const& r : in.regions)
+            if (r.hard && Detail::RegionLive(in, r) && !Detail::RegionOk(in, r, p, arrival))
+                return false;
+        return true;
+    }
+
+    // Free facing for one carried shape at `at`: false = no facing clears the allies; true sets `facing`. Only an
+    // OnBot cone or line with chooseFacing picks (the free arc nearest preferredFacing, §3.5 "Free facing"); any
+    // other shape is checked at its own facing (fixedFacing, or aimed from its source), which `facing` gets.
+    inline bool FreeFacing(Input const& in, Carried const& c, Geo::Vec3 const& at, float& facing)
+    {
+        if (!Detail::ChoosesFacing(c))
+        {
+            Geo::Pose const pose = Detail::CarriedPose(c, at, c.fixedFacing);
+            facing = c.mode == Carried::Mode::OnBot ? c.fixedFacing : pose.o;
+            return Detail::CarriedClear(in, c, at, c.fixedFacing);
+        }
+        std::vector<Detail::Arc> arcs;
+        float f = 0.f;
+        if (!Detail::BlockedArcs(in, c, at, arcs) || !Detail::PickFacing(arcs, c.preferredFacing, f))
+            return false;
+        if (!Detail::CarriedClear(in, c, at, f))
+            return false;
+        facing = f;
+        return true;
+    }
+
+    // No counted ally inside any live carried shape with the bot at p. Every chooseFacing shape shares one facing
+    // (the free arc of all of them nearest the first one's preferredFacing), written to *facing.
+    inline bool CarriedOk(Input const& in, Geo::Vec3 const& p, float* facing)
+    {
+        std::vector<Detail::Arc> arcs;
+        Carried const* first = nullptr;
+        for (Carried const& c : in.carried)
+        {
+            if (!Detail::CarriedLive(in, c))
+                continue;
+            if (!Detail::ChoosesFacing(c))
+            {
+                if (!Detail::CarriedClear(in, c, p, c.fixedFacing))
+                    return false;
+                continue;
+            }
+            if (!first)
+                first = &c;
+            if (!Detail::BlockedArcs(in, c, p, arcs))
+                return false;
+        }
+        if (!first)
+            return true;
+        float f = 0.f;
+        if (!Detail::PickFacing(arcs, first->preferredFacing, f))
+            return false;
+        for (Carried const& c : in.carried)
+            if (Detail::CarriedLive(in, c) && Detail::ChoosesFacing(c) && !Detail::CarriedClear(in, c, p, f))
+                return false;
+        if (facing)
+            *facing = f;
+        return true;
+    }
+
+    namespace Detail
+    {
+        // The hazard part of TargetOk: PointSafe over [arrival, the horizon (a pending freeze's end)].
+        inline bool HazardsOk(Input const& in, Geo::Vec3 const& p, Ms arrival, Ms horizonEnd)
+        {
+            return PointSafe(in, p, arrival, std::max(arrival, EffectiveHorizon(in, horizonEnd)));
+        }
+
+        // The player-kind part of TargetOk.
+        inline bool PlayerKindsOk(Input const& in, Geo::Vec3 const& p, Ms arrival, float* facing)
+        {
+            if (!HasPlayerKinds(in))
+                return true;
+            if (!FreezeOk(in, arrival) || !RegionsOk(in, p, arrival) || !ParkOk(in, p))
+                return false;
+            for (Carried const& c : in.carried)
+                if (CarriedLive(in, c) && arrival > CarriedDue(in, c))
+                    return false;
+            return CarriedOk(in, p, facing);
+        }
+
+        // Hard regions and carried shapes p breaks (the Fallback ranking and Plan::violated).
+        inline std::uint32_t Violations(Input const& in, Geo::Vec3 const& p, Ms arrival)
+        {
+            std::uint32_t n = 0;
+            for (Region const& r : in.regions)
+                if (r.hard && RegionLive(in, r) && !RegionOk(in, r, p, arrival))
+                    ++n;
+            for (Carried const& c : in.carried)
+            {
+                if (!CarriedLive(in, c))
+                    continue;
+                float f = 0.f;
+                if (arrival > CarriedDue(in, c) || !FreeFacing(in, c, p, f))
+                    ++n;
+            }
+            return n;
+        }
+
+        inline bool AnyChoosesFacing(Input const& in)
+        {
+            for (Carried const& c : in.carried)
+                if (CarriedLive(in, c) && ChoosesFacing(c))
+                    return true;
+            return false;
+        }
+    }
+
+    // PointSafe + RegionsOk + CarriedOk + Freeze + Park: what the brain calls "safe" from M3 on. The hazards are
+    // checked over [arrival, horizonEnd] (extended to a pending freeze's end); before a freeze the arrival must be
+    // by freeze.from − settle (while frozen that term always holds: Solve never moves a frozen bot). *facing gets
+    // the facing a chooseFacing carried shape needs at p (unchanged when there is none).
+    inline bool TargetOk(Input const& in, Geo::Vec3 const& p, Ms arrival, Ms horizonEnd, float* facing = nullptr)
+    {
+        return Detail::HazardsOk(in, p, arrival, horizonEnd) && Detail::PlayerKindsOk(in, p, arrival, facing);
+    }
+
+    // --------------------------------------------------------------------------------------------------------------
     // Path check
     // --------------------------------------------------------------------------------------------------------------
 
     namespace Detail
     {
         constexpr float kDeeperEpsYd = 0.05f;       // start-hazard exemption: "deeper" beyond this
+        constexpr float kMinStepYd = 0.1f;          // the path walk's finest sample spacing
         constexpr float kExitSlackYd = 1.f;         // start-hazard exemption: dwell cap beyond the straight exit
 
         // The walk behind CheckPath. measure = keep walking after a failing sample and count its dwell too (the
@@ -589,6 +1187,26 @@ namespace BossMechanics::Solver
                 Ms graceUsed{ 0 };
             };
             std::vector<Track> track(n);
+            // Each hazard pose prepared once, when a sample first tests it (the samples then test it many times).
+            std::vector<std::size_t> firstFrame(n + 1, 0);
+            for (std::size_t i = 0; i < n; ++i)
+                firstFrame[i + 1] = firstFrame[i] + in.hazards[i].poses.size();
+            std::vector<PoseFrame> frames(firstFrame[n]);
+            std::vector<std::uint8_t> prepared(n, 0);
+            auto prepare = [&](std::size_t i)
+            {
+                if (prepared[i])
+                    return;
+                prepared[i] = 1;
+                for (std::size_t k = 0; k < in.hazards[i].poses.size(); ++k)
+                    frames[firstFrame[i] + k] = PrepareFrame(in.hazards[i].shape, in.hazards[i].poses[k]);
+            };
+            auto within = [&](std::size_t i, Geo::Vec3 const& p, float* sd)
+            {
+                prepare(i);
+                return WithinFrames(in.hazards[i], frames.data() + firstFrame[i], firstFrame[i + 1] - firstFrame[i], p,
+                    sd);
+            };
             for (std::size_t i = 0; i < n; ++i)
             {
                 float sd = kInf;
@@ -600,9 +1218,13 @@ namespace BossMechanics::Solver
                     + TravelMs(std::max(0.f, in.hazards[i].marginYd - sd) + kExitPushYd + kExitSlackYd, speed);
             }
 
-            // Hazards whose bounds reach the current leg (the rest cannot hold any of its samples).
-            auto nearLeg = [&](Geo::Vec3 const& a, Geo::Vec3 const& b)
+            // Hazards whose bounds reach the current leg, walked over [lo, hi] (the rest cannot hold any of its
+            // samples), and (STAGE-M3-F) whose hot hull meets that time, widened as the samples' windows are: a hazard
+            // hot only before or after the leg cannot fail it. A start hazard's exemption state is kept: it stays
+            // near while its exemption runs. Returns the smallest margin of the hazards near (kInf: none).
+            auto nearLeg = [&](Geo::Vec3 const& a, Geo::Vec3 const& b, Ms lo, Ms hi)
             {
+                float smallest = kInf;
                 for (std::size_t i = 0; i < n; ++i)
                 {
                     Hazard const& h = in.hazards[i];
@@ -612,9 +1234,17 @@ namespace BossMechanics::Solver
                     for (Geo::Pose const& pose : h.poses)
                         if (SegmentDistance(pose.x, pose.y, a.x, a.y, b.x, b.y) <= reach)
                             tr.near = true;
+                    if (tr.near && !tr.inStart)
+                    {
+                        Ms const end = std::max(HazardEnd(h), h.timing.strictTo);
+                        tr.near = h.timing.from - widen <= hi && end + widen >= lo;
+                    }
                     if (!tr.near)
                         tr.inStart = false;
+                    else
+                        smallest = std::min(smallest, h.marginYd);
                 }
+                return smallest;
             };
 
             auto visit = [&](Geo::Vec3 const& p, Ms lo, Ms hi, Ms dwell) -> bool
@@ -627,7 +1257,7 @@ namespace BossMechanics::Solver
                         continue;
                     Hazard const& h = in.hazards[i];
                     float sd = kInf;
-                    if (!Within(h, p, &sd))
+                    if (!within(i, p, &sd))
                     {
                         tr.inStart = false;
                         continue;
@@ -673,9 +1303,14 @@ namespace BossMechanics::Solver
                 Geo::Vec3 const& a = path[k - 1];
                 Geo::Vec3 const& b = path[k];
                 float const len = Dist3(a, b);
-                nearLeg(a, b);
+                Ms const legFrom = k == 1 ? start : moveStart + TravelMs(dist, speed);
+                Ms const legTo = moveStart + TravelMs(dist + len, speed);
+                // Samples at most one margin apart (STAGE-M3-R-REPORT m-11): a straight leg past a corner then keeps
+                // at least cos(30°) of the margin, never touching the hitbox; 0.5 yd as before for full margins.
+                float const smallest = nearLeg(a, b, legFrom, legTo);
+                float const step = std::clamp(smallest, kMinStepYd, kStepYd);
                 std::uint32_t const steps = std::max<std::uint32_t>(1,
-                    static_cast<std::uint32_t>(std::ceil(len / kStepYd)));
+                    static_cast<std::uint32_t>(std::ceil(len / step)));
                 Ms const dwell = TravelMs(len / steps, speed);
                 for (std::uint32_t j = 1; j <= steps; ++j)
                 {
@@ -722,6 +1357,22 @@ namespace BossMechanics::Solver
                     if (w.to + in.params.marginMs >= in.now && w.from - in.params.marginMs <= horizonEnd)
                         best = std::min(best, w.from);
                 });
+            if (!HasPlayerKinds(in))
+                return best;
+            // M3: a hard region the bot is not in, a carried shape its spot breaks, a pending freeze.
+            for (Region const& r : in.regions)
+                if (r.hard && RegionLive(in, r) && r.from - in.params.marginMs <= horizonEnd
+                    && !InsideRegion(r, in.bot))
+                    best = std::min(best, r.from);
+            for (Carried const& c : in.carried)
+            {
+                float f = 0.f;
+                if (CarriedLive(in, c) && c.timing.from - in.params.marginMs <= horizonEnd
+                    && !FreeFacing(in, c, in.bot, f))
+                    best = std::min(best, c.timing.from);
+            }
+            if (in.freeze.present && !Frozen(in) && in.now <= in.freeze.to)
+                best = std::min(best, in.freeze.from - in.freeze.settle);
             return best;
         }
 
@@ -919,9 +1570,248 @@ namespace BossMechanics::Solver
                     if (std::hypot(fx - bfx, fy - bfy) <= reach)
                         addTo(bulk, fx, fy);
         }
+
+        constexpr float kRegionInsetYd = 0.5f;      // region candidates sit this far inside the margin
+        constexpr float kRegionLineStepYd = 2.f;    // line region: centerline points this far apart
+        constexpr float kMarchStepYd = 0.25f;       // parking: outward march step
+
+        // The point of the shape nearest p, `inset` inside its edge (the shape's middle when it has no such room).
+        inline Geo::Vec3 NearestInside(Shape const& s, Geo::Pose const& pose, Geo::Vec3 const& p, float inset)
+        {
+            float const dx = p.x - pose.x;
+            float const dy = p.y - pose.y;
+            float const d = std::hypot(dx, dy);
+            float const f = Geo::ShapeFacing(s, pose);
+            auto polar = [&](float bearing, float r) -> Geo::Vec3
+            {
+                return { pose.x + std::cos(bearing) * r, pose.y + std::sin(bearing) * r, pose.z };
+            };
+            float const bearing = d > 1e-3f ? std::atan2(dy, dx) : f;
+            switch (s.type)
+            {
+                case ShapeType::Circle:
+                    return polar(bearing, std::min(d, std::max(0.f, s.radius - inset)));
+                case ShapeType::Donut:
+                {
+                    float const lo = s.inner + inset;
+                    float const hi = s.radius - inset;
+                    return polar(bearing, lo > hi ? (s.inner + s.radius) * 0.5f : std::clamp(d, lo, hi));
+                }
+                case ShapeType::Cone:
+                {
+                    if (s.angleDeg >= 360.f)
+                        return polar(bearing, std::min(d, std::max(0.f, s.length - inset)));
+                    float const half = Geo::DegToRad(s.angleDeg) * 0.5f;
+                    float const lo = inset / std::max(1e-3f, std::sin(std::min(half, Geo::kPi * 0.5f)));
+                    float const hi = s.length - inset;
+                    if (lo > hi)
+                        return ShapeCenter(s, pose);
+                    float const r = std::clamp(d, lo, hi);
+                    float const room = std::max(0.f, half - std::asin(std::min(1.f, inset / r)));
+                    return polar(f + std::clamp(Geo::WrapPi(bearing - f), -room, room), r);
+                }
+                case ShapeType::Line:
+                {
+                    Geo::LineCoords const c = Geo::ToLineCoords(s, pose, p);
+                    float const s0 = s.excludeStart + inset;
+                    float const s1 = s.length - inset;
+                    float const t1 = s.width * 0.5f - inset;
+                    float const ls = s0 > s1 ? (s.excludeStart + s.length) * 0.5f : std::clamp(c.s, s0, s1);
+                    float const lt = t1 < 0.f ? 0.f : std::clamp(c.t, -t1, t1);
+                    float const ux = std::cos(f);
+                    float const uy = std::sin(f);
+                    return { pose.x + ux * ls - uy * lt, pose.y + uy * ls + ux * lt, pose.z };
+                }
+            }
+            return { pose.x, pose.y, pose.z };
+        }
+
+        // Region candidates: its middle, the nearest point inside (margin + kRegionInsetYd in), and 8 spread points
+        // (circle: a ring at half its usable radius; donut: mid-band; cone: two arcs; line: the bot's projection on
+        // the centerline and points every kRegionLineStepYd along it).
+        inline void RegionCandidates(Input const& in, Region const& r, std::vector<Geo::Vec3>& out)
+        {
+            Shape const& s = r.shape;
+            Geo::Pose const& pose = r.poses[r.poses.size() / 2];
+            float const inset = r.marginYd + kRegionInsetYd;
+            Geo::Vec3 const c = ShapeCenter(s, pose);
+            out.push_back(c);
+            out.push_back(NearestInside(s, pose, in.bot, inset));
+            float const f = Geo::ShapeFacing(s, pose);
+            switch (s.type)
+            {
+                case ShapeType::Circle:
+                case ShapeType::Donut:
+                {
+                    float const rr = s.type == ShapeType::Circle ? std::max(0.f, s.radius - r.marginYd) * 0.5f
+                        : (s.inner + s.radius) * 0.5f;
+                    for (std::uint32_t i = 0; i < 8; ++i)
+                        PushPolar(out, { pose.x, pose.y, pose.z }, f + Geo::kTwoPi * i / 8.f, rr, pose.z);
+                    return;
+                }
+                case ShapeType::Cone:
+                {
+                    float const half = s.angleDeg >= 360.f ? Geo::kPi : Geo::DegToRad(s.angleDeg) * 0.5f;
+                    for (float k : { 1.f / 3.f, 2.f / 3.f })
+                        for (float a : { -0.5f, -0.25f, 0.25f, 0.5f })
+                            PushPolar(out, { pose.x, pose.y, pose.z }, f + a * half, s.length * k, pose.z);
+                    return;
+                }
+                case ShapeType::Line:
+                {
+                    float const ux = std::cos(f);
+                    float const uy = std::sin(f);
+                    float const s0 = s.excludeStart + inset;
+                    float const s1 = s.length - inset;
+                    if (s0 > s1)
+                        return;
+                    float const bs = std::clamp(Geo::ToLineCoords(s, pose, in.bot).s, s0, s1);
+                    out.push_back({ pose.x + ux * bs, pose.y + uy * bs, pose.z });
+                    for (float a = s0; a <= s1 + 1e-3f; a += kRegionLineStepYd)
+                        out.push_back({ pose.x + ux * a, pose.y + uy * a, pose.z });
+                    return;
+                }
+            }
+        }
+
+        // Carried-shape candidates: 8 bearings in the half-plane away from the counted allies' centroid, at the
+        // shape's reach + margin + {0.5, 3, 6} beyond the farthest of them (so each clears every counted ally). A
+        // line aimed at the bot adds its arc around the source (±10..45°) and points beyond its length.
+        inline void CarriedCandidates(Input const& in, Carried const& c, std::vector<Geo::Vec3>& out)
+        {
+            Geo::Vec3 const& bot = in.bot;
+            float cx = 0.f;
+            float cy = 0.f;
+            std::uint32_t n = 0;
+            for (std::uint32_t idx : c.allies)
+                if (idx < in.allies.size())
+                {
+                    cx += in.allies[idx].p.x;
+                    cy += in.allies[idx].p.y;
+                    ++n;
+                }
+            if (n)
+            {
+                Geo::Vec3 const centroid{ cx / n, cy / n, bot.z };
+                float spread = 0.f;
+                for (std::uint32_t idx : c.allies)
+                    if (idx < in.allies.size())
+                        spread = std::max(spread, Dist2(centroid, in.allies[idx].p) + in.allies[idx].slackYd);
+                float const base = Dist2(bot, centroid) > 1e-3f
+                    ? std::atan2(bot.y - centroid.y, bot.x - centroid.x) : 0.f;
+                float const reach = spread + Geo::Bounds(c.shape) + c.marginYd;
+                for (std::uint32_t i = 0; i < 8; ++i)
+                {
+                    float const bearing = base - Geo::kPi * 0.5f + Geo::kPi * i / 7.f;
+                    for (float extra : { 0.5f, 3.f, 6.f })
+                        PushPolar(out, centroid, bearing, reach + extra, bot.z);
+                }
+            }
+            if (c.mode != Carried::Mode::AimedAtBot)
+                return;
+            Geo::Vec3 const src{ c.source.x, c.source.y, bot.z };
+            float const d = Dist2(src, bot);
+            float const bearing = d > 1e-3f ? std::atan2(bot.y - src.y, bot.x - src.x) : c.source.o;
+            for (float deg : { 10.f, 20.f, 30.f, 45.f })
+                for (float sign : { 1.f, -1.f })
+                    PushPolar(out, src, bearing + sign * Geo::DegToRad(deg), d, bot.z);
+            float const beyond = Geo::Bounds(c.shape) + c.marginYd;
+            for (float extra : { 0.5f, 3.f })
+                PushPolar(out, src, bearing, beyond + extra, bot.z);
+        }
+
+        // From `c` along `bearing`, the first point more than `clear` outside every pose of the shape (0.25 yd
+        // steps); false when none within the shape's reach + clear + 2 yd.
+        inline bool MarchOut(Shape const& s, std::vector<Geo::Pose> const& poses, Geo::Vec3 const& c, float bearing,
+            float clear, Geo::Vec3& out)
+        {
+            float const ux = std::cos(bearing);
+            float const uy = std::sin(bearing);
+            float const limit = 2.f * Geo::Bounds(s) + clear + 2.f;
+            for (float r = 0.f; r <= limit; r += kMarchStepYd)
+            {
+                Geo::Vec3 const p{ c.x + ux * r, c.y + uy * r, c.z };
+                if (MinSd(s, poses, p) > clear)
+                {
+                    out = p;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Parking candidates (§3.7): inside = points just outside the zone on 16 bearings around its middle, and on
+        // its far side from the boss (+0, +1, +2 yd); drag out = points on 16 bearings around each avoided shape far
+        // enough that the boss's stop clears it by depthYd (+0, +1.5 yd).
+        inline void ParkCandidates(Input const& in, std::vector<Geo::Vec3>& out)
+        {
+            Park const& pk = in.park;
+            auto ring = [&](Shape const& s, std::vector<Geo::Pose> const& poses, float clear,
+                std::initializer_list<float> extras, bool farSide)
+            {
+                if (poses.empty())
+                    return;
+                Geo::Vec3 const c = ShapeCenter(s, poses[poses.size() / 2]);
+                auto push = [&](float bearing, std::initializer_list<float> list)
+                {
+                    Geo::Vec3 p;
+                    if (!MarchOut(s, poses, c, bearing, clear, p))
+                        return;
+                    for (float extra : list)
+                        out.push_back({ p.x + std::cos(bearing) * extra, p.y + std::sin(bearing) * extra, in.bot.z });
+                };
+                for (std::uint32_t i = 0; i < kRingBearings; ++i)
+                    push(Geo::kTwoPi * i / kRingBearings, extras);
+                if (farSide && Dist2(c, pk.boss) > 1e-3f)
+                    push(std::atan2(c.y - pk.boss.y, c.x - pk.boss.x), { 0.f, 1.f, 2.f });
+            };
+            if (pk.inside)
+            {
+                ring(pk.zone.shape, pk.zone.poses, pk.zone.marginYd + kExitPushYd, { 0.f }, true);
+                return;
+            }
+            for (Hazard const& h : pk.avoid)
+                ring(h.shape, h.poses, pk.depthYd + pk.stopYd + kExitPushYd, { 0.f, 1.5f }, false);
+        }
+
+        // All M3 candidates (targeted: they go before the blanket rings).
+        inline void PlayerKindCandidates(Input const& in, float reach, std::vector<Geo::Vec3>& out)
+        {
+            for (Region const& r : in.regions)
+                if (RegionLive(in, r))
+                    RegionCandidates(in, r, out);
+            bool carriedCircle = false;
+            for (Carried const& c : in.carried)
+            {
+                if (!CarriedLive(in, c))
+                    continue;
+                CarriedCandidates(in, c, out);
+                carriedCircle = carriedCircle || (c.mode == Carried::Mode::OnBot && c.shape.type == ShapeType::Circle);
+            }
+            // Slot ring: 16 bearings on the role band's outer radius, rotated by the bot's slot among the carriers
+            // (M2's role ring sits at mid-band, too tight for a spread around a target at reach).
+            if (carriedCircle && in.role.present && in.params.slotRing)
+            {
+                float const r = std::max(in.role.minYd, in.role.maxYd - 0.05f);
+                float const rot = in.slotCount ? Geo::kTwoPi * (in.slot % in.slotCount) / in.slotCount : 0.f;
+                for (std::uint32_t i = 0; i < kRingBearings; ++i)
+                    PushPolar(out, in.role.anchor, rot + Geo::kTwoPi * i / kRingBearings, r, in.role.anchor.z);
+            }
+            if (in.far.present)
+            {
+                float const base = Dist2(in.bot, in.far.from) > 1e-3f
+                    ? std::atan2(in.bot.y - in.far.from.y, in.bot.x - in.far.from.x) : 0.f;
+                for (std::uint32_t i = 0; i < 8; ++i)
+                    for (float k : { 0.5f, 1.f })
+                        PushPolar(out, in.bot, base - Geo::kPi * 0.5f + Geo::kPi * i / 7.f, reach * k, in.bot.z);
+            }
+            if (in.park.present)
+                ParkCandidates(in, out);
+        }
     }
 
-    // Candidate targets: the bot's spot, exits, rings, the role ring and lane-frame points; deduplicated at 0.5 yd,
+    // Candidate targets: the bot's spot, exits, rings, the role ring, lane-frame points and the M3 points (regions,
+    // carried shapes, the slot ring, FarFrom, parking: Detail::PlayerKindCandidates); deduplicated at 0.5 yd,
     // at most maxCandidates, returned nearest first (ties on x, y) with the bot's spot at [0]. The cap keeps the
     // targeted points (exits, role ring, analytic lane cells, free-lane centrelines) before the blanket ones (rings,
     // frame grid), each nearest first: a large frame grid must not crowd out a free lane 25 yd away.
@@ -961,6 +1851,9 @@ namespace BossMechanics::Solver
         float const m = Detail::MaxMargin(in) + Detail::kExitPushYd;
         for (LaneFrame const& lf : in.lanes)
             Detail::FrameCandidates(in, lf, reach, m, raw, bulk);
+
+        // Player kinds (M3): regions, carried shapes, the slot ring, FarFrom, parking.
+        Detail::PlayerKindCandidates(in, reach, raw);
 
         struct Item
         {
@@ -1094,6 +1987,21 @@ namespace BossMechanics::Solver
             }
             if (isBot)
                 score += w.stay;
+
+            // M3: region comfort (per yard short of 1 yd inside), FarFrom, Reach.
+            for (Region const& r : in.regions)
+            {
+                if (!RegionLive(in, r))
+                    continue;
+                float const sd = RegionSd(r.shape, r.poses, c);
+                if (std::isfinite(sd))
+                    score += w.region * std::max(0.f, 1.f - (-sd - r.marginYd));
+            }
+            if (in.far.present)
+                score -= in.far.weightPerYd * Dist2(in.far.from, c);
+            if (in.reach.weightPerYd > 0.f)
+                for (Geo::Vec3 const& q : in.reach.points)
+                    score += in.reach.weightPerYd * std::max(0.f, Dist2(q, c) - in.reach.maxYd);
             return score;
         }
 
@@ -1123,12 +2031,32 @@ namespace BossMechanics::Solver
                 if (hit)
                     out.push_back(h.id);
             }
+            // M3: the live hard regions and carried shapes (the bot's own mechanics).
+            for (Region const& r : in.regions)
+                if (r.hard && RegionLive(in, r) && std::find(out.begin(), out.end(), r.id) == out.end())
+                    out.push_back(r.id);
+            for (Carried const& c : in.carried)
+                if (CarriedLive(in, c) && std::find(out.begin(), out.end(), c.id) == out.end())
+                    out.push_back(c.id);
             return out;
         }
 
-        inline Ms HoldUntil(Input const& in, std::vector<std::uint32_t> const& answers, Ms arriveAt)
+        // Hold: through the windows of the hazards answered, and (M3) of the live hard regions and carried shapes
+        // the target satisfies (capped at now + horizon).
+        inline Ms HoldUntil(Input const& in, std::vector<std::uint32_t> const& answers, Ms arriveAt,
+            Geo::Vec3 const& target)
         {
             Ms until = arriveAt;
+            Ms const cap = in.now + in.params.horizon;
+            for (Region const& r : in.regions)
+                if (r.hard && RegionLive(in, r) && InsideRegion(r, target))
+                    until = std::max(until, std::min(cap, r.to + in.params.marginMs));
+            for (Carried const& c : in.carried)
+            {
+                float f = 0.f;
+                if (CarriedLive(in, c) && FreeFacing(in, c, target, f))
+                    until = std::max(until, std::min(cap, TimingEnd(c.timing) + in.params.marginMs));
+            }
             for (Hazard const& h : in.hazards)
             {
                 if (std::find(answers.begin(), answers.end(), h.id) == answers.end())
@@ -1156,6 +2084,109 @@ namespace BossMechanics::Solver
         {
             if (path.empty() || Dist3(path.front(), from) > 0.1f)
                 path.insert(path.begin(), from);
+        }
+    }
+
+    namespace Detail
+    {
+        constexpr float kSightShadowYd = 2.f;       // a candidate this close to a blocked ray's line is cast late
+
+        // Is q in the shadow of `blocked` as seen from the sight point `from`: on the far half of the ray from `from`
+        // through `blocked` (the occluder lies somewhere on it), within kSightShadowYd of its line?
+        inline bool InShadow(Geo::Vec3 const& from, Geo::Vec3 const& blocked, Geo::Vec3 const& q)
+        {
+            float const bx = blocked.x - from.x;
+            float const by = blocked.y - from.y;
+            float const len = std::sqrt(bx * bx + by * by);
+            if (len < 1e-3f)
+                return false;
+            float const qx = q.x - from.x;
+            float const qy = q.y - from.y;
+            float const along = (qx * bx + qy * by) / len;
+            if (along < 0.5f * len)
+                return false;
+            return std::fabs(qx * by - qy * bx) / len <= kSightShadowYd;
+        }
+
+        // Sight (STAGE-M3-R-REPORT M-3): at most Sight::maxChecks rays, the primary point (the heaviest weight: the
+        // tank) first, one ray per candidate. (1) Best score first, skipping a candidate in the shadow of one already
+        // found blocked, up to the first that sees the primary point: the rays spread out over the candidates instead
+        // of all landing behind the same pillar. (2) The shadowed candidates that score better than that one, best
+        // first (the shadow is a guess: one may see the point after all). (3) The rays left check the other points of
+        // the candidates that see the primary point, best first. Penalties: a candidate that does not see the primary
+        // point, or whose primary ray was not cast, counts every point (it ranks after every checked one that sees
+        // it); one that sees it counts the other points found blocked (unchecked ones count as seen). Adds each kept
+        // candidate's penalty to its score; `penalty` (indexed by candidate) gets it too, for a real path end the
+        // oracle moved.
+        inline void ScoreSight(Input const& in, PathOracle& oracle, std::vector<Scored>& kept,
+            std::size_t candidates, std::vector<float>& penalty, std::uint32_t& raysOut)
+        {
+            std::sort(kept.begin(), kept.end(), ScoredLess);
+            std::size_t const np = in.sight.points.size();
+            auto weightOf = [&](std::size_t j) { return j < in.sight.weights.size() ? in.sight.weights[j] : 1.f; };
+            std::size_t primary = 0;
+            float total = 0.f;
+            for (std::size_t j = 0; j < np; ++j)
+            {
+                total += weightOf(j);
+                if (weightOf(j) > weightOf(primary))
+                    primary = j;
+            }
+            Geo::Vec3 const& p0 = in.sight.points[primary];
+            std::uint32_t const budget = in.sight.maxChecks;
+            std::uint32_t rays = 0;
+            std::vector<float> pen(kept.size(), total);
+            std::vector<std::uint8_t> cast(kept.size(), 0);
+            std::vector<Geo::Vec3> blocked;
+            std::vector<std::size_t> seen;
+            auto castPrimary = [&](std::size_t i)
+            {
+                ++rays;
+                cast[i] = 1;
+                if (oracle.InSight(kept[i].p, p0))
+                {
+                    pen[i] = 0.f;
+                    seen.push_back(i);
+                    return true;
+                }
+                blocked.push_back(kept[i].p);
+                return false;
+            };
+            // (1)
+            std::size_t firstSeen = kept.size();
+            for (std::size_t i = 0; i < kept.size() && rays < budget; ++i)
+            {
+                bool shadowed = false;
+                for (Geo::Vec3 const& b : blocked)
+                    shadowed = shadowed || InShadow(p0, b, kept[i].p);
+                if (!shadowed && castPrimary(i))
+                {
+                    firstSeen = i;
+                    break;
+                }
+            }
+            // (2)
+            for (std::size_t i = 0; i < firstSeen && i < kept.size() && rays < budget; ++i)
+                if (!cast[i])
+                    castPrimary(i);
+            std::sort(seen.begin(), seen.end());
+            // (3)
+            for (std::size_t i : seen)
+                for (std::size_t j = 0; j < np && rays < budget; ++j)
+                {
+                    if (j == primary)
+                        continue;
+                    ++rays;
+                    if (!oracle.InSight(kept[i].p, in.sight.points[j]))
+                        pen[i] += weightOf(j);
+                }
+            penalty.assign(candidates, total);
+            for (std::size_t i = 0; i < kept.size(); ++i)
+            {
+                kept[i].score += pen[i];
+                penalty[kept[i].index] = pen[i];
+            }
+            raysOut = rays;
         }
     }
 
@@ -1212,6 +2243,12 @@ namespace BossMechanics::Solver
     // -> GraceMove (only when a hazard allows grace); (4) Fallback. Before a candidate costs an oracle call it is
     // probed (PathOracle::Walkable): off the walkable ground it is dropped for free, snapped onto it it is re-checked
     // at its new place.
+    //
+    // M3: a frozen bot (Freeze, from freeze.from − settle to freeze.to) gets Safe at its spot, always. "Safe" is
+    // TargetOk (the pre-filter and both end checks of the validation use it; regions' arrival rule at the real path
+    // end). Sight rays (at most Sight::maxChecks) re-rank the best kept candidates. The Fallback ranks exact-hitbox
+    // Zone exposure, then the hard regions and carried shapes broken (Plan::violated), then distance. A plan owing a
+    // look-away facing carries it (hasFacing, facing), Safe ones included.
     inline Plan Solve(Input const& in, PathOracle& oracle)
     {
         Plan plan;
@@ -1219,10 +2256,37 @@ namespace BossMechanics::Solver
         plan.arriveAt = in.now;
         plan.holdUntil = in.now;
         Ms const horizonEnd = in.now + in.params.horizon;
+        bool const facingOwed = Detail::AnyChoosesFacing(in);
 
-        // 1. Already safe (unless re-routing a motion).
-        if (!in.reroute && PointSafe(in, in.bot, in.now, horizonEnd))
+        // 0. Frozen (HoldStill window, decision §7.4): never move, whatever else holds (a look-away facing still
+        // comes with it when one is free).
+        if (Detail::Frozen(in))
+        {
+            float f = 0.f;
+            if (facingOwed && CarriedOk(in, in.bot, &f))
+            {
+                plan.hasFacing = true;
+                plan.facing = f;
+            }
             return plan;
+        }
+
+        // 1. Already safe (unless re-routing a motion; a role solve goes on and lets the spot compete).
+        float spotFacing = 0.f;
+        bool const spotOk = !in.reroute && TargetOk(in, in.bot, in.now, horizonEnd, &spotFacing);
+        auto safeHere = [&](Plan p)
+        {
+            p.outcome = Outcome::Safe;
+            p.target = in.bot;
+            p.path.clear();
+            p.arriveAt = in.now;
+            p.holdUntil = in.now;
+            p.hasFacing = facingOwed;
+            p.facing = spotFacing;
+            return p;
+        };
+        if (spotOk && !in.roleSolve)
+            return safeHere(plan);
 
         std::vector<Geo::Vec3> const cands = Candidates(in);
         plan.candidates = static_cast<std::uint32_t>(cands.size());
@@ -1230,9 +2294,11 @@ namespace BossMechanics::Solver
         Ms const deadline = Detail::Deadline(in);
         Ms const moveStart = in.now + in.params.startDelay;
 
-        // 2. Straight-line pre-filter and score. Targets are always safe at the full margin (every pass).
+        // 2. Straight-line pre-filter and score. Targets are always safe at the full margin (every pass) and pass
+        // the player kinds (TargetOk); hazardFree remembers the hazard part alone for the Fallback.
         std::vector<Detail::Scored> kept;
         kept.reserve(cands.size());
+        std::vector<std::int8_t> hazardFree(cands.size(), 0);
         float const rerouteMax = in.reroute && in.role.present
             ? Detail::Dist2(in.bot, in.role.anchor) - in.params.rerouteGainYd : Detail::kInf;
         for (std::uint32_t i = 0; i < cands.size(); ++i)
@@ -1244,10 +2310,23 @@ namespace BossMechanics::Solver
                 continue;
             float const dist = Detail::Dist3(in.bot, c);
             Ms const arrival = moveStart + Detail::TravelMs(dist, speed);
-            if (!PointSafe(in, c, arrival, std::max(arrival, horizonEnd)))
+            if (!Detail::HazardsOk(in, c, arrival, horizonEnd))
+                continue;
+            hazardFree[i] = 1;
+            if (!Detail::PlayerKindsOk(in, c, arrival, nullptr))
                 continue;
             kept.push_back({ i, dist, Detail::Score(in, c, dist, arrival, deadline, i == 0), c });
         }
+
+        // Sight (M3, soft; STAGE-M3-R-REPORT M-3): at most Sight::maxChecks rays per solve, the primary point (the
+        // heaviest weight: the tank) first. One ray per candidate, best score first, skipping a candidate in the
+        // shadow of one already found blocked (Detail::InShadow), until kSightSeen candidates see the primary point;
+        // the rays left then check the other points of those, best first. Penalties: a candidate that does not see
+        // the primary point, or whose primary ray was not cast, counts every point (so it ranks after every checked
+        // one that sees it); one that sees it counts the other points found blocked (unchecked ones count as seen).
+        std::vector<float> sightPenalty;
+        if (!in.sight.points.empty() && !kept.empty())
+            Detail::ScoreSight(in, oracle, kept, cands.size(), sightPenalty, plan.sightChecks);
         std::sort(kept.begin(), kept.end(), Detail::ScoredLess);
         plan.stats.kept = static_cast<std::uint32_t>(kept.size());
 
@@ -1337,7 +2416,7 @@ namespace BossMechanics::Solver
                         if (Detail::Dist3(point[i], cands[i]) > Detail::kMovedYd)
                         {
                             Ms const at = moveStart + Detail::TravelMs(Detail::Dist3(in.bot, point[i]), speed);
-                            if (!PointSafe(in, point[i], at, std::max(at, horizonEnd)))
+                            if (!TargetOk(in, point[i], at, horizonEnd))
                             {
                                 ++out.stats.endUnsafe;
                                 continue;
@@ -1358,7 +2437,7 @@ namespace BossMechanics::Solver
                     std::vector<Geo::Vec3> const& path = it->second;
                     float const len = Detail::PathLength(path);
                     Ms const arrival = moveStart + Detail::TravelMs(len, speed);
-                    if (!PointSafe(in, path.back(), arrival, std::max(arrival, horizonEnd)))
+                    if (!TargetOk(in, path.back(), arrival, horizonEnd))
                     {
                         ++out.stats.endUnsafe;
                         continue;
@@ -1372,6 +2451,7 @@ namespace BossMechanics::Solver
                     // The real end is scored where it is when the probe or the oracle moved it.
                     float const real = Detail::Dist3(path.back(), s.p) > Detail::kMovedYd
                         ? Detail::Score(in, path.back(), len, arrival, deadline, false)
+                            + (sightPenalty.empty() ? 0.f : sightPenalty[i])
                         : s.score + in.params.w.path * (len - s.straight);
                     Detail::Scored cand = s;
                     cand.score = real;
@@ -1414,6 +2494,15 @@ namespace BossMechanics::Solver
             work.stats.pass = 3;
             found = true;
         }
+        if (in.roleSolve && spotOk && (!found || Detail::Dist3(work.target, in.bot) <= Detail::kMovedYd))
+        {
+            // A role solve that found nothing better than the spot it already holds.
+            plan.candidates = work.candidates;
+            plan.pathChecks = work.pathChecks;
+            plan.stats = work.stats;
+            plan.sightChecks = work.sightChecks;
+            return safeHere(plan);
+        }
         if (!found && in.reroute)
         {
             // No clean way around: the caller keeps the bot where it is (no fallback for a motion).
@@ -1428,14 +2517,15 @@ namespace BossMechanics::Solver
             // line (scanned for the kFallbackScans nearest such candidates only), then nearest. Candidates known to
             // have no path are skipped; down that ranking, the first walkable one is taken (an oracle path already
             // found for it is reused).
-            // The pre-filter's survivors are exactly the candidates with no hazard hot from their arrival on, so the
-            // counts are only needed when none survived (or none of them has a path).
+            // The pre-filter's hazard-free candidates are exactly the ones with no hazard hot from their arrival on,
+            // so the counts are only needed when there is none (or none of them has a path). M3: among equals, the
+            // fewest broken hard regions and carried shapes come before the distance (decision §7.2: Zones first).
             std::vector<std::uint32_t> counts(cands.size(), 1);
             std::uint32_t minCount = std::numeric_limits<std::uint32_t>::max();
-            for (Detail::Scored const& s : kept)
-                if (!unreachable.count(s.index))
+            for (std::uint32_t i = 0; i < cands.size(); ++i)
+                if (hazardFree[i] && !unreachable.count(i))
                 {
-                    counts[s.index] = 0;
+                    counts[i] = 0;
                     minCount = 0;
                 }
             if (minCount != 0)
@@ -1454,9 +2544,11 @@ namespace BossMechanics::Solver
             struct Ranked
             {
                 Ms inside;
+                std::uint32_t violated;
                 float dist;
                 std::uint32_t index;
             };
+            bool const kinds = Detail::HasPlayerKinds(in);
             // Ranked by the time inside the exact hitboxes (drift kept, no yard or time margin): nothing clean
             // exists at the margins, so the least real exposure wins, not the least time in the margin band.
             Input exact = in;
@@ -1470,12 +2562,19 @@ namespace BossMechanics::Solver
                 if (counts[i] != minCount || unreachable.count(i))
                     continue;
                 Geo::Vec3 const& c = cands[i];
+                float const dist = Detail::Dist3(in.bot, c);
+                std::uint32_t const violated = kinds
+                    ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0;
                 ranked.push_back({ Detail::WalkPath(exact, { in.bot, c }, in.now, true, true).timeInsideHot,
-                    Detail::Dist3(in.bot, c), i });
+                    violated, dist, i });
             }
             std::stable_sort(ranked.begin(), ranked.end(), [](Ranked const& a, Ranked const& b)
             {
-                return a.inside != b.inside ? a.inside < b.inside : a.dist < b.dist;
+                if (a.inside != b.inside)
+                    return a.inside < b.inside;
+                if (a.violated != b.violated)
+                    return a.violated < b.violated;
+                return a.dist < b.dist;
             });
 
             // Default: the top of the ranking (as before the probes), also when every probe down it fails.
@@ -1548,11 +2647,33 @@ namespace BossMechanics::Solver
             work.target = path.back();
             work.arriveAt = moveStart + Detail::TravelMs(Detail::PathLength(path), speed);
             work.score = 0.f;
+            if (kinds)
+                work.violated = Detail::Violations(in, work.target, work.arriveAt);
+        }
+
+        // 5. The facing a chooseFacing carried shape needs at the target (M3, look away).
+        if (facingOwed)
+        {
+            float f = 0.f;
+            bool ok = CarriedOk(in, work.target, &f);
+            if (!ok)
+            {
+                // Fallback: the free facing of the first such shape alone, else its preferred one.
+                for (Carried const& c : in.carried)
+                    if (Detail::CarriedLive(in, c) && Detail::ChoosesFacing(c))
+                    {
+                        if (!FreeFacing(in, c, work.target, f))
+                            f = Geo::WrapPi(c.preferredFacing);
+                        break;
+                    }
+            }
+            work.hasFacing = true;
+            work.facing = f;
         }
 
         // 6. What the plan answers and how long to hold.
         work.answers = Detail::Answers(in, work.path);
-        work.holdUntil = Detail::HoldUntil(in, work.answers, work.arriveAt);
+        work.holdUntil = Detail::HoldUntil(in, work.answers, work.arriveAt, work.target);
         return work;
     }
 }

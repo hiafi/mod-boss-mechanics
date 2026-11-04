@@ -36,11 +36,13 @@ public:
     {
         creators["boss mechanic move"] = &MechanicBotActionContext::boss_mechanic_move;
         creators["boss mechanic hold"] = &MechanicBotActionContext::boss_mechanic_hold;
+        creators["boss mechanic face"] = &MechanicBotActionContext::boss_mechanic_face;
     }
 
 private:
     static Action* boss_mechanic_move(PlayerbotAI* botAI) { return new MechanicBotMoveAction(botAI); }
     static Action* boss_mechanic_hold(PlayerbotAI* botAI) { return new MechanicBotHoldAction(botAI); }
+    static Action* boss_mechanic_face(PlayerbotAI* botAI) { return new MechanicBotFaceAction(botAI); }
 };
 
 class MechanicBotTriggerContext : public NamedObjectContext<Trigger>
@@ -50,11 +52,13 @@ public:
     {
         creators["boss mechanic reposition"] = &MechanicBotTriggerContext::boss_mechanic_reposition;
         creators["boss mechanic hold"] = &MechanicBotTriggerContext::boss_mechanic_hold;
+        creators["boss mechanic face"] = &MechanicBotTriggerContext::boss_mechanic_face;
     }
 
 private:
     static Trigger* boss_mechanic_reposition(PlayerbotAI* botAI) { return new MechanicBotRepositionTrigger(botAI); }
     static Trigger* boss_mechanic_hold(PlayerbotAI* botAI) { return new MechanicBotHoldTrigger(botAI); }
+    static Trigger* boss_mechanic_face(PlayerbotAI* botAI) { return new MechanicBotFaceTrigger(botAI); }
 };
 
 class MechanicBotValueContext : public NamedObjectContext<UntypedValue>

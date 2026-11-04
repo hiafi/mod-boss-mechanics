@@ -30,13 +30,17 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicBarrage.h` | Pure shot geometry and seeded dice of `.mech barrage` (host-tested) |
 | `src/MechanicBotReportHook.h` | `SetBotReport(fn)`: how `.mech bots` reaches the playerbots glue |
 | `src/MechanicSolver.h` | Pure bot solver: hazards, hot windows, signed distance, candidates, path check, `Solve` |
+| `src/MechanicRoute.h` | Pure route search around hazards (grid A*, string-pulled legs): `Route`, `RouteHandoff` |
 | `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
-| `src/MechanicBotView.h/.cpp` | Registry -> solver input for one bot; navmesh path oracle (no playerbots types) |
+| `src/MechanicBotView.h/.cpp` | Registry -> solver input and tasks for one bot; reservations; navmesh, sight oracle |
+| `src/MechanicViewRules.h` | Pure player-kind rules of the view: planned spots, margins, separation (host-tested) |
 | `src/MechanicBotGuard.h` | `BOSS_MECHANICS_WITH_BOTS`: 1 only with mod-playerbots enabled |
 | `src/MechanicBotState.h` | Per-bot state and its playerbots value (`boss mechanic state`) |
-| `src/MechanicBotBrain.h/.cpp` | Per-bot update: view, mode machine, solve, leaveBy |
-| `src/MechanicBotStrategy.h/.cpp` | `boss mechanics` strategy, its two triggers and two actions |
-| `src/MechanicBotLock.h/.cpp` | Lock multiplier: what may run while a bot escapes or holds (the one block list) |
+| `src/MechanicBotBrain.h/.cpp` | Per-bot update: view, mode machine, solve, leaveBy, reservations, tasks, routes |
+| `src/MechanicBotRole.h/.cpp` | Role band v2 (healer sight and reach), tank facing ring, tank parking input |
+| `src/MechanicBotFacing.h/.cpp` | Look-away facing: the owed facing, the lock's and the waker's facing checks |
+| `src/MechanicBotStrategy.h/.cpp` | `boss mechanics` strategy, its three triggers and three actions |
+| `src/MechanicBotLock.h/.cpp` | Lock multiplier: what may run while a bot escapes, holds or freezes (one block list) |
 | `src/MechanicBotContexts.h` | The four playerbots named-object contexts |
 | `src/MechanicBotGate.h/.cpp` | Context registration, strategy gate, `AddSC_boss_mechanics_bots` |
 | `src/MechanicBotWaker.cpp` | After-tick waker and cast break |
@@ -87,6 +91,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `RoomFrame(owner, frame)` -> `LaneBuilder` | `.Lanes`, `.ExceptOne`, `.BurnCrossings`, `.Each` (`BossMechanics.h`) |
 | `Spread(owner, r, warn)`, `RunOut(owner, target, r, warn)` | Circle on each carrier; hits the other players inside |
 | `Stack(owner, at, r, warn)`, `Soak(owner, at, r, count, warn)` | Get-in circles; results to `onResolve` |
+| `Stack(owner, spec, warn)`, `Soak(owner, spec, count, warn)` | Any shape (`ZoneSpec`; a lane: `Shapes::LineFacing`) |
 | `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
@@ -101,6 +106,18 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`, `NoTelegraph()`,
 `NoFillTimer()`, `OnHit(fn)`, `OnResolve(fn)`.
 
+M3 options:
+
+| Option | Fits | What |
+| --- | --- | --- |
+| `Persistent(duration, tick)` | + Stack, Soak | judged at every tick (tick 0: once, then it lingers) |
+| `Cluster(n)` | circle Stack | no anchor: each eligible player needs `n` others within the radius (Assembly) |
+| `Radius(yd)` | Bait | the landing circle (Fenrus 6 yd); default: only the picked player |
+| `Tolerance(yd)` | HoldStill | movement allowed in the window (default 0.3 yd; Alexei 1 yd) |
+| `Park(unit)` | shape kinds | the tank holds `unit` (default the owner) inside this shape; bots only |
+
+`Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
+
 Damage is a percent of the reference health (`ReferenceHealthProvider`; M1 ships the config stub), one flat number per
 target set by the resolve spell, so boss buffs and the creature damage rate never change it
 (`SPELL_ATTR3_IGNORE_CASTER_MODIFIERS`). Physical mechanics are reduced by armor; no crit, miss, reflect or partial
@@ -112,17 +129,40 @@ Blood Craze, Vengeance-style talents), like a boss ability would.
 | Kind | Server resolve (M1) | Marker | Failure |
 | --- | --- | --- | --- |
 | Zone | resolve spell on everyone eligible inside | the shape's pieces; a mine: ring, then dashed ring | Hit |
-| Frontal | as Zone, the owner's victim is skipped | cone | Hit |
+| Frontal | as Zone, the source's victim is skipped (**) | cone | Hit |
 | Spread | a circle on each carrier hits every other player inside | ring on each carrier | Hit |
 | RunOut | as Spread on one target; `From(Owner)`: hit within r of the owner | ring on the target (*) | Hit |
-| Stack | none (split damage via `onResolve`) | disc on the anchor | MissedStack |
-| Soak | none; `onResolve` gets the count | disc on the anchor | MissedSoak (group) |
-| Bait | hit on the farthest eligible player | none | MissedBait |
-| HoldStill | none | none | Moved (> 0.3 yd) |
+| Stack | none (split damage via `onResolve`) | disc on the anchor (***) | MissedStack |
+| Soak | none; `onResolve` gets the count | disc on the anchor (***) | MissedSoak (group) |
+| Bait | hit on the farthest eligible player (`Radius`: everyone within it) | none | MissedBait |
+| HoldStill | none | none | Moved (> 0.3 yd, or `Tolerance`) |
 | Spot | none | disc on each spot | OffSpot |
 
 (*) `From(Owner)`: the ring of r sits on the owner (the hitbox) and a small ring
 (`Rules::kRunOutTargetMarkerRadiusYd`, 1.5 yd, same color) follows the target, so the target knows it must run.
+
+(**) The victim of the cone's source when the source is a creature (the boss, an add, the `.mech test` mob), else the
+owner's victim (M3 B7).
+
+(***) A Stack or Soak of any other shape draws its pieces like a Zone, in the get-in color; a `Cluster` Stack draws a
+get-in ring of its radius on each eligible player, like Spread rings.
+
+Rules added in M3 (the pure rules live in `src/MechanicJudge.h`, tested by `tests/judge_test.cpp`):
+
+- **A shape anchored on a player never hits that player** (decision 7): Zones and Frontals anchored on a player
+  (Cookie's chowder cone, a circle under a player) skip that player in every pass (one-shot, persistent, projectile),
+  and `Contains`/`ContainsPoint` with that player answer false. A player given as a line's `to` end is still hit.
+- **Spread, RunOut and Bait circles hit players only** (decision 8): pets and guardians are skipped. Zones and
+  Frontals still hit pets (damage only, never ledgered).
+- **Soak needs at least `count` bodies**: fewer posts one `MissedSoak`; extra bodies never fail. Bots claim exactly
+  `count` and everyone else keeps out of it. `count` 0 never fails.
+- **Lasting Stack/Soak** (`Persistent`): `MissedStack` at most once per player per mechanic; `MissedSoak` once per
+  short pass; `onResolve` once per pass. Its bot window is `[resolve, until]`.
+- **Reservations** (bots, M3 handoff §3.6): `Reserve(id, {bot, point, until, since, facing, slot, claim})` replaces the
+  bot's entry; `since` is when its current claim (claim, and a claim's slot) began, kept while that is unchanged;
+  `Unreserve(id, bot)`; `ReservationRevision()` changes on a new entry, a changed point (> 0.1 yd), facing, slot or
+  claim, an unreserve, an expiry or a mechanic with reservations removed, never on a re-reserve that only moves `until`,
+  and never touches `Revision()`.
 
 Every unit hit posts `Hit`. Pets take damage but never reach the ledger or Weakened. Only alive player-controlled units
 can be hit (GMs never). `ResolveResult.hits` lists the units the filter kept, so an immune target (Divine Shield,
@@ -310,6 +350,7 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech palette <out color> <in color> [cross-lane color] [cell color]
 .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
+.mech drill <smite|cookie|fenrus|alexei|soaks|ras> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -331,10 +372,14 @@ are never touched. Invite the bots you test with.
 | projectile | length | `width=` (3), `speed=` (10), `back=0/1`, `pause=` (0), `exclude=` (0) |
 | mine | radius | `grace=` (500), `cap=` (0 = none), `group=` (0), `life=` (0 = until set off or cleared) |
 | lanes | lane width | `count=` (3), `gap=` (6), `axis=x/y`, `frame=` (40x40), `safe=1`, `cross=1`, `burn=` (6000) |
-| spread | radius | `count=` (0 = everyone) |
-| runout | radius | target = selected unit; `from=owner` measures from the test owner |
-| stack | radius | anchored on the selected unit (else the point) |
-| soak | radius | `need=` (2) |
+| spread | radius | `count=` (0 = everyone), `self=<spell>:<min>` |
+| runout | radius | target = selected unit; `from=owner` measures from the test owner; `count=`, `self=` |
+| stack | radius | anchored on the selected unit (else the point); `cluster=`, `shape=line`, `persist=` |
+| soak | radius | `need=` (2; 0 = nobody takes it), `order=`, `shape=line`, `persist=` |
+| frontal | length | on the selected creature, its victim exempt; `angle=` (90), `rear=1`, `line=1` `width=` (4) |
+| bait | others' range | `rule=fewest\|farthest` (fewest), `aura=` (205000), `r=` (6, the landing circle), `order=` |
+| holdstill | window (s) | `tol=` (0.3 yd); every eligible player |
+| spot | radius | `ring=` (10): one spot per group member on a ring around the anchor point |
 
 A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
 group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
@@ -344,11 +389,43 @@ yellow and the cells purple (outline only until they burn) unless `color=` sets 
 
 Common keys: `dmg=` flat (0 = telegraph only), `pct=` (20, percent of reference health), `tankpct=`,
 `school=physical|holy|fire|nature|frost|shadow|arcane` (physical), `weak=0/1` (0), `once=1`, `persist=<ms>`,
-`tick=<ms>` (1000), `anchor=point|me|target` (point: the selected unit's position, else the GM's; facing = the
-GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1, max 50), `every=` (1000 ms;
+`tick=<ms>` (1000), `anchor=point|me|target|member` (point: the selected unit's position, else the GM's; facing =
+the GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1, max 50), `every=` (1000 ms;
 repeats are registered from the test owner's scheduler), `scatter=` (0 yd: random offset per repeat, point anchors),
-`tele=0` (no marker), `at=member` and `seed=<n>` (see below). Damage keys do not apply to stack and soak, nor do
-`weak=`/`once=` (Weakened lands only from resolve hits). Keys that do not fit the shape are listed back as ignored.
+`tele=0` (no marker), `at=member` and `seed=<n>` (see below). Damage keys do not apply to stack, soak, holdstill and
+spot, nor do `weak=`/`once=` (Weakened lands only from resolve hits). Keys that do not fit the shape are listed
+back as ignored, except the placement keys `anchor=`, `at=`, `shift=`, `scatter=` and `pick=`: they are read for
+every shape and simply have no effect where the shape does not use them (spread, runout, bait and holdstill take
+their players from the group, frontal is always on the selected creature).
+
+M3 keys (STAGE-M3-HANDOFF §3.11):
+
+- `role=tank|healer|dps|nontank|any` and `aura=<spell>:<min>[:<max>]` (a stack band) set the eligibility, on any kind.
+  On `bait`, `aura=<spell>` without a colon is the rule's aura instead.
+- `self=<spell>:<min>` (spread, runout): the carriers are whoever holds that many stacks when it resolves (a stack
+  change mid-warning counts). `self=0/1` (no colon) still means "the GM may be landed on".
+- `order=<spell>[:asc|desc][:cap=<n>]` (soak, bait): claimers by stacks, players at `cap` or more never claim.
+- `count=` on runout: that many random eligible targets instead of the selected unit.
+- `persist=`/`tick=` on stack and soak: a lasting get-in shape judged at every tick.
+- `shape=line` `length=` (30) `width=` (the size) on stack and soak: a lane centered on the anchor point along the
+  GM's facing (on a unit anchor it starts at the unit). `cluster=<n>` on stack: no anchor, each eligible player needs
+  n others within the radius (Assembly).
+- `park=1` (circle, donut, cone, rearcone, line): the tank should hold the selected unit inside the zone; with
+  `at=gm` the zone lands on you.
+- `at=gm` (a point at you, the selection kept for `park=` and frontal sources) and `at=group` (the group's centroid,
+  snapped to the floor). `shift=<ahead>:<left>` moves a point anchor that many yd along and left of your facing.
+- `anchor=member`: a unit anchor on a random group member, picked as each repeat registers; `follow=1` makes a line turn
+  with its unit anchor (a cone on a unit anchor always turns with it, `follow=` or not). `to=member|target|me` (line,
+  projectile): aimed at that unit live, the length stays `size`. `pick=any|nontank|same` (with `at=member`,
+  `anchor=member`, `to=member`): `nontank` skips the selected unit's victim, `same` reuses the member the previous pick
+  of this command (or drill) landed on (when it is gone: a member other than the victim). Note the two meanings of
+  "tank" in tests: `pick=nontank` (and the drills' `weaken pick=nontank`) skip whoever the selected creature attacks,
+  while `role=nontank` (and the Bait rule) go by the role provider, which in tests has no boss and falls back to the
+  tank spec. Let a tank-spec bot hold the creature, so the two agree.
+- `tag=<n>` (1): the ledger tag; repeats count up from it.
+- `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
+- Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
+  test encounter, so `.mech clear` takes them off).
 
 `at=member` lands every repeat on a random alive member of the GM's group on the map, other than the GM (`self=1`
 includes the GM). The member is picked when that repeat registers, so delayed repeats follow the bots; the zone is a
@@ -373,6 +450,33 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
   `radius` at random points within `spread` yd of the selected unit (else the GM), snapped to the floor, arming after
   `arm` ms with `grace` ms of grace, all in one cap group with cap = count (they never fizzle each other; a second
   minefield gets its own group), `life` 120 s. Mines are tagged 1..count in the ledger. `.mech clear` removes them.
+- `.mech drill <name> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]`: a boss doc's mechanics scripted on the **selected
+  creature** (the boss stand-in; a bot should tank it for the frontals and the stack on it) and the group, one cycle
+  after another. Each step is a `.mech test` line (`src/MechanicDrill.h`, desk-checked by `tests/drill_test.cpp`) run
+  from the test owner's scheduler, so `.mech clear` stops it; damage steps get `dmg=` (flat, default 1), `self=1` lets
+  member picks land on the GM, `cycles` 1-10.
+  - `smite` (Deadmines SM2, SM3, SM12; 10 s): frontal cone 90 / 8 yd (2 s), a rear cone registered 1.5 s later
+    (resolves 1.5 s after the first), Spread 6 on every non-tank (2.5 s). Tags 1, 2, 3.
+  - `cookie` (CK4-CK6; 31 s): chowder cone 60 / 8 yd on a random non-tank (follows its facing, 3 breaths 2 s apart
+    from 2 s); Gut Bomb RunOut 8 on a non-tank (5 s); Fish Stew: RunOut 4 on a non-tank at three drops 2 s apart, a
+    4 yd puddle (1.5 s warning, 8 s) where the eater stands at each drop. Tags 4, 6, 5, 7 (puddles).
+  - `fenrus` (FN6; 10 s): Bait, fewest Weakened stacks, landing r 6, everyone else within 10 yd, `weak=1` so the next
+    pick rotates. The test owner (the Bait's reference) moves to the creature before each bait, so it follows the
+    creature when the tank drags it. Tag 1.
+  - `alexei` (AB2-AB8; 13 slots of 12 s): each rule alone with a 3 s warning and a 6 s window (No running: HoldStill
+    6 s, 1 yd tolerance; Assembly: cluster 2, 6 yd; Keep your distance: Spread 8; Out of bounds: a 7 yd circle on
+    the group for the window; Line up: a 4 x 40 yd lane through the group; desks: Spot 3 yd on a 12 yd ring), then
+    each heroic pair with a 4 s warning (Out of bounds with each other rule, the lane then shifted 12 yd left;
+    Assembly + Line up; Line up + Keep your distance). Tags: 2 still, 3 assembly, 4 distance, 5 bounds, 6 line up,
+    7 desks. One cycle by default (2.6 minutes). The desks keep 8 yd apart for up to 9 members (ring 12).
+  - `soaks` (26 s): Payday (1 body, non-tank, 2 yd, 2.5 s, near a random non-tank member); two non-tanks get 2
+    and 1 Weakened stacks, then an ordered soak (Weakened ascending, cap 2) 6 yd ahead of the group (everyone back to
+    0 at 9 s); the fortune (need 0, 10 yd left of the group: nobody steps on it); a
+    lasting 3 yd soak on you for 5 s from 19 s into the cycle (walk). Tags 1-4.
+  - `ras` (RF1, RF2, RF5; 12 s): a random non-tank gets 3 Weakened stacks; a self-keyed RunOut 8 (`self=205000:3`)
+    while a Stack 8 on the creature holds the players at 0-2 stacks; a second non-tank reaches 3 stacks 2 s in and
+    joins the runners; everyone back to 0 at 9 s (the encounter records them, so `.mech clear` also removes them).
+    Tags 2 (stack), 5 (runout).
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -408,6 +512,7 @@ is empty and `.mech bots` says so. No mod-playerbots or core edits.
 | strategy | `boss mechanics` (generic: combat and non-combat engines) | |
 | trigger / action | `boss mechanic reposition` -> `boss mechanic move` (a `MovementAction`, `MOVEMENT_FORCED`) | 96 |
 | trigger / action | `boss mechanic hold` -> `boss mechanic hold` (stop, clear the motion master, face) | 95 |
+| trigger / action | `boss mechanic face` -> `boss mechanic face` (turn to the look-away facing) | 94 |
 | multiplier | `boss mechanic lock` | |
 | value | `boss mechanic state` | |
 
@@ -435,7 +540,71 @@ while Idle on a map with mechanics) and runs the mode machine:
 - **Released** (Watch for 1.5 s, or until a root ends): the stock AI has the bot back. Nothing is locked, no cast is
   broken and an unsafe spot is not solved, so a stuck or rooted bot heals, casts and follows; then it tries again.
 - **Hold**: at the safe spot until `holdUntil` (latest window end it answers, capped at `HoldCapMs`) -> Watch. Spot
-  unsafe -> re-solve; out of the role band for `RoleSlackMs` -> Watch (stock movement takes it back, policed).
+  unsafe -> re-solve; out of the role band for `RoleSlackMs` -> Watch (stock movement takes it back, policed), never
+  while a task holds it (below).
+- **Freeze** (M3, HoldStill, decision §7.4): from the window start - `SafetyMarginMs` - `Freeze.SettleMs` to its end
+  + `SafetyMarginMs` the bot does not move at all, not even for a new Zone: no solve, every movement action blocked
+  (ours too), foreign motion stopped; casts (any length) and facing allowed. Before the window the solver only offers
+  targets reached by its start. Released bots are never frozen. A HoldStill that goes before its window ends
+  (`.mech clear`, the boss died, a map change) unfreezes the bot at once.
+
+"Safe" means `Solver::TargetOk` from M3 on: hazards (as M2) plus the player kinds (regions to stand in, carried shapes
+to keep allies out of, the freeze deadline, the parking rule). `leaveBy` stays hazard-based, plus the latest start to
+reach an unmet region, so a heal in Hold finishes only when it ends in time.
+
+### Tasks (M3)
+
+The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The brain:
+
+- **Holds for its tasks**: a bot whose spot passes `TargetOk` holds it from registration to the task's window end +
+  `SafetyMarginMs` for every role but Avoider (it only keeps out of other players' circles; Watch polices its motion)
+  and Frozen (the Freeze mode): a Stack leader stays put while the others come, a claimer stays in its soak, a carrier
+  keeps its clear spot, a tank stands still during a Frontal warning so the cone the others dodge does not move.
+- **Refreshes allies before every solve** (`RefreshAllies`) and publishes the plan right after it
+  (`PublishReservations`: the target, its look-away facing, slot and claim); drops every reservation when it has no
+  task left, is released, dies, goes Idle or loses the strategy. A new `ReservationRevision` re-reads the player kinds
+  (not the whole view) for every bot that is not Idle. A self-trigger aura (`SelfTrigger`) is polled every step; a
+  stack change rebuilds the view and lets the next solve skip the rate limit.
+- **Tracks** a hard region on a moving anchor (a soak on a walking player): within `TrackSlackYd` of its inner edge it
+  re-solves with `Input::roleSolve` (the spot competes; the region score pulls it back in), at most once per
+  `MovingAnchorRecheckMs`.
+- **Look-away** (decision §7.6): a carried cone or line with `FollowFacing` gets the free facing nearest the bot's
+  victim (`Plan::facing`, or the free arc at its spot). Over each of its windows (+- `SafetyMarginMs`) the face action
+  holds that facing and the lock and waker stop whatever would turn the bot (see Lock); a new facing is republished
+  when it moved more than 5 degrees. The others pose that cone at the published facing +- `LookAway.MarginDeg` (not
+  `FacingSlackDeg`: the carrier holds the facing itself), and the carrier keeps them a hair over that margin out, so
+  an ally the carrier cleared never sees itself inside.
+- **Tank facing** (decision §7.5, `TankFacing.Enable`): the exempt victim of a tank-exempt Frontal or Zone sourced on
+  a creature remembers that source for the fight, with every distinct cone or line of it that faces the victim (facing
+  offset within 45 degrees; a rear or side shape needs no facing and is never remembered, so the melee behind the boss
+  never make the tank circle it). Between warnings, every 500 ms: when one of those shapes, posed at the source facing
+  the tank (+- `FacingSlackDeg`, `SafetyMarginYd`), holds a group member's planned spot, the tank walks to the nearest
+  ring point (every 15 degrees, radius within [both combat reaches + 1, melee range - 0.5]) where none does and whose
+  spot and path are safe. During a warning it holds (above); a warning that starts while it walks stops the walk on
+  the spot. While a source is remembered, the lock blocks stock `tank face`.
+- **Tank parking** (`Park.Enable`): for a `Park` zone whose parked unit's victim is the bot, `Input::park` gets the
+  unit's spot, its stop distance (combat reaches + 0.5) and chase trigger (its melee range) and `Park.DepthYd`; the
+  solver moves the tank to where the chasing unit stops that deep inside the zone, and the tank holds there while the
+  zone lives (`Park.HoldCapMs` per zone). Drag-out: the bot's victim stands in, or within 3 yd of, a lasting hazard
+  (an interval hot 2 s more) the bot or another group member is eligible for (a `role=nontank` puddle the melee
+  stand in) -> the same, with the stop that deep outside every such hazard.
+- **Healer sight** (role band v2, soft, decision §7.11): healers in combat score Sight (the nearest group tank at
+  `Healer.SightWeight`, other members at half, at most `Healer.MaxSightChecks` rays per solve) and Reach (members
+  beyond `HealDistance - 2`). The rays go to the tank first, one per candidate, best score first, skipping candidates
+  in the shadow of one already found blocked (within 2 yd of the ray's line beyond it), then to the other members of
+  the candidates that see the tank; a candidate not checked counts as out of sight. Once a second, in Watch, a ray to
+  the tank; out of sight -> a role solve, which moves the healer only when a better spot exists (else no new one for
+  5 s).
+- **Route search** (§3.8): when a follow motion crosses hazards and the one-hop re-route finds nothing (and was not
+  merely deferred), the next brain step runs `Solver::Route` towards the motion's end (at most once per
+  `Route.RetryMs` per bot, one unit of the per-map budget; that step does nothing else, route or not). A route
+  becomes an Escape that walks its waypoints (the move action sends one leg at a time): the next leg starts within
+  0.6 yd of the waypoint or once the leg's spline ended, and only when the straight line from where the bot stands to
+  the next waypoint passes the path check at the route's margin (`RouteAdvanceOk`; else it walks on to the waypoint).
+  It ends at `RouteHandoff`'s waypoint, where stock follow takes over. A leg that needed the reduced margin is
+  re-checked at the reduced margins. No route: hold, as before.
+
+Role solves, region tracking, tank re-facing searches and routes count in the 8-per-map-update budget.
 
 Solves are rate-limited by `MinSolveIntervalMs`, except the first after a registry change, and limited to 8 per map
 update across all bots of a map (the rest solve on the next update). Our move clears the pending wait of the last move
@@ -465,6 +634,73 @@ snaps it onto the navmesh and checks it again where it landed (up to 64 probes p
 `PATHFIND_NORMAL` and `PATHFIND_INCOMPLETE` paths that end within 3 yd of the asked point; the solver validates and
 scores the real end, never the asked point.
 
+### Route search
+
+`Solver::Route` (`MechanicRoute.h`, pure) finds a way around hazards towards a goal (the end of a follow motion) when
+the greedy one-hop re-route makes no progress, e.g. behind a U-shaped wall of overlapping mines:
+
+- **Grid:** the box around the bot and the goal padded by `Route.PadYd`, cells of `Route.CellYd`, grown so the grid
+  stays within `Route.MaxCells`. A cell is blocked when its center lies within a hazard's reduced margin (drift +
+  0.25 yd) plus half a cell diagonal at the time the bot would get there (a zone over by then does not block), for the
+  hazards hot before the bot could walk twice the way, or the way plus twice `Route.PadYd`. Each hazard pose tests only
+  the cells of its own outline, row by row (a circle, and half-planes for a line or a cone of at most 180 degrees), with
+  the exact distance. Regions and carried shapes do not count. The bot's and the goal's cells are never blocked.
+- **Search:** a goal walled in by lasting hazards is found by a small flood fill first (no route, no A*); else
+  8-connected A*, no corner cutting, octile heuristic, no route longer than the box's perimeter, at most
+  `Route.MaxExpansions` expansions. Non-finite input or a goal over 500 yd away: no route.
+- **Legs:** the grid path is string-pulled into at most `Route.MaxLegs` straight legs (at the full margin when the
+  route fits, else at the reduced one), each walked on the navmesh path and checked like a solve's path (full margin,
+  else reduced; never grace). A leg the navmesh rejects blocks the cells around it and the search runs once more.
+  Navmesh path calls are capped by `MaxPathChecks`.
+- **Result:** `Move` with `path`, `waypoints` (the legs' ends) and `arriveAt`, or `Safe` (no route: hold).
+  `RouteHandoff` gives the first waypoint from which the straight line to the goal is clean at the full margin.
+- **Cost (host, tests/route_test, medians):** 4,096 cells, 30 mines, 6 legs: about 0.4 ms; the same with a rejected
+  leg, a second search and all 8 path calls: about 0.75 ms; bot enclosed: about 0.06 ms; goal enclosed: about
+  0.02 ms; 30 lines (30 x 3 yd): about 0.27 ms; 30 cones (60 degrees, 25 yd): about 0.45 ms; 24 projectile lines:
+  about 0.55 ms. `Route.MaxCells` and `Route.MaxExpansions` are capped at 16,384 (a larger box costs more).
+
+### Player kinds (view)
+
+`BuildInput` turns every kind into solver input for one bot; `RefreshAllies` rebuilds that part right before every
+solve, and `PublishReservations` puts the bot's target on the registry's reservation board right after it, so bots
+solving one after another on the map thread never pick colliding spots (decision §7.1: no messaging, no leader).
+
+- **Planned spot** of another player: its live reservation on that mechanic; else, for a bot, its plan target
+  (Escape, Hold, Freeze; through `BotViewHooks::plannedSpot`); else a bot's current spot + 0.5 yd (+ its speed × 250 ms
+  while moving); a human's current spot + `HumanSlackYd`.
+- **Judge window:** `[resolveAt, resolveAt + PostResolveHoldMs]` (a pending Detonate pulls it to now); lasting
+  Stack/Soak `[resolveAt, until]`; HoldStill `[resolveAt, expireAt]`. Every eligibility test is
+  `Registry::EligiblePlayers` (the registry's own candidates), never a playerbots role.
+
+| Kind | The bot is | Solver input |
+| --- | --- | --- |
+| Spread, RunOut (group) | a carrier | its circle carried (no other eligible player inside); slot ring by guid rank |
+| | eligible | each other live carrier's circle as a hazard at its planned spot (both sides) |
+| RunOut `From(Owner)` | a carrier | a circle hazard on the owner (drift as M2) |
+| Stack | anchored on the bot | Leader: nothing to reach (the brain holds) |
+| | eligible | a region: the shape at the anchor's planned spot (a bot's plan), or live + a drift pose |
+| Stack `Cluster(n)` | the leader (sticky claim, else the medoid) | Leader: hold |
+| | eligible | a region of r/2 around the leader's spot (everyone within r of everyone) |
+| Soak | a claimer (`Assign::SoakClaimers`) | a region on the shape over its window |
+| | eligible, no claim (or count 0) | the shape as a hazard over its window (decision §7.3) |
+| Bait | the picker (sticky claim, else `BaitPick`) | hazard on the owner, `max(othersRange, humans) + 2`<sup>1</sup> |
+| | eligible, not the picker | a region of `othersRange` around the owner; the picker's landing<sup>1</sup> |
+| HoldStill | listed (targets, else eligible) | `Freeze{resolveAt - SafetyMarginMs, expireAt}` |
+| Spot | listed | a region of r at its own spot |
+| Zone | anchored on the bot | carried shape (OnBot); a turning cone or line picks the facing nearest its victim |
+| | aimed at the bot (`to`) | carried shape (AimedAtBot, the registered length) |
+| | on another bot with a plan | one more pose at that bot's planned spot (a synthetic copy) |
+| Frontal/Zone, tank-exempt | the exempt victim | not a hazard; a Tank task (tank facing) |
+| Zone with `Park` | the parked unit's attacker | a Parker task (tank parking) |
+
+<sup>1</sup> The landing circle (`Radius`) around the other players' planned spots (picker), or around the picker's
+(others); none when the radius is 0 (the hit lands on the pick only). The picker also gets `FarFrom` the owner.
+
+A region's margin is `SafetyMarginYd`, at most half its inner radius; a moving anchor's drift (as poses, capped the
+same way) shrinks it further. Reservations: `until` = the task's window end, `claim` for claimers, pickers and leaders;
+a bot no longer tasked on a mechanic is unreserved. With `Debug = 1` the self-check also compares the solver's
+containment of Stack, Soak and Spot regions and of unplanned carrier circles with `Registry::ContainsPoint`.
+
 ### Gate
 
 Installed on every bot, master or not, by login, map change and a sweep every `GateSweepMs` (repairs
@@ -484,6 +720,11 @@ and the brain keeps running through it), so the waker refreshes its `leaveBy` an
 would end after `leaveBy - SafetyMarginMs`, unless the bot is released. After a break the lock holds back cast-time
 spells and item uses for 500 ms, so the cast is not restarted and broken again.
 
+M3: a frozen bot is never broken for a hazard (it cannot leave). Under look-away, a cast with
+`SPELL_FACING_FLAG_INFRONT` on a target outside the chosen arc is broken when a look-away window opens before it ends:
+`PlayerbotAI::UpdateAI` turns a casting bot to its target every update, before any engine runs, so nothing else can
+stop that turn.
+
 `leaveBy` already holds `SafetyMarginMs` once (the window is widened by it); the cast rule subtracts it a second time
 on purpose, for the AI tick between the cast's end and the escape's first step. Casts thus end 300 ms (default)
 earlier than the bare margin would allow.
@@ -496,6 +737,19 @@ earlier than the bare margin would allow.
   Allowed: instants (heals too), auto-attack and the stock target picks, `set facing`, ours.
 - **Hold**: blocked: every movement action but ours, movement spells, a cast or channel that would end after
   `leaveBy - SafetyMarginMs`. Allowed: casts that end in time, instants, auto-attack, `set facing`, ours.
+- **Freeze**: blocked: every movement action (ours too), movement spells, items whose spell moves the caster.
+  Allowed: every cast, auto-attack, facing.
+- **Any mode, tank facing** (a remembered Frontal source): stock `tank face` (`TankFaceAction`) is blocked.
+- **Any mode, look-away window open**: blocked: `set facing`, `CastFacingUnitAction`, a cast with
+  `SPELL_FACING_FLAG_INFRONT` or on a hostile target outside `CAST_ANGLE_IN_FRONT` of the chosen facing (rework
+  actions such as `DkFacingCastAction` turn the bot themselves), attack-only actions on a target outside it. Heals on
+  an ally behind the bot stay allowed.
+
+Facing audit (M3): every playerbots and mod-dungeon-clear path that turns the bot without moving it, and what the
+look-away lock does with it, is listed in the M3 WP-C report. In short: generic turners (`set facing`,
+`CastFacingUnitAction`, facing casts, `AttackAction`) are blocked as above; the mid-cast re-facing is broken by the
+waker; movers that turn (`TankFaceAction`, `set behind`, encounter positioning) are blocked by Hold; chat, quest,
+trade, gossip and RPG turns are not combat actions and are left alone.
 
 Movement spells: charge, leap, leap back, jump, jump dest and teleport effects, `CastReachTargetSpellAction`, and the
 named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `shadowstep`, `blink back`,
@@ -526,6 +780,17 @@ named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `s
 | `FacingSlackDeg` | 15 | turning cones and lines are checked at +-this |
 | `Debug` | 0 | one log line per solve with why it failed, the view self-check (`module.bossmechanics.bots`) |
 | `Fallibility.Enable` | 0 | D1 human-like mistakes, deterministic under `Fallibility.Seed` (0 = random per load) |
+| `HumanSlackYd` | 1.0 | uncertainty added to a human's current spot (M3) |
+| `RegionComfortWeight` | 1.5 | score per yard short of 1 yd inside a get-in region |
+| `TrackSlackYd` | 0.75 | re-solve a region on a moving unit this close to its inner edge |
+| `LookAway.MarginDeg` | 10 | extra angle kept between a carried cone or line and an ally |
+| `TankFacing.Enable` | 1 | the tank keeps a Frontal's source faced away from the group |
+| `Park.Enable` / `Park.DepthYd` / `Park.HoldCapMs` | 1 / 1.0 / 8000 | tank parking and drag-out; stop depth; hold cap |
+| `Freeze.SettleMs` | 250 | stop moving this long before a HoldStill window |
+| `Healer.SightWeight` / `Healer.MaxSightChecks` | 10.0 / 8 | per member out of sight (tank full, others half) / rays |
+| `Route.Enable` / `Route.RetryMs` | 1 / 1000 | route search around hazard walls; at most once per this per bot |
+| `Route.PadYd` / `Route.CellYd` | 8 / 1.0 | search box padding / smallest grid cell |
+| `Route.MaxCells` / `Route.MaxExpansions` / `Route.MaxLegs` | 4096 / 4096 / 8 | route search caps |
 
 Fallibility keys (all off unless `Enable`): `ReactionMs` 350 + `JitterMs` 0-250 per bot before a mechanic is seen,
 `LateChancePct` 5 for `LateExtraMs` 700 more, `WrongSideChancePct` 3 to ignore it until `RealiseMs` 700 before its
@@ -541,7 +806,11 @@ Per bot in the GM's group (`all`: every bot on the map): the strategies installe
 left before it must leave, its ledger failures, and its counters (solves by outcome, with the moves found only at the
 reduced margin, path checks, late arrivals and how many of them followed a Fallback, stuck re-solves, released
 escapes, motion stops and how many of them were re-routed, lock blocks by moves and casts, cast breaks, wakes, solve
-time last / max / mean in microseconds).
+time last / max / mean in microseconds). M3 adds a line with the solves made as a carrier, a soak claimer and the
+Bait picker, role solves, plans that knowingly break a player kind for a Zone ("violated"), freezes, facings applied,
+facing blocks and breaks, tank re-facings (and those a warning stopped), parks, routes found and failed with their
+time, and sight rays; and a line with the bot's tasks, its live reservations, its look-away facing and its remembered
+Frontal sources. The solve time includes the allies' refresh right before each solve.
 
 With `Debug = 1`, each solve logs the pass that found the plan and why the rest failed: candidates kept, probes (off
 the navmesh, snapped), path calls without a path, ends unsafe at arrival, paths crossing a hazard that holds the bot
@@ -563,15 +832,23 @@ stuck re-solve).
 - A reduced-margin path passes 0.25 yd from a hazard's edge (plus the anchor's drift). Grace crossings are still
   measured at the full margin, so a gap the reduced pass rejects (narrower than about 0.5 yd) stays closed: a bot
   boxed in by overlapping mines holds, or crosses under grace when the mines allow it.
-- Zones anchored on the bot itself (or lines aimed at it) are RunOut-shaped and ignored by their carrier (M3).
+- Fallibility hides a player kind as a whole (the bot does not notice the Spread or the Soak); tank and parking tasks
+  are never hidden.
 - Actions run through `PlayerbotAI::DoSpecificAction` (chat `do`, `move to loot` from item use, pull pre-actions) skip
   every multiplier, so the lock cannot stop them; engine reactions (knockback, teleport acks) are not actions.
 - The lock knows a cast by `CastSpellAction` (and items by `UseItemAction`). A plain `Action` that calls `CastSpell`
   itself can still start a cast-time spell in Hold; the waker breaks it, at most once per 500 ms window (M4 class
   audit).
-- Re-routing around a hazard is greedy, one hop at a time towards the end of the stock motion. A route that needs to
-  go away from the master first (a U-shaped wall of mines) is not found: the bot holds until the hazard ends or
-  `HoldCapMs`, then tries again.
+- Re-routing around a hazard is greedy, one hop at a time towards the end of the stock motion; when that finds
+  nothing, the route search (M3) looks for a way around, including one that first leads away from the master (a
+  U-shaped wall of mines). Its grid ignores walls until a leg fails on the navmesh (one retry), so a maze-like room
+  may still hold a bot; a true enclosure holds it until the hazard ends or `HoldCapMs`, then it tries again.
+- Tank facing and parking predict where a chasing unit stops (combat reaches + 0.5); the exact stop on a shortened
+  path is not verified, `Park.DepthYd` absorbs it. A boss that turns on its own during a warning (not toward its
+  victim) breaks the cone prediction (boss rule, STAGE-M3-HANDOFF §3.12).
+- Look-away cannot stop a turn by a plain `Action` the audit did not list, or by `DoSpecificAction`; the face action
+  turns the bot back on its next tick.
+- Bots never steer their pets; Spread, RunOut and Bait no longer hit pets (decision §7.8), Zones still do.
 - A bot released after a stuck escape stands where it is for up to 1.5 s, inside the hazard if that is where it got
   stuck (no navmesh way out); it heals and casts meanwhile.
 - The barrage donut tests "stay in the hole" only while `SafetyMarginYd` < 1 (`MechanicBarrage.h`).
@@ -580,7 +857,8 @@ stuck re-solve).
 
 The context registration and the strategy gate follow mod-dungeon-clear (Jared Wright, AGPL-3.0-or-later),
 `DungeonClearModule` and `DcStrategyGate`; the solver's rule to validate path legs, not corners, and to validate a
-target against the same band the trigger fires on is from its `DcHazard`.
+target against the same band the trigger fires on is from its `DcHazard` (the route search validates its legs by the
+same rule).
 
 ## Config
 

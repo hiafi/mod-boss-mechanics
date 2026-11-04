@@ -21,6 +21,7 @@
 #include "Unit.h"
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <limits>
 
 namespace BossMechanics
@@ -55,6 +56,27 @@ namespace BossMechanics
             if (!sWarnedNoBridge.exchange(true))
                 LOG_ERROR("module.bossmechanics", "mod-boss-mechanics: no engine bridge installed; markers and "
                     "resolve casts are skipped");
+        }
+
+        // A lasting mechanic's next pass (Judge::TakePass on its Persist state): true and `pass` when one is due now.
+        bool TakePersistPass(ActiveMechanic& m, Milliseconds now, uint32& pass)
+        {
+            Persist& p = *m.persist;
+            Judge::PassClock clock{ p.nextTick, p.until, p.tick, p.ticks };
+            bool const due = Judge::TakePass(clock, now, m.detonateRequested, m.resolved, Registry::kForever, pass);
+            p.nextTick = clock.nextTick;
+            p.ticks = clock.ticks;
+            return due;
+        }
+
+        // Reservation fields other bots plan against (B10): a re-reserve that changes none of them only moves `until`.
+        bool SameReservation(Reservation const& a, Reservation const& b)
+        {
+            constexpr float kPointEpsYd = 0.1f;
+            constexpr float kFacingEpsRad = 0.02f;
+            return a.point.GetExactDist2d(b.point) <= kPointEpsYd
+                && std::fabs(Geo::WrapPi(a.facing - b.facing)) <= kFacingEpsRad && a.slot == b.slot
+                && a.claim == b.claim;
         }
     }
 
@@ -407,17 +429,17 @@ namespace BossMechanics
     void Registry::Reserve(uint32 id, Reservation r)
     {
         ActiveMechanic* m = FindMutable(id);
-        if (!m)
+        if (!m || r.bot.IsEmpty())
             return;
-        for (Reservation& existing : m->reservations)
-        {
-            if (existing.bot == r.bot)
-            {
-                existing = r;
-                return;
-            }
-        }
-        m->reservations.push_back(r);
+        if (Judge::UpsertReservation(m->reservations, r, GameTime::GetGameTimeMS(), SameReservation))
+            BumpReservationRevision();
+    }
+
+    void Registry::Unreserve(uint32 id, ObjectGuid bot)
+    {
+        ActiveMechanic* m = FindMutable(id);
+        if (m && Judge::EraseReservation(m->reservations, bot))
+            BumpReservationRevision();
     }
 
     void Registry::EndEncounter(ObjectGuid owner)
@@ -461,6 +483,8 @@ namespace BossMechanics
             auto it = _mechanics.find(id);
             if (it == _mechanics.end())
                 continue;
+            if (!it->second.reservations.empty())
+                BumpReservationRevision();
             if (bridge)
                 bridge->DespawnMarkers(_map, it->second);
             _mechanics.erase(it);
@@ -675,6 +699,13 @@ namespace BossMechanics
         return p;
     }
 
+    ObjectGuid Registry::ShapeExclude(ActiveMechanic const& m) const
+    {
+        if (m.anchor.IsUnit() && Judge::SparesAnchor(m.kind, m.anchor.unit.IsPlayer()))
+            return m.anchor.unit;
+        return ObjectGuid::Empty;
+    }
+
     Shape Registry::EffectiveShape(ActiveMechanic const& m, Geo::Pose& pose) const
     {
         pose = AnchorPose(m);
@@ -703,9 +734,16 @@ namespace BossMechanics
         if (!m.targets.empty())
             return { m.targets.begin(), m.targets.end() };
         if (m.kind == Kind::Spread && m.count == 0)
-            for (Player* p : CandidatePlayers(m))
-                if (IsEligible(m, p))
-                    out.push_back(p->GetGUID());
+            return EligiblePlayers(m);
+        return out;
+    }
+
+    std::vector<ObjectGuid> Registry::EligiblePlayers(ActiveMechanic const& m) const
+    {
+        std::vector<ObjectGuid> out;
+        for (Player* p : CandidatePlayers(m))
+            if (IsEligible(m, p))
+                out.push_back(p->GetGUID());
         return out;
     }
 
@@ -716,9 +754,26 @@ namespace BossMechanics
         {
             case Kind::Zone:
             case Kind::Frontal:
+            {
+                if (!who.IsEmpty() && who == ShapeExclude(m))
+                    return false;
+                Geo::Pose pose;
+                Shape const shape = EffectiveShape(m, pose);
+                return Geo::Contains(shape, pose, v);
+            }
             case Kind::Stack:
             case Kind::Soak:
             {
+                if (m.IsCluster())
+                {
+                    Shape circle = Shape::Circle(m.shape.radius);
+                    circle.zTolerance = m.shape.zTolerance;
+                    std::vector<Geo::Vec3> others;
+                    for (Player* p : CandidatePlayers(m))
+                        if (p->GetGUID() != who && IsEligible(m, p))
+                            others.push_back(ToVec(p->GetPosition()));
+                    return Judge::ClusterCount(circle, v, others) >= m.clusterMinOthers;
+                }
                 Geo::Pose pose;
                 Shape const shape = EffectiveShape(m, pose);
                 return Geo::Contains(shape, pose, v);
@@ -830,13 +885,24 @@ namespace BossMechanics
         return true;
     }
 
+    ObjectGuid Registry::ExemptVictim(ActiveMechanic const& m) const
+    {
+        if (!m.tankExempt)
+            return ObjectGuid::Empty;
+        bool const creature = m.anchor.IsUnit() && m.anchor.unit.IsCreatureOrVehicle();
+        Unit const* anchor = creature ? FindUnit(m.anchor.unit) : nullptr;
+        Unit const* source = Judge::TankExemptSource(creature, anchor != nullptr) == Judge::ExemptFrom::Anchor
+            ? anchor : FindUnit(m.owner);
+        Unit const* victim = source ? source->GetVictim() : nullptr;
+        return victim ? victim->GetGUID() : ObjectGuid::Empty;
+    }
+
     bool Registry::IsTankExempted(ActiveMechanic const& m, Unit const* who) const
     {
         if (!m.tankExempt || !who)
             return false;
-        Unit const* owner = FindUnit(m.owner);
-        Unit const* victim = owner ? owner->GetVictim() : nullptr;
-        return victim && victim->GetGUID() == who->GetGUID();
+        ObjectGuid const victim = ExemptVictim(m);
+        return !victim.IsEmpty() && victim == who->GetGUID();
     }
 
     ObjectGuid Registry::BaitPick(ActiveMechanic const& m) const
@@ -907,15 +973,24 @@ namespace BossMechanics
         targets.remove_if([&](WorldObject* obj)
         {
             Unit* u = obj ? obj->ToUnit() : nullptr;
-            if (!u || !u->IsAlive() || !u->GetCharmerOrOwnerPlayerOrPlayerItself())
-                return true;    // player-controlled units only (players, pets, guardians)
-            if (Player* pl = u->ToPlayer())
-                if (pl->IsGameMaster())
-                    return true;
-            if (!InsideCtx(*m, u) || !IsEligible(*m, u) || IsTankExempted(*m, u))
+            if (!u)
                 return true;
-            if (!done.insert(u->GetGUID()).second)
-                return true;    // already hit this pass
+            // Player-controlled units only (players, pets, guardians; players only for Spread, RunOut and Bait).
+            Judge::Candidate c;
+            c.alive = u->IsAlive();
+            c.playerControlled = u->GetCharmerOrOwnerPlayerOrPlayerItself() != nullptr;
+            Player const* pl = u->ToPlayer();
+            c.player = pl != nullptr;
+            c.gameMaster = pl && pl->IsGameMaster();
+            if (!c.alive || !c.playerControlled || c.gameMaster || (Judge::PlayersOnly(m->kind) && !c.player))
+                return true;    // cheap rejections first
+            c.inside = InsideCtx(*m, u);
+            c.eligible = c.inside && IsEligible(*m, u);
+            c.tankExempted = c.eligible && IsTankExempted(*m, u);
+            c.hitThisPass = done.count(u->GetGUID()) != 0;
+            if (!Judge::KeepResolveTarget(m->kind, c))
+                return true;
+            done.insert(u->GetGUID());
             m->ctx.selected.push_back(u->GetGUID());
             return false;
         });
@@ -998,8 +1073,19 @@ namespace BossMechanics
             // the result still lists who stood inside.
             GuidSet& done = m.hitPerPass[pass];
             for (Player* p : CandidatePlayers(m))
-                if (InsideCtx(m, p) && IsEligible(m, p) && !IsTankExempted(m, p) && done.insert(p->GetGUID()).second)
-                    hits.push_back(p->GetGUID());
+            {
+                Judge::Candidate c;     // candidates are alive non-GM players
+                c.inside = InsideCtx(m, p);
+                if (!c.inside)
+                    continue;           // never kept: skip the eligibility and exemption look-ups
+                c.eligible = IsEligible(m, p);
+                c.tankExempted = IsTankExempted(m, p);
+                c.hitThisPass = done.count(p->GetGUID()) != 0;
+                if (!Judge::KeepResolveTarget(m.kind, c))
+                    continue;
+                done.insert(p->GetGUID());
+                hits.push_back(p->GetGUID());
+            }
         }
 
         if (ActiveMechanic* again = FindMutable(id))
@@ -1070,8 +1156,13 @@ namespace BossMechanics
 
         std::vector<uint32> dead;
         for (auto const& [id, m] : _mechanics)
-            if (m.cancelled || m.finished)
-                dead.push_back(id);
+        {
+            if (!m.cancelled && !m.finished)
+                continue;
+            dead.push_back(id);
+            if (!m.reservations.empty())
+                BumpReservationRevision();
+        }
         if (!dead.empty())
             BumpRevision();
         for (uint32 id : dead)
@@ -1084,7 +1175,8 @@ namespace BossMechanics
         }
 
         for (auto& [id, m] : _mechanics)
-            std::erase_if(m.reservations, [now](Reservation const& r) { return r.until <= now; });
+            if (Judge::PruneReservations(m.reservations, now))
+                BumpReservationRevision();
 
         for (auto it = _laneSets.begin(); it != _laneSets.end();)
         {
@@ -1169,7 +1261,7 @@ namespace BossMechanics
         Geo::Pose pose;
         Shape const shape = EffectiveShape(m, pose);
         ResolveResult r = BaseResult(m, 0);
-        r.hits = ResolvePass(m, 0, pose, shape);
+        r.hits = ResolvePass(m, 0, pose, shape, ShapeExclude(m));
         r.count = r.hits.size();
         m.resolved = true;
         m.finished = true;
@@ -1178,22 +1270,14 @@ namespace BossMechanics
 
     void Registry::StepPersistent(ActiveMechanic& m, Milliseconds now)
     {
-        Persist& p = *m.persist;
-        if (m.detonateRequested)
+        uint32 pass = 0;
+        if (TakePersistPass(m, now, pass))
         {
-            m.detonateRequested = false;
-            if (!m.resolved && now < p.nextTick)
-                p.nextTick = now;
-        }
-        if (now >= p.nextTick && (p.nextTick < p.until || p.ticks == 0))
-        {
-            uint32 const pass = p.ticks++;
-            p.nextTick = p.tick > Milliseconds(0) ? p.nextTick + p.tick : kForever;
             m.resolved = true;
             Geo::Pose pose;
             Shape const shape = EffectiveShape(m, pose);
             ResolveResult r = BaseResult(m, pass);
-            r.hits = ResolvePass(m, pass, pose, shape);
+            r.hits = ResolvePass(m, pass, pose, shape, ShapeExclude(m));
             r.count = r.hits.size();
             Report(m, r);
         }
@@ -1250,8 +1334,9 @@ namespace BossMechanics
                 done = true;
         }
 
+        ObjectGuid const exclude = ShapeExclude(m);
         for (SweepBand const& band : bands)
-            ResolvePass(m, band.pass, pose, shape, ObjectGuid::Empty, ObjectGuid::Empty, band);
+            ResolvePass(m, band.pass, pose, shape, exclude, ObjectGuid::Empty, band);
         m.resolved = true;
 
         uint32 const passesTotal = params.outAndBack ? 2 : 1;
@@ -1346,28 +1431,71 @@ namespace BossMechanics
 
     void Registry::StepStackSoak(ActiveMechanic& m, Milliseconds now)
     {
+        if (m.persist)
+        {
+            // Lasting (B2): judged at every pass from resolveAt (tick 0: once, then it lingers for Contains).
+            uint32 pass = 0;
+            if (TakePersistPass(m, now, pass))
+            {
+                m.resolved = true;
+                JudgeStackSoak(m, pass, now);
+            }
+            if (m.resolved && now >= m.persist->until)
+                m.finished = true;
+            return;
+        }
         if (now < m.resolveAt && !m.detonateRequested)
             return;
         m.detonateRequested = false;
-        Geo::Pose pose;
-        Shape const shape = EffectiveShape(m, pose);
-        ResolveResult r = BaseResult(m, 0);
-        std::vector<ObjectGuid> missed;
-        for (Player* p : CandidatePlayers(m))
-        {
-            if (!IsEligible(m, p))
-                continue;
-            if (Geo::Contains(shape, pose, ToVec(p->GetPosition())))
-                r.hits.push_back(p->GetGUID());
-            else if (m.kind == Kind::Stack)
-                missed.push_back(p->GetGUID());
-        }
-        r.count = r.hits.size();
         m.resolved = true;
         m.finished = true;
+        JudgeStackSoak(m, 0, now);
+    }
+
+    void Registry::JudgeStackSoak(ActiveMechanic& m, uint32 pass, Milliseconds now)
+    {
+        ResolveResult r = BaseResult(m, pass);
+        std::vector<ObjectGuid> missed;
+        if (m.IsCluster())
+        {
+            // B3: no anchor; each eligible player needs clusterMinOthers eligible players within the radius.
+            Shape circle = Shape::Circle(m.shape.radius);
+            circle.zTolerance = m.shape.zTolerance;
+            std::vector<ObjectGuid> guids;
+            std::vector<Geo::Vec3> points;
+            for (Player* p : CandidatePlayers(m))
+            {
+                if (!IsEligible(m, p))
+                    continue;
+                guids.push_back(p->GetGUID());
+                points.push_back(ToVec(p->GetPosition()));
+            }
+            std::vector<bool> miss(guids.size(), false);
+            for (std::size_t i : Judge::ClusterMisses(circle, points, m.clusterMinOthers))
+                miss[i] = true;
+            for (std::size_t i = 0; i < guids.size(); ++i)
+                (miss[i] ? missed : r.hits).push_back(guids[i]);
+        }
+        else
+        {
+            Geo::Pose pose;
+            Shape const shape = EffectiveShape(m, pose);
+            for (Player* p : CandidatePlayers(m))
+            {
+                if (!IsEligible(m, p))
+                    continue;
+                if (Geo::Contains(shape, pose, ToVec(p->GetPosition())))
+                    r.hits.push_back(p->GetGUID());
+                else if (m.kind == Kind::Stack)
+                    missed.push_back(p->GetGUID());
+            }
+        }
+        r.count = r.hits.size();
+        // MissedStack at most once per player per mechanic (a lasting Stack judges every pass).
         for (ObjectGuid const& g : missed)
-            PlayerFailure(m, g, FailureEvent::Type::MissedStack);
-        if (m.kind == Kind::Soak && r.count < m.soakCount)
+            if (m.failedPlayers.insert(g).second)
+                PlayerFailure(m, g, FailureEvent::Type::MissedStack);
+        if (m.kind == Kind::Soak && Judge::SoakShort(r.count, m.soakCount))
         {
             FailureEvent e;
             e.encounter = m.owner;
@@ -1414,10 +1542,10 @@ namespace BossMechanics
             ObjectGuid const target = farthest->GetGUID();
             r.picked = target;
             Geo::Pose const tp = ToPose(farthest->GetPosition());
-            Shape circle = Shape::Circle(std::max(m.shape.radius, 0.5f));
+            Shape circle = Shape::Circle(Judge::BaitHitRadius(m.shape.radius));     // B4: Radius(yd)
             circle.zTolerance = m.shape.zTolerance;
             r.hits = ResolvePass(m, 0, tp, circle, ObjectGuid::Empty,
-                m.shape.radius > 0.f ? ObjectGuid::Empty : target);
+                Judge::BaitHitsPickOnly(m.shape.radius) ? target : ObjectGuid::Empty);
             for (auto const& [g, d] : dists)
                 if (g != target && d > m.othersRange)
                     PlayerFailure(m, g, FailureEvent::Type::MissedBait);
@@ -1455,7 +1583,7 @@ namespace BossMechanics
             Unit const* u = FindUnit(g);
             if (!u || !u->IsAlive())
                 continue;
-            if (u->GetExactDist2d(start) > Rules::kHoldStillToleranceYd)
+            if (Judge::HoldStillMoved(u->GetExactDist2d(start), m.holdTolerance))
             {
                 m.failedPlayers.insert(g);
                 PlayerFailure(m, g, FailureEvent::Type::Moved);
