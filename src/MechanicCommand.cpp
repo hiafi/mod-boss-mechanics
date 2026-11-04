@@ -8,6 +8,7 @@
  *   .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0]
  *                 [seed=]
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
+ *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
  * `.mech test` registers through the public Mechanic:: API, owned by a hostile Mechanic Test Owner (300401) summoned at
@@ -22,6 +23,10 @@
  * geometry is MechanicBarrage.h). Delayed registrations run from the test owner's scheduler, so `.mech clear` (which
  * despawns the owner) also ends a barrage.
  *
+ * M3 (STAGE-M3-HANDOFF §3.11): the player kinds frontal, bait, holdstill and spot, the eligibility, ordering,
+ * self-trigger, lane, cluster, park and landing keys, and `.mech drill`, whose steps are `.mech test` lines run through
+ * the same parser (the timelines and landing geometry are MechanicDrill.h, desk-checked by tests/drill_test.cpp).
+ *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
 
@@ -34,6 +39,7 @@
 #include "Map.h"
 #include "MechanicBarrage.h"
 #include "MechanicBotReportHook.h"
+#include "MechanicDrill.h"
 #include "MechanicMarkerAI.h"
 #include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
@@ -63,9 +69,19 @@ namespace
     constexpr uint32 kMaxMines = 100;
     constexpr Milliseconds kMineLife = Milliseconds(120000);    // `.mech minefield`
     constexpr uint32 kFirstMinefieldGroup = 1000;               // cap groups above the hand-typed `group=` values
+    constexpr uint32 kMaxDrillCycles = 10;
+    constexpr char const* kNoMemberMessage = "no alive member of your group on this map (self=1 includes you)";
 
     // The dice of one command. Delayed registrations share it, so they keep drawing from the same seeded sequence.
-    using RngPtr = std::shared_ptr<Barrage::Rng>;
+    // `lastMember` is the member the last pick landed on (`pick=same`).
+    struct Dice
+    {
+        explicit Dice(uint32 seed) : rng(seed) { }
+
+        Barrage::Rng rng;
+        ObjectGuid lastMember;
+    };
+    using RngPtr = std::shared_ptr<Dice>;
 
     // ---- parsing ---------------------------------------------------------------------------------------------------
     std::optional<Color> ParseColor(std::string_view s)
@@ -186,7 +202,99 @@ namespace
     {
         uint32 const seed = opt.Has("seed") ? static_cast<uint32>(std::max<int32>(opt.Int("seed", 0), 0))
             : urand(1, 0x7FFFFFFF);
-        return std::make_shared<Barrage::Rng>(seed);
+        return std::make_shared<Dice>(seed);
+    }
+
+    // ---- M3 key values ---------------------------------------------------------------------------------------------
+    // `<a>:<b>[:<c>...]` split on ':'.
+    std::vector<std::string_view> Fields(std::string const& s)
+    {
+        return Acore::Tokenize(s, ':', true);
+    }
+
+    std::optional<Role> ParseRole(std::string_view s)
+    {
+        if (s == "tank")
+            return Role::Tank;
+        if (s == "healer")
+            return Role::Healer;
+        if (s == "dps")
+            return Role::Damage;
+        if (s == "nontank")
+            return Role::Healer | Role::Damage;
+        if (s == "any")
+            return Role::Any;
+        return std::nullopt;
+    }
+
+    // `aura=<spell>:<min>[:<max>]` (eligibility band).
+    bool ParseAuraBand(std::string const& s, Eligibility& e)
+    {
+        std::vector<std::string_view> const f = Fields(s);
+        if (f.size() < 2 || f.size() > 3)
+            return false;
+        Optional<uint32> spell = Acore::StringTo<uint32>(f[0]);
+        Optional<uint32> lo = Acore::StringTo<uint32>(f[1]);
+        Optional<uint32> hi = f.size() == 3 ? Acore::StringTo<uint32>(f[2]) : Optional<uint32>(255);
+        if (!spell || !*spell || !lo || !hi || *lo > 255 || *hi > 255 || *lo > *hi)
+            return false;
+        e.auraSpell = *spell;
+        e.minStacks = static_cast<uint8>(*lo);
+        e.maxStacks = static_cast<uint8>(*hi);
+        return true;
+    }
+
+    // `self=<spell>:<min>` (self-trigger).
+    bool ParseSelfTrigger(std::string const& s, uint32& spell, uint8& minStacks)
+    {
+        std::vector<std::string_view> const f = Fields(s);
+        Optional<uint32> sp = f.size() == 2 ? Acore::StringTo<uint32>(f[0]) : std::nullopt;
+        Optional<uint32> n = f.size() == 2 ? Acore::StringTo<uint32>(f[1]) : std::nullopt;
+        if (!sp || !*sp || !n || *n > 255)
+            return false;
+        spell = *sp;
+        minStacks = static_cast<uint8>(*n);
+        return true;
+    }
+
+    // `order=<spell>[:asc|desc][:cap=<n>]`.
+    bool ParseOrdering(std::string const& s, Ordering& o)
+    {
+        std::vector<std::string_view> const f = Fields(s);
+        Optional<uint32> spell = f.empty() ? std::nullopt : Acore::StringTo<uint32>(f[0]);
+        if (!spell || !*spell || f.size() > 3)
+            return false;
+        o.auraSpell = *spell;
+        for (std::size_t i = 1; i < f.size(); ++i)
+        {
+            if (f[i] == "asc")
+                o.ascending = true;
+            else if (f[i] == "desc")
+                o.ascending = false;
+            else if (f[i].substr(0, 4) == "cap=")
+            {
+                Optional<uint32> cap = Acore::StringTo<uint32>(f[i].substr(4));
+                if (!cap || *cap > 255)
+                    return false;
+                o.capStacks = static_cast<uint8>(*cap);
+            }
+            else
+                return false;
+        }
+        return true;
+    }
+
+    // `shift=<ahead>:<left>` (yd, relative to the GM's facing).
+    bool ParseShift(std::string const& s, float& ahead, float& left)
+    {
+        std::vector<std::string_view> const f = Fields(s);
+        Optional<float> a = f.size() == 2 ? Acore::StringTo<float>(f[0]) : std::nullopt;
+        Optional<float> l = f.size() == 2 ? Acore::StringTo<float>(f[1]) : std::nullopt;
+        if (!a || !l)
+            return false;
+        ahead = *a;
+        left = *l;
+        return true;
     }
 
     // Everything one `.mech test` registration needs, resolved to plain values and guids so a delayed repeat can run
@@ -247,12 +355,55 @@ namespace
         float facing = 0.f;
         uint32 tag = 1;
         ObjectGuid gm;          // who ran it: the test encounter's scope (the GM and their group)
+
+        // ---- M3 (STAGE-M3-HANDOFF §3.11) ----
+        enum class Pick : uint8
+        {
+            Any,                // a random member
+            NonTank,            // a random member other than the selected unit's victim
+            Same                // the member the previous pick of this command landed on (else a random one)
+        };
+        enum class To : uint8
+        {
+            None,
+            Member,
+            Target,
+            Me
+        };
+
+        bool rear = false;              // frontal
+        bool lineFrontal = false;       // frontal line=1 (width = `width`)
+        BaitRule bait = BaitRule::FewestStacks(Ids::SPELL_WEAKENED);
+        float baitRadius = 6.f;
+        float tolerance = -1.f;         // holdstill tol= (< 0: the registry default)
+        float ring = 10.f;              // spot
+        std::unordered_map<ObjectGuid, Position> spots;     // spot: filled when the repeat registers
+        bool lane = false;              // stack/soak shape=line (width = `width`)
+        float laneLength = 30.f;
+        uint8 cluster = 0;
+        uint8 runoutCount = 0;
+        std::optional<Eligibility> eligibility;
+        std::optional<Ordering> ordering;
+        uint32 selfAura = 0;
+        uint8 selfMin = 0;
+        bool park = false;
+        bool follow = false;
+        Pick pick = Pick::Any;
+        bool atGm = false;
+        bool atGroup = false;
+        bool anchorMember = false;
+        To to = To::None;
+        ObjectGuid toUnit;
+        bool shifted = false;
+        float shiftAhead = 0.f;
+        float shiftLeft = 0.f;
+        ObjectGuid selected;            // the selected unit: park, frontal source, pick=nontank's victim
     };
 
     bool IsShapeName(std::string const& s)
     {
         static char const* const shapes[] = { "circle", "donut", "cone", "rearcone", "line", "projectile", "mine",
-            "lanes", "spread", "runout", "stack", "soak" };
+            "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot" };
         for (char const* name : shapes)
             if (s == name)
                 return true;
@@ -279,6 +430,10 @@ namespace
             ref.Weakened();
         if (allowPersist && spec.persist > Milliseconds(0))
             ref.Persistent(spec.persist, spec.tick);
+        if (spec.eligibility)
+            ref.Eligible(*spec.eligibility);
+        if (spec.ordering)
+            ref.Order(*spec.ordering);
         if (spec.color)
             ref.Color(*spec.color);
         if (!spec.tele)
@@ -306,17 +461,36 @@ namespace
                 ids.push_back(ref.Id());
         };
 
+        auto park = [&spec, owner](MechanicRef& ref)
+        {
+            if (spec.park)
+                if (Unit* unit = ObjectAccessor::GetUnit(*owner, spec.selected))
+                    ref.Park(unit);
+        };
+        // stack/soak shape=line: a lane centered on a point anchor along the GM's facing (on a unit: from the unit).
+        auto laneSpec = [&spec, &anchor, anchorUnit, &here]()
+        {
+            if (anchorUnit)
+                return Shapes::LineFacing(anchor, spec.facing, spec.laneLength, spec.width);
+            Geo::Vec3 const src = Drill::LaneSource({ here.GetPositionX(), here.GetPositionY(), here.GetPositionZ() },
+                spec.facing, spec.laneLength);
+            return Shapes::LineFacing(Anchor(Position(src.x, src.y, src.z, spec.facing)), spec.facing,
+                spec.laneLength, spec.width);
+        };
+
         std::string const& s = spec.shape;
         if (s == "circle")
         {
             MechanicRef ref = Mechanic::Circle(owner, anchor, spec.size, spec.warn);
             ApplyCommon(ref, spec, true, true);
+            park(ref);
             keep(ref);
         }
         else if (s == "donut")
         {
             MechanicRef ref = Mechanic::Donut(owner, anchor, spec.inner, spec.size, spec.warn);
             ApplyCommon(ref, spec, true, true);
+            park(ref);
             keep(ref);
         }
         else if (s == "cone" || s == "rearcone")
@@ -329,12 +503,39 @@ namespace
                 ref.Rear();
             else if (spec.offset != 0.f)
                 ref.FacingOffset(spec.offset);
+            if (spec.follow)
+                ref.FollowFacing();
+            ApplyCommon(ref, spec, true, true);
+            park(ref);
+            keep(ref);
+        }
+        else if (s == "frontal")
+        {
+            // Anchored on the selected creature, turning with it, its victim exempt (B7).
+            ZoneSpec const zone = spec.lineFrontal
+                ? Shapes::LineFacing(anchor, here.GetOrientation(), spec.size, spec.width)
+                : Shapes::Cone(anchor, spec.angle, spec.size);
+            MechanicRef ref = Mechanic::Zone(owner, zone, spec.warn);
+            ref.FollowFacing();
+            if (spec.rear)
+                ref.Rear();
+            ref.TankExempt();
             ApplyCommon(ref, spec, true, true);
             keep(ref);
         }
         else if (s == "line" || s == "projectile")
         {
-            MechanicRef ref = Mechanic::Line(owner, anchor, spec.facing, spec.size, spec.width, spec.warn);
+            Unit* toUnit = spec.to != TestSpec::To::None ? ObjectAccessor::GetUnit(*owner, spec.toUnit) : nullptr;
+            if (spec.to != TestSpec::To::None && !toUnit)
+            {
+                err = "the to= unit is gone";
+                return ids;
+            }
+            // to=: aimed at the unit live; the length stays `size` (BossMechanics.h, ZoneSpec Line).
+            MechanicRef ref = toUnit
+                ? Mechanic::Zone(owner, ZoneSpec{ anchor, Shape::Line(spec.size, spec.width), Anchor(toUnit) },
+                    spec.warn)
+                : Mechanic::Line(owner, anchor, spec.facing, spec.size, spec.width, spec.warn);
             if (spec.exclude > 0.f)
                 ref.ExcludeSourceEnd(spec.exclude);
             if (s == "projectile")
@@ -343,7 +544,11 @@ namespace
                 if (spec.back)
                     ref.OutAndBack(spec.pause);
             }
+            if (spec.follow)
+                ref.FollowFacing();
             ApplyCommon(ref, spec, true, s == "line");
+            if (s == "line")
+                park(ref);
             keep(ref);
         }
         else if (s == "mine")
@@ -397,32 +602,75 @@ namespace
             MechanicRef ref = Mechanic::Spread(owner, spec.size, spec.warn);
             if (spec.spreadCount)
                 ref.Count(spec.spreadCount);
+            if (spec.selfAura)
+                ref.SelfTrigger(spec.selfAura, spec.selfMin);
             ApplyCommon(ref, spec, true, false);
             keep(ref);
         }
         else if (s == "runout")
         {
-            Unit* target = ObjectAccessor::GetUnit(*owner, spec.target);
-            if (!target)
+            // count= and self= pick their carriers in the registry; otherwise the target is the selected unit.
+            Unit* target = nullptr;
+            if (!spec.runoutCount && !spec.selfAura)
             {
-                err = "the runout target is gone";
-                return ids;
+                target = ObjectAccessor::GetUnit(*owner, spec.target);
+                if (!target)
+                {
+                    err = "the runout target is gone";
+                    return ids;
+                }
             }
             MechanicRef ref = Mechanic::RunOut(owner, target, spec.size, spec.warn);
             if (spec.fromOwner)
                 ref.From(MeasuredFrom::Owner);
+            if (spec.runoutCount)
+                ref.Count(spec.runoutCount);
+            if (spec.selfAura)
+                ref.SelfTrigger(spec.selfAura, spec.selfMin);
             ApplyCommon(ref, spec, true, false);
             keep(ref);
         }
         else if (s == "stack")
         {
-            MechanicRef ref = Mechanic::Stack(owner, anchor, spec.size, spec.warn);
-            ApplyCommon(ref, spec, false, false);
+            MechanicRef ref = spec.lane ? Mechanic::Stack(owner, laneSpec(), spec.warn)
+                : Mechanic::Stack(owner, anchor, spec.size, spec.warn);
+            if (spec.cluster)
+                ref.Cluster(spec.cluster);
+            ApplyCommon(ref, spec, false, true);
             keep(ref);
         }
         else if (s == "soak")
         {
-            MechanicRef ref = Mechanic::Soak(owner, anchor, spec.size, spec.need, spec.warn);
+            MechanicRef ref = spec.lane ? Mechanic::Soak(owner, laneSpec(), spec.need, spec.warn)
+                : Mechanic::Soak(owner, anchor, spec.size, spec.need, spec.warn);
+            ApplyCommon(ref, spec, false, true);
+            keep(ref);
+        }
+        else if (s == "bait")
+        {
+            // Measured from the test owner (HandleTest moves it to the anchor point first).
+            MechanicRef ref = Mechanic::Bait(owner, spec.bait, spec.size, spec.warn);
+            ref.Radius(spec.baitRadius);
+            ApplyCommon(ref, spec, true, false);
+            keep(ref);
+        }
+        else if (s == "holdstill")
+        {
+            Milliseconds const window(static_cast<int64>(std::lround(spec.size * 1000.f)));
+            MechanicRef ref = Mechanic::HoldStill(owner, GuidSet(), window, spec.warn);
+            if (spec.tolerance >= 0.f)
+                ref.Tolerance(spec.tolerance);
+            ApplyCommon(ref, spec, false, false);
+            keep(ref);
+        }
+        else if (s == "spot")
+        {
+            if (spec.spots.empty())
+            {
+                err = kNoMemberMessage;
+                return ids;
+            }
+            MechanicRef ref = Mechanic::Spot(owner, spec.spots, spec.warn, spec.size);
             ApplyCommon(ref, spec, false, false);
             keep(ref);
         }
@@ -461,21 +709,44 @@ namespace
         return out;
     }
 
-    Player* PickMember(Creature* owner, TestSpec const& spec, Barrage::Rng& rng)
+    // A random member (pick=any), one other than the selected unit's victim (pick=nontank), or the member the last pick
+    // of this command landed on while it is still usable (pick=same; else one other than the victim, as the steps
+    // that follow a pick=nontank one expect: STAGE-M3-R-REPORT n-9). Remembered for pick=same.
+    Player* PickMember(Creature* owner, TestSpec const& spec, Dice& dice)
     {
-        std::vector<Player*> const members = GroupMembers(owner, spec.gm, spec.includeGm);
-        return members.empty() ? nullptr : members[rng.Index(static_cast<uint32>(members.size()))];
+        std::vector<Player*> members = GroupMembers(owner, spec.gm, spec.includeGm);
+        if (spec.pick == TestSpec::Pick::Same && !dice.lastMember.IsEmpty())
+            for (Player* p : members)
+                if (p->GetGUID() == dice.lastMember)
+                    return p;
+        if (spec.pick == TestSpec::Pick::NonTank || spec.pick == TestSpec::Pick::Same)
+        {
+            Unit* selected = spec.selected.IsEmpty() ? nullptr : ObjectAccessor::GetUnit(*owner, spec.selected);
+            if (Unit const* victim = selected ? selected->GetVictim() : nullptr)
+                members.erase(std::remove(members.begin(), members.end(), victim), members.end());
+        }
+        if (members.empty())
+            return nullptr;
+        Player* p = members[dice.rng.Index(static_cast<uint32>(members.size()))];
+        dice.lastMember = p->GetGUID();
+        return p;
     }
 
-    constexpr char const* kNoMemberMessage = "no alive member of your group on this map (self=1 includes you)";
-
-    // One repeat of `.mech test`: resolves `at=member` and `scatter=` now (so a delayed repeat follows the bots), then
-    // registers.
-    std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Barrage::Rng& rng, std::string& err)
+    // The floor under (x, y) near z, else z (as `.mech minefield` places its mines).
+    float GroundZ(Creature* owner, float x, float y, float z)
     {
+        float const ground = owner->GetMap()->GetHeight(owner->GetPhaseMask(), x, y, z + 2.f, true, 10.f);
+        return ground > INVALID_HEIGHT && std::fabs(ground - z) <= 5.f ? ground : z;
+    }
+
+    // One repeat of `.mech test`: resolves the landing (at=member|group|gm, anchor=member, to=, shift=, scatter=) and
+    // the spot ring now, so a delayed repeat follows the bots, then registers.
+    std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
+    {
+        Barrage::Rng& rng = dice.rng;
         if (spec.atMember)
         {
-            Player* member = PickMember(owner, spec, rng);
+            Player* member = PickMember(owner, spec, dice);
             if (!member)
             {
                 err = kNoMemberMessage;
@@ -485,6 +756,70 @@ namespace
             spec.point.SetOrientation(spec.facing);
             spec.target = member->GetGUID();
         }
+        else if (spec.atGroup)
+        {
+            std::vector<Geo::Vec3> points;
+            for (Player const* p : GroupMembers(owner, spec.gm, spec.includeGm))
+                points.push_back({ p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() });
+            if (points.empty())
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            Geo::Vec3 const c = Drill::Centroid(points);
+            spec.point = Position(c.x, c.y, GroundZ(owner, c.x, c.y, c.z), spec.facing);
+        }
+        else if (spec.atGm)
+        {
+            Player* gm = ObjectAccessor::FindConnectedPlayer(spec.gm);
+            if (!gm || !gm->IsInWorld() || gm->GetMap() != owner->GetMap())
+            {
+                err = "you are not on the test owner's map";
+                return {};
+            }
+            spec.point = gm->GetPosition();
+            spec.point.SetOrientation(spec.facing);
+        }
+        if (spec.anchorMember)
+        {
+            Player* member = PickMember(owner, spec, dice);
+            if (!member)
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            spec.unitAnchor = true;
+            spec.unit = member->GetGUID();
+            spec.target = member->GetGUID();
+        }
+        switch (spec.to)
+        {
+            case TestSpec::To::Member:
+            {
+                Player* member = PickMember(owner, spec, dice);
+                if (!member)
+                {
+                    err = kNoMemberMessage;
+                    return {};
+                }
+                spec.toUnit = member->GetGUID();
+                break;
+            }
+            case TestSpec::To::Target:
+                spec.toUnit = spec.selected;
+                break;
+            case TestSpec::To::Me:
+                spec.toUnit = spec.gm;
+                break;
+            case TestSpec::To::None:
+                break;
+        }
+        if (spec.shifted && !spec.unitAnchor)
+        {
+            Geo::Vec3 const p = Drill::Shifted({ spec.point.GetPositionX(), spec.point.GetPositionY(),
+                spec.point.GetPositionZ() }, spec.facing, spec.shiftAhead, spec.shiftLeft);
+            spec.point.Relocate(p.x, p.y, GroundZ(owner, p.x, p.y, p.z));
+        }
         if (spec.scatter > 0.f && !spec.unitAnchor)
         {
             float const ang = rng.Float(0.f, 2.f * Geo::kPi);
@@ -492,14 +827,31 @@ namespace
             spec.point.Relocate(spec.point.GetPositionX() + dist * std::cos(ang),
                 spec.point.GetPositionY() + dist * std::sin(ang), spec.point.GetPositionZ());
         }
+        if (spec.shape == "spot")
+        {
+            // One spot per member (guid order) on a ring around the anchor point, rotated by the dice.
+            Position center = spec.point;
+            if (spec.unitAnchor)
+                if (Unit* u = ObjectAccessor::GetUnit(*owner, spec.unit))
+                    center = u->GetPosition();
+            std::vector<Player*> const members = GroupMembers(owner, spec.gm, spec.includeGm);
+            float const rotation = rng.Float(0.f, Geo::kTwoPi);
+            std::vector<Geo::Vec3> const ring = Drill::RingSpots({ center.GetPositionX(), center.GetPositionY(),
+                center.GetPositionZ() }, spec.ring, static_cast<uint32>(members.size()), rotation);
+            spec.spots.clear();
+            for (std::size_t i = 0; i < members.size(); ++i)
+                spec.spots[members[i]->GetGUID()] = Position(ring[i].x, ring[i].y,
+                    GroundZ(owner, ring[i].x, ring[i].y, ring[i].z), 0.f);
+        }
         return RegisterTest(owner, spec, err);
     }
 
     // One `.mech barrage` shot: a random member, a random kind of the list, the shot's geometry around that member.
     void RegisterBarrageShot(Creature* owner, TestSpec spec, std::vector<Barrage::Kind> const& kinds,
-        Barrage::Rng& rng, std::string& err)
+        Dice& dice, std::string& err)
     {
-        Player* member = PickMember(owner, spec, rng);
+        Barrage::Rng& rng = dice.rng;
+        Player* member = PickMember(owner, spec, dice);
         if (!member)
         {
             err = kNoMemberMessage;
@@ -589,67 +941,34 @@ namespace
             return p->GetName();
         return guid.ToString();
     }
-}
 
-class boss_mechanics_commandscript : public CommandScript
-{
-public:
-    boss_mechanics_commandscript() : CommandScript("boss_mechanics_commandscript") { }
+    constexpr char const* kTestUsage = "Usage: .mech test <shape> <size> <ms> [key=value ...]; shapes: circle donut "
+        "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot";
 
-    ChatCommandTable GetCommands() const override
+    // Parses `.mech test` arguments (`<shape> <size> <ms> [key=value ...]`) into `spec`, `repeat` and `every`;
+    // `selected` is the selected unit (the GM when nothing is selected). Returns the error to show (empty: parsed).
+    // `opt` keeps which keys were read, for the ignored-keys echo. `.mech drill` runs its steps through it too.
+    std::string ParseTest(Player* gm, Unit* selected, std::vector<std::string_view> const& tokens, Options& opt,
+        TestSpec& spec, uint32& repeat, Milliseconds& every)
     {
-        static ChatCommandTable mechTable =
-        {
-            { "test",     HandleTest,     SEC_GAMEMASTER, Console::No },
-            { "clear",    HandleClear,    SEC_GAMEMASTER, Console::No },     // [all]
-            { "list",     HandleList,     SEC_GAMEMASTER, Console::No },
-            { "ledger",   HandleLedger,   SEC_GAMEMASTER, Console::No },
-            { "weakened", HandleWeakened, SEC_GAMEMASTER, Console::No },
-            { "palette",  HandlePalette,  SEC_GAMEMASTER, Console::No },
-            { "markers",  HandleMarkers,  SEC_GAMEMASTER, Console::No },     // [range]
-            { "barrage",  HandleBarrage,  SEC_GAMEMASTER, Console::No },
-            { "minefield", HandleMinefield, SEC_GAMEMASTER, Console::No },
-            { "bots",     HandleBots,     SEC_GAMEMASTER, Console::No },     // [all]
-        };
-        static ChatCommandTable commandTable =
-        {
-            { "mech", mechTable },
-        };
-        return commandTable;
-    }
-
-    static bool HandleTest(ChatHandler* handler, Tail args)
-    {
-        Player* gm = handler->GetPlayer();
-        std::vector<std::string_view> const tokens = Acore::Tokenize(args, ' ', false);
         if (tokens.size() < 3)
-        {
-            handler->SendErrorMessage("Usage: .mech test <shape> <size> <ms> [key=value ...]; shapes: circle donut "
-                "cone rearcone line projectile mine lanes spread runout stack soak");
-            return false;
-        }
-
-        TestSpec spec;
+            return kTestUsage;
         spec.shape = std::string(tokens[0]);
         Optional<float> size = Acore::StringTo<float>(tokens[1]);
         Optional<int32> ms = Acore::StringTo<int32>(tokens[2]);
         if (!IsShapeName(spec.shape) || !size || *size <= 0.f || !ms || *ms < 0)
-        {
-            handler->SendErrorMessage("Usage: .mech test <shape> <size> <ms> [key=value ...] (size > 0, ms >= 0)");
-            return false;
-        }
+            return Acore::StringFormat("{} (size > 0, ms >= 0)", kTestUsage);
         spec.size = *size;
         spec.warn = Milliseconds(*ms);
-
-        Options opt;
-        if (!CollectOptions(handler, tokens, 3, opt))
-            return false;
+        for (std::size_t i = 3; i < tokens.size(); ++i)
+            if (!opt.Add(tokens[i]))
+                return Acore::StringFormat("Not a key=value option: '{}'", tokens[i]);
 
         std::string const& s = spec.shape;
         // shape keys (read only for their shape, so a stray key shows up as unused)
         if (s == "donut")
             spec.inner = opt.Float("inner", spec.size / 2.f);
-        if (s == "cone" || s == "rearcone")
+        if (s == "cone" || s == "rearcone" || s == "frontal")
             spec.angle = opt.Float("angle", 90.f);
         if (s == "cone")
             spec.offset = opt.Float("offset", 0.f);
@@ -657,6 +976,15 @@ public:
         {
             spec.width = opt.Float("width", s == "projectile" ? 3.f : 4.f);
             spec.exclude = opt.Float("exclude", 0.f);
+            std::string const to = opt.Str("to", "");
+            if (to == "member")
+                spec.to = TestSpec::To::Member;
+            else if (to == "target")
+                spec.to = TestSpec::To::Target;
+            else if (to == "me")
+                spec.to = TestSpec::To::Me;
+            else if (!to.empty())
+                opt.MarkBad("to");
         }
         if (s == "projectile")
         {
@@ -699,13 +1027,123 @@ public:
         if (s == "spread")
             spec.spreadCount = static_cast<uint8>(std::clamp<int32>(opt.Int("count", 0), 0, 40));
         if (s == "runout")
+        {
             spec.fromOwner = opt.Str("from", "group") == "owner";
+            spec.runoutCount = static_cast<uint8>(std::clamp<int32>(opt.Int("count", 0), 0, 40));
+        }
         if (s == "soak")
-            spec.need = static_cast<uint8>(std::clamp<int32>(opt.Int("need", 2), 1, 40));
+            spec.need = static_cast<uint8>(std::clamp<int32>(opt.Int("need", 2), 0, 40));
+        if (s == "stack" || s == "soak")
+        {
+            std::string const shape = opt.Str("shape", "circle");
+            if (shape == "line")
+            {
+                spec.lane = true;
+                spec.laneLength = opt.Float("length", 30.f);
+                spec.width = opt.Float("width", spec.size);
+                if (spec.laneLength <= 0.f)
+                    opt.MarkBad("length");
+                if (spec.width <= 0.f)
+                    opt.MarkBad("width");
+            }
+            else if (shape != "circle")
+                opt.MarkBad("shape");
+        }
+        if (s == "stack")
+            spec.cluster = static_cast<uint8>(std::clamp<int32>(opt.Int("cluster", 0), 0, 40));
+        if (s == "frontal")
+        {
+            spec.rear = opt.Bool("rear", false);
+            spec.lineFrontal = opt.Bool("line", false);
+            if (spec.lineFrontal)
+                spec.width = opt.Float("width", 4.f);
+        }
+        if (s == "bait")
+        {
+            // aura=<spell> is the rule's aura; aura=<spell>:<min>[:<max>] is the eligibility band (below).
+            uint32 ruleAura = Ids::SPELL_WEAKENED;
+            if (opt.Has("aura") && opt.Str("aura", "").find(':') == std::string::npos)
+            {
+                Optional<uint32> a = Acore::StringTo<uint32>(opt.Str("aura", ""));
+                if (a && *a)
+                    ruleAura = *a;
+                else
+                    opt.MarkBad("aura");
+            }
+            std::string const rule = opt.Str("rule", "fewest");
+            if (rule == "fewest")
+                spec.bait = BaitRule::FewestStacks(ruleAura);
+            else if (rule == "farthest")
+                spec.bait = BaitRule::Farthest();
+            else
+                opt.MarkBad("rule");
+            spec.baitRadius = opt.Float("r", 6.f);
+            if (spec.baitRadius <= 0.f)
+                opt.MarkBad("r");
+        }
+        if (s == "holdstill" && opt.Has("tol"))
+        {
+            spec.tolerance = opt.Float("tol", Rules::kHoldStillToleranceYd);
+            if (spec.tolerance < 0.f)
+                opt.MarkBad("tol");
+        }
+        if (s == "spot")
+        {
+            spec.ring = opt.Float("ring", 10.f);
+            if (spec.ring < 0.f)
+                opt.MarkBad("ring");
+        }
+        if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "line")
+            spec.park = opt.Bool("park", false);
+        if (s == "cone" || s == "rearcone" || s == "line" || s == "projectile")
+            spec.follow = opt.Bool("follow", false);
+
+        // eligibility, ordering, self-trigger
+        Eligibility elig;
+        bool hasElig = false;
+        if (opt.Has("role"))
+        {
+            if (std::optional<Role> role = ParseRole(opt.Str("role", "")))
+            {
+                elig.roles = *role;
+                hasElig = true;
+            }
+            else
+                opt.MarkBad("role");
+        }
+        if (opt.Has("aura") && (s != "bait" || opt.Str("aura", "").find(':') != std::string::npos))
+        {
+            if (ParseAuraBand(opt.Str("aura", ""), elig))
+                hasElig = true;
+            else
+                opt.MarkBad("aura");
+        }
+        if (hasElig)
+            spec.eligibility = elig;
+        if ((s == "soak" || s == "bait") && opt.Has("order"))
+        {
+            Ordering order;
+            if (ParseOrdering(opt.Str("order", ""), order))
+                spec.ordering = order;
+            else
+                opt.MarkBad("order");
+        }
+        if (opt.Has("self"))
+        {
+            // self=<spell>:<min>: self-trigger (spread, runout); self=0/1: the GM may be landed on.
+            std::string const self = opt.Str("self", "");
+            if (self.find(':') != std::string::npos)
+            {
+                if ((s != "spread" && s != "runout") || !ParseSelfTrigger(self, spec.selfAura, spec.selfMin))
+                    opt.MarkBad("self");
+            }
+            else
+                spec.includeGm = opt.Bool("self", false);
+        }
 
         // common keys
-        bool const getIn = s == "stack" || s == "soak";
-        if (!getIn)
+        bool const noDamage = s == "stack" || s == "soak" || s == "holdstill" || s == "spot";
+        if (!noDamage)
         {
             spec.dmg = opt.Int("dmg", -1);
             spec.pct = opt.Float("pct", 20.f);
@@ -715,9 +1153,7 @@ public:
                 spec.school = *sc;
             else
                 opt.MarkBad("school");
-        }
-        if (!getIn)     // Weakened lands only from resolve hits: stack/soak never cast one (key echoed as ignored)
-        {
+            // Weakened lands only from resolve hits: the get-in kinds never cast one (key echoed as ignored)
             spec.weak = opt.Bool("weak", false);
             spec.once = opt.Bool("once", false);
         }
@@ -732,57 +1168,173 @@ public:
                 opt.MarkBad(key);
         }
         spec.tele = opt.Bool("tele", true);
-        uint32 const repeat = static_cast<uint32>(std::clamp<int32>(opt.Int("repeat", 1), 1, kMaxRepeat));
-        Milliseconds const every = opt.Ms("every", Milliseconds(1000));
+        spec.tag = static_cast<uint32>(std::max<int32>(opt.Int("tag", 1), 0));
+        repeat = static_cast<uint32>(std::clamp<int32>(opt.Int("repeat", 1), 1, kMaxRepeat));
+        every = opt.Ms("every", Milliseconds(1000));
         spec.scatter = std::max(0.f, opt.Float("scatter", 0.f));
         std::string const at = opt.Str("at", "");
         if (at == "member")
-        {
             spec.atMember = true;
-            spec.includeGm = opt.Bool("self", false);
-        }
+        else if (at == "group")
+            spec.atGroup = true;
+        else if (at == "gm")
+            spec.atGm = true;
         else if (!at.empty())
             opt.MarkBad("at");
-        RngPtr const rng = MakeRng(opt);
+        std::string const pick = opt.Str("pick", "any");
+        if (pick == "nontank")
+            spec.pick = TestSpec::Pick::NonTank;
+        else if (pick == "same")
+            spec.pick = TestSpec::Pick::Same;
+        else if (pick != "any")
+            opt.MarkBad("pick");
+        if (opt.Has("shift"))
+        {
+            spec.shifted = ParseShift(opt.Str("shift", ""), spec.shiftAhead, spec.shiftLeft);
+            if (!spec.shifted)
+                opt.MarkBad("shift");
+        }
 
         // anchor
-        Unit* selected = handler->getSelectedUnit();       // the GM when nothing is selected
         spec.facing = gm->GetOrientation();
         spec.gm = gm->GetGUID();
         spec.point = selected->GetPosition();
         spec.point.SetOrientation(spec.facing);
         spec.target = selected->GetGUID();
-        std::string const anchorKind = opt.Str("anchor",
-            s == "stack" && selected != gm && !spec.atMember ? "target" : "point");
-        if (anchorKind == "me")
+        spec.selected = selected->GetGUID();
+        bool const atPoint = spec.atMember || spec.atGroup || spec.atGm;
+        if (s == "frontal")
         {
-            spec.unitAnchor = true;
-            spec.unit = gm->GetGUID();
-        }
-        else if (anchorKind == "target")
-        {
-            if (selected == gm)
-            {
-                handler->SendErrorMessage("anchor=target needs a selected unit");
-                return false;
-            }
+            if (selected == gm || !selected->IsCreature())
+                return "frontal needs a selected creature: the cone's source, whose victim is exempt";
             spec.unitAnchor = true;
             spec.unit = selected->GetGUID();
+            spec.point = selected->GetPosition();
         }
-        else if (anchorKind != "point")
-            opt.MarkBad("anchor");
-        if (spec.atMember && anchorKind != "point")
+        else
         {
-            handler->SendErrorMessage("at=member lands on a point; leave anchor= out or use anchor=point");
-            return false;
+            std::string const anchorKind = opt.Str("anchor", s == "stack" && selected != gm && !atPoint
+                && !spec.cluster && !spec.lane ? "target" : "point");
+            if (anchorKind == "me")
+            {
+                spec.unitAnchor = true;
+                spec.unit = gm->GetGUID();
+            }
+            else if (anchorKind == "target")
+            {
+                if (selected == gm)
+                    return "anchor=target needs a selected unit";
+                spec.unitAnchor = true;
+                spec.unit = selected->GetGUID();
+            }
+            else if (anchorKind == "member")
+                spec.anchorMember = true;
+            else if (anchorKind != "point")
+                opt.MarkBad("anchor");
+            if (atPoint && anchorKind != "point")
+                return "at= lands on a point; leave anchor= out or use anchor=point";
         }
+        if (spec.park && selected == gm)
+            return "park=1 parks the selected unit: select it (the zone lands at it, or at you with at=gm)";
+        if (spec.to == TestSpec::To::Target && selected == gm)
+            return "to=target needs a selected unit";
+        if (spec.follow && !spec.unitAnchor && !spec.anchorMember)
+            return "follow=1 needs a unit anchor (anchor=me, target or member)";
+        if (spec.shifted && (spec.unitAnchor || spec.anchorMember))
+            return "shift= moves a point anchor; leave anchor= out";
+        if (spec.cluster && spec.lane)
+            return "cluster= needs a circle stack (no shape=line)";
 
         std::string const bad = opt.Bad();
         if (!bad.empty())
+            return Acore::StringFormat("Bad value for: {}", bad);
+        return {};
+    }
+
+    // Moves the test owner (the Bait's and the RunOut from=owner's reference) to `pos`.
+    void PlaceTestOwner(Creature* owner, Position const& pos)
+    {
+        owner->NearTeleportTo(pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ(), owner->GetOrientation());
+    }
+
+    // `.mech drill` step `weaken <stacks>`: stacks > 0 sets exactly that many on one random member below it (not the
+    // selected unit's victim with pick=nontank); 0 sets every member back to 0. The test encounter records the players,
+    // so `.mech clear` removes the Weakened too.
+    void DrillWeaken(Creature* owner, TestSpec const& spec, uint8 stacks, Dice& dice)
+    {
+        std::vector<Player*> members = GroupMembers(owner, spec.gm, spec.includeGm);
+        if (!stacks)
+        {
+            for (Player* p : members)
+                if (Weakened::GetStacks(p))
+                    Weakened::SetStacks(p, 0);
+            return;
+        }
+        Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected);
+        Unit const* victim = spec.pick == TestSpec::Pick::NonTank && selected ? selected->GetVictim() : nullptr;
+        members.erase(std::remove_if(members.begin(), members.end(), [stacks, victim](Player const* p)
+        {
+            return p == victim || Weakened::GetStacks(p) >= stacks;
+        }), members.end());
+        if (members.empty())
+            return;
+        Player* p = members[dice.rng.Index(static_cast<uint32>(members.size()))];
+        Weakened::SetStacks(p, stacks);
+        Registry::GetOrCreate(owner->GetMap()).BeginEncounter(owner->GetGUID()).weakenedPlayers.insert(p->GetGUID());
+    }
+}
+
+class boss_mechanics_commandscript : public CommandScript
+{
+public:
+    boss_mechanics_commandscript() : CommandScript("boss_mechanics_commandscript") { }
+
+    ChatCommandTable GetCommands() const override
+    {
+        static ChatCommandTable mechTable =
+        {
+            { "test",     HandleTest,     SEC_GAMEMASTER, Console::No },
+            { "clear",    HandleClear,    SEC_GAMEMASTER, Console::No },     // [all]
+            { "list",     HandleList,     SEC_GAMEMASTER, Console::No },
+            { "ledger",   HandleLedger,   SEC_GAMEMASTER, Console::No },
+            { "weakened", HandleWeakened, SEC_GAMEMASTER, Console::No },
+            { "palette",  HandlePalette,  SEC_GAMEMASTER, Console::No },
+            { "markers",  HandleMarkers,  SEC_GAMEMASTER, Console::No },     // [range]
+            { "barrage",  HandleBarrage,  SEC_GAMEMASTER, Console::No },
+            { "minefield", HandleMinefield, SEC_GAMEMASTER, Console::No },
+            { "drill",    HandleDrill,    SEC_GAMEMASTER, Console::No },
+            { "bots",     HandleBots,     SEC_GAMEMASTER, Console::No },     // [all]
+        };
+        static ChatCommandTable commandTable =
+        {
+            { "mech", mechTable },
+        };
+        return commandTable;
+    }
+
+    static bool HandleTest(ChatHandler* handler, Tail args)
+    {
+        Player* gm = handler->GetPlayer();
+        std::vector<std::string_view> const tokens = Acore::Tokenize(args, ' ', false);
+        TestSpec spec;
+        Options opt;
+        uint32 repeat = 1;
+        Milliseconds every(1000);
+        Unit* selected = handler->getSelectedUnit();       // the GM when nothing is selected
+        std::string const parseErr = ParseTest(gm, selected, tokens, opt, spec, repeat, every);
+        if (!parseErr.empty())
+        {
+            handler->SendErrorMessage("{}", parseErr);
+            return false;
+        }
+        RngPtr const rng = MakeRng(opt);
+        // seed= is read here, after ParseTest's bad-value check (STAGE-M3-R-REPORT n-5).
+        if (std::string const bad = opt.Bad(); !bad.empty())
         {
             handler->SendErrorMessage("Bad value for: {}", bad);
             return false;
         }
+        std::string const& s = spec.shape;
 
         Creature* owner = GetOrSummonTestOwner(gm);
         if (!owner)
@@ -792,11 +1344,15 @@ public:
             return false;
         }
 
-        if (spec.atMember && GroupMembers(owner, spec.gm, spec.includeGm).empty())
+        bool const landsOnMembers = spec.atMember || spec.atGroup || spec.anchorMember
+            || spec.to == TestSpec::To::Member || s == "spot";
+        if (landsOnMembers && GroupMembers(owner, spec.gm, spec.includeGm).empty())
         {
-            handler->SendErrorMessage("at=member: {}", kNoMemberMessage);
+            handler->SendErrorMessage("{}", kNoMemberMessage);
             return false;
         }
+        if (s == "bait")    // the bait lands on whoever is farthest from the owner
+            PlaceTestOwner(owner, spec.atGm ? gm->GetPosition() : spec.point);
 
         MarkerAI* ai = dynamic_cast<MarkerAI*>(owner->AI());
         std::vector<uint32> made;
@@ -804,7 +1360,7 @@ public:
         for (uint32 k = 0; k < repeat; ++k)
         {
             TestSpec one = spec;
-            one.tag = k + 1;
+            one.tag = spec.tag + k;
             Milliseconds const delay = every * k;
             if (k == 0 || delay == Milliseconds(0))
             {
@@ -837,15 +1393,179 @@ public:
         handler->PSendSysMessage("Mechanic test {} {:.1f}: registered #{}{}; resolves in {} ms.", s, spec.size, list,
             repeat > 1 ? Acore::StringFormat(" (+{} repeats every {} ms)", repeat - 1, every.count()) : "",
             spec.warn.count());
-        if (spec.atMember || spec.scatter > 0.f)
+        if (spec.atMember || spec.anchorMember || spec.to == TestSpec::To::Member || spec.scatter > 0.f
+            || s == "spot")
             handler->PSendSysMessage("Landing on {} (seed {}; seed= repeats the picks).",
-                spec.atMember ? "random members of your group, picked as each repeat registers" : "scattered points",
-                rng->Seed());
+                spec.scatter > 0.f && !spec.atMember ? "scattered points"
+                    : "group members, picked as each repeat registers", rng->rng.Seed());
+        if (s == "bait")
+            handler->PSendSysMessage("The test owner moved to {}: the bait lands on whoever is farthest from it.",
+                spec.atGm || selected == gm ? "you" : selected->GetName());
         std::string const unused = opt.Unused();
         if (!unused.empty())
             handler->PSendSysMessage("Ignored keys for {}: {}", s, unused);
         if (gm->IsGameMaster())
             handler->PSendSysMessage("Reminder: GMs are never hit; use .gm off to test on yourself.");
+        return true;
+    }
+
+    // `.mech drill <name> [cycles=3] [seed=] [dmg=1] [self=0]`: a boss doc's mechanics, scripted on the selected
+    // creature and the group (MechanicDrill.h). Every step is a `.mech test` line parsed now (with the creature as the
+    // selection) and registered from the test owner's scheduler, so `.mech clear` ends the drill. Damage steps get
+    // `dmg=<n>`; `self=1` lets member picks land on the GM.
+    static bool HandleDrill(ChatHandler* handler, Tail args)
+    {
+        Player* gm = handler->GetPlayer();
+        std::vector<std::string_view> const tokens = Acore::Tokenize(args, ' ', false);
+        std::string names;
+        for (Drill::Def const& d : Drill::All())
+            names += std::string(names.empty() ? "" : "|") + d.name;
+        Drill::Def const* def = tokens.empty() ? nullptr : Drill::Find(tokens[0]);
+        if (!def)
+        {
+            handler->SendErrorMessage("Usage: .mech drill <{}> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0], with "
+                "the creature that plays the boss selected", names);
+            return false;
+        }
+        Options opt;
+        if (!CollectOptions(handler, tokens, 1, opt))
+            return false;
+        uint32 const cycles = static_cast<uint32>(std::clamp<int32>(opt.Int("cycles",
+            static_cast<int32>(def->defaultCycles)), 1, kMaxDrillCycles));
+        int32 const dmg = std::max<int32>(opt.Int("dmg", 1), 0);
+        bool const self = opt.Bool("self", false);
+        RngPtr const rng = MakeRng(opt);
+        std::string const bad = opt.Bad();
+        if (!bad.empty())
+        {
+            handler->SendErrorMessage("Bad value for: {}", bad);
+            return false;
+        }
+        Unit* selected = handler->getSelectedUnit();
+        if (!selected || selected == gm || !selected->IsCreature())
+        {
+            handler->SendErrorMessage("Select the creature that plays the boss (a mob a bot tanks where the drill has "
+                "a frontal or tank exemption)");
+            return false;
+        }
+
+        Creature* owner = GetOrSummonTestOwner(gm);
+        if (!owner)
+        {
+            handler->SendErrorMessage("Could not summon the Mechanic Test Owner ({})", Ids::NPC_MECHANIC_TEST_OWNER);
+            return false;
+        }
+        MarkerAI* ai = dynamic_cast<MarkerAI*>(owner->AI());
+        if (!ai)
+        {
+            handler->SendErrorMessage("The Mechanic Test Owner has no MarkerAI (ScriptName npc_boss_mechanic_marker "
+                "missing), so it cannot schedule a drill");
+            return false;
+        }
+        if (owner == selected)
+        {
+            handler->SendErrorMessage("Select the boss creature, not the Mechanic Test Owner");
+            return false;
+        }
+        if (GroupMembers(owner, gm->GetGUID(), self).empty())
+        {
+            handler->SendErrorMessage("{}", kNoMemberMessage);
+            return false;
+        }
+
+        // Parse every step now: a bad line fails the whole drill before anything registers.
+        struct Planned
+        {
+            uint32 atMs = 0;
+            bool weaken = false;
+            uint8 stacks = 0;
+            TestSpec spec;
+        };
+        std::vector<Planned> planned;
+        for (Drill::Step const& step : def->steps)
+        {
+            std::string line = step.line;
+            std::vector<std::string_view> const head = Acore::Tokenize(line, ' ', false);
+            Planned p;
+            p.atMs = step.atMs;
+            if (!head.empty() && head[0] == "weaken")
+            {
+                Optional<uint32> n = head.size() >= 2 ? Acore::StringTo<uint32>(head[1]) : std::nullopt;
+                if (!n || *n > Ids::WEAKENED_MAX_STACKS)
+                {
+                    handler->SendErrorMessage("Drill {}: bad step '{}'", def->name, step.line);
+                    return false;
+                }
+                p.weaken = true;
+                p.stacks = static_cast<uint8>(*n);
+                p.spec.gm = gm->GetGUID();
+                p.spec.includeGm = self;
+                p.spec.selected = selected->GetGUID();
+                std::optional<std::string_view> const pick = Drill::Value(line, "pick");
+                if (pick && *pick != "nontank" && *pick != "any")
+                {
+                    handler->SendErrorMessage("Drill {}: bad step '{}'", def->name, step.line);
+                    return false;
+                }
+                p.spec.pick = pick && *pick == "nontank" ? TestSpec::Pick::NonTank : TestSpec::Pick::Any;
+                planned.push_back(std::move(p));
+                continue;
+            }
+            if (!head.empty() && Drill::DamageShape(head[0]))
+                line += Acore::StringFormat(" dmg={}", dmg);
+            std::vector<std::string_view> const stepTokens = Acore::Tokenize(line, ' ', false);
+            Options stepOpt;
+            uint32 repeat = 1;
+            Milliseconds every(0);
+            std::string err = ParseTest(gm, selected, stepTokens, stepOpt, p.spec, repeat, every);
+            if (err.empty() && !stepOpt.Unused().empty())
+                err = "unused keys " + stepOpt.Unused();
+            if (!err.empty())
+            {
+                handler->SendErrorMessage("Drill {}: step '{}': {}", def->name, step.line, err);
+                return false;
+            }
+            p.spec.includeGm = self;
+            planned.push_back(std::move(p));
+        }
+
+        if (def->ownerAtCreature)
+            PlaceTestOwner(owner, selected->GetPosition());
+        // In time order, so the test owner's idle clock (ScheduleTest) ends at the last step.
+        for (uint32 c = 0; c < cycles; ++c)
+        {
+            for (Planned const& p : planned)
+            {
+                Milliseconds const delay(static_cast<int64>(c) * def->cycleMs + p.atMs);
+                if (p.weaken)
+                    ai->ScheduleTest(delay, [spec = p.spec, stacks = p.stacks, rng](Creature* testOwner)
+                    {
+                        DrillWeaken(testOwner, spec, stacks, *rng);
+                    });
+                else
+                    ai->ScheduleTest(delay, [spec = p.spec, rng, follow = def->ownerAtCreature](Creature* testOwner)
+                    {
+                        // The Bait's owner stands where the creature stands now, not where it stood at the start:
+                        // the tank drags it (STAGE-M3-R-REPORT m-15).
+                        if (follow)
+                            if (Unit* creature = ObjectAccessor::GetUnit(*testOwner, spec.selected))
+                                if (creature->IsAlive())
+                                    PlaceTestOwner(testOwner, creature->GetPosition());
+                        std::string ignored;
+                        RegisterRepeat(testOwner, spec, *rng, ignored);
+                    });
+            }
+        }
+
+        handler->PSendSysMessage("Mechanic drill {} on {}: {}.", def->name, selected->GetName(), def->summary);
+        handler->PSendSysMessage("{} cycle(s) of {:.1f} s ({} step(s) each), {} damage per hit, seed {}.{} Check "
+            ".mech ledger (by tag) and .mech bots; .mech clear stops it.", cycles, def->cycleMs / 1000.f,
+            planned.size(), dmg, rng->rng.Seed(), def->ownerAtCreature ? " The test owner moved to the creature." : "");
+        std::string const unused = opt.Unused();
+        if (!unused.empty())
+            handler->PSendSysMessage("Ignored keys for drill: {}", unused);
+        if (!gm->IsGameMaster())
+            handler->PSendSysMessage("Reminder: you are not in .gm on, so the drill also targets and hits you.");
         return true;
     }
 
@@ -943,7 +1663,7 @@ public:
             names += std::string(names.empty() ? "" : ",") + Barrage::ShapeName(kind);
         handler->PSendSysMessage("Mechanic barrage: {} shot(s) over {} s, one every {} ms on a random group member, "
             "{} ms warning, shapes {}, {} damage each, seed {}.", shots, secs, every.count(), warn.count(), names,
-            dmg, rng->Seed());
+            dmg, rng->rng.Seed());
         handler->PSendSysMessage("Check .mech ledger (tags 1 circle, 2 donut, 3 cone, 4 line, 5 projectile); "
             ".mech clear stops it.");
         std::string const unused = opt.Unused();
@@ -1008,8 +1728,8 @@ public:
         std::string err;
         for (uint32 k = 0; k < count; ++k)
         {
-            float const ang = rng->Float(0.f, 2.f * Geo::kPi);
-            float const dist = spread * std::sqrt(rng->Float(0.f, 1.f));
+            float const ang = rng->rng.Float(0.f, 2.f * Geo::kPi);
+            float const dist = spread * std::sqrt(rng->rng.Float(0.f, 1.f));
             float const x = centre->GetPositionX() + dist * std::cos(ang);
             float const y = centre->GetPositionY() + dist * std::sin(ang);
             float z = centre->GetPositionZ();
@@ -1030,7 +1750,7 @@ public:
         handler->PSendSysMessage("Mechanic minefield: {} mine(s) r={:.1f} within {:.0f} yd of {}, arm {} ms, grace {} "
             "ms, life {} s, cap group {}, {} damage, seed {}. .mech clear removes them.", made.size(), radius, spread,
             centre == gm ? "you" : centre->GetName(), arm.count(), grace.count(), kMineLife.count() / 1000,
-            spec.capGroup, dmg, rng->Seed());
+            spec.capGroup, dmg, rng->rng.Seed());
         std::string const unused = opt.Unused();
         if (!unused.empty())
             handler->PSendSysMessage("Ignored keys for minefield: {}", unused);
@@ -1196,6 +1916,11 @@ public:
             return false;
         }
         Weakened::SetStacks(target, stacks);
+        // Recorded on the test encounter, so `.mech clear` takes the stacks off again (STAGE-M3-R-REPORT m-14).
+        if (stacks)
+            if (Creature* owner = GetOrSummonTestOwner(handler->GetPlayer()))
+                Registry::GetOrCreate(owner->GetMap()).BeginEncounter(owner->GetGUID()).weakenedPlayers.insert(
+                    target->GetGUID());
         handler->PSendSysMessage("{}: Weakened {} stack(s) (damage done x{:.1f}, threat +{}%).", target->GetName(),
             Weakened::GetStacks(target), WeakenedDamageMultiplier(stacks), WeakenedThreatPct(stacks));
         return true;
