@@ -6,11 +6,14 @@
 //     Hold, FillCrowd), rebuilt when a hazard was added or at kViewRefresh;
 //   * the route search a step after a failed re-route (in Hold, Route.RetryMs apart, one budget unit);
 //   * Watch: a spot failing TargetOk solves (SolveAndApply); else stock follow (a straight line to World::follow) that
-//     fails CheckPath (no start delay) asks TryReroute, else HoldHere with a route pending for the line's end;
+//     fails CheckPath (no start delay) asks TryReroute, else HoldHere with a route pending for the line's end; one
+//     whose end fails TargetOk from its arrival (WP-Q2, Config::watchEndCheck) asks TryReroute, else HoldHere;
 //   * Escape: waypoint advance (kArriveYd + RouteAdvanceOk), arrival, the hard ceilings (release), and on a rebuilt
 //     view the re-check of the rest of the path (+ the end) that re-solves when it fails, unless a clear Fallback
 //     still holds (Solver::FallbackHolds);
-//   * Hold: holdUntil reached -> Watch in the same step; a spot failing TargetOk solves.
+//   * Hold: holdUntil reached -> Watch in the same step; a spot failing TargetOk solves; optionally (Config::roleSlack)
+//     the role-band release back to Watch.
+// Optionally (Config::brainCadence) a bot thinks only every so often, or on the update after a hazard was added.
 // Solves are rate limited per bot (MinSolveIntervalMs) and per update (kMaxSolvesPerMapUpdate); a bot denied a solve
 // tries again on the next update. Movement: our escape (after the start delay) or stock follow, straight lines at run
 // speed; Hold stands still. Not modeled: perception and fallibility, the stuck clock (straight legs never stall),
@@ -71,6 +74,22 @@ namespace BrainModel
         // M4 WP-Q (G2): a Fallback or NoPath that breaks a hard region asks for Solver::RegionRoute on a later step
         // (Route.RetryMs apart, one budget unit), as the brain does.
         bool regionRoute = true;
+        // M4 WP-Q2 (m4-s2 Zone/5): Watch also holds stock motion whose end fails TargetOk from its arrival (the
+        // brain's StepWatch); false = the M4 build, the path check alone.
+        bool watchEndCheck = true;
+        // M4 WP-Q2: the lock's landing test on the melee chase (MechanicBotLock.cpp, ReachMeleeAction): with
+        // World::follow as the melee chase, stock follow does not start while its target's center
+        // (World::chaseTarget) fails PointSafe over the horizon. Off by default: crowd_test's follow is stock follow
+        // round the GM, which the lock does not judge.
+        bool chaseLanding = false;
+        // The brain's role-band release (StepHold, BossMechanics.Bots.RoleSlackMs): a hold that is not a task hold
+        // goes back to Watch once the bot has been away from its stock point (follow) this long. 0 = not modeled
+        // (holds last to holdUntil).
+        Ms roleSlack{ 0 };
+        // The brain cadence: a bot thinks only this long after its last brain step, or on the update after a hazard
+        // was added (the waker's two rules). 0 = every update. The M4 build ran mechanics bots every 200 ms on a
+        // 100 ms map update; LockRules::FastTickDue makes it 100 (WP-Q2).
+        Ms brainCadence{ 0 };
     };
 
     enum class Mode { Watch, Escape, Hold };
@@ -81,6 +100,7 @@ namespace BrainModel
         std::uint32_t crossStart = 0, crossOther = 0, reroutes = 0, motionStops = 0, releases = 0;
         std::uint32_t routes = 0, routesFound = 0, routesGrown = 0, routeLoops = 0;
         std::uint32_t hits = 0, deniedSolves = 0, fallbackKept = 0, regionRoutes = 0, regionRoutesFound = 0;
+        std::uint32_t motionEndStops = 0, roleReleases = 0;
         std::array<std::uint32_t, 5> outcomes{};
         std::int64_t solveUsMax = 0, solveUsTotal = 0, routeUsMax = 0;
         // Per Fallback: pass 1 spent its whole MaxPathChecks budget (a budget stop) or not.
@@ -107,6 +127,8 @@ namespace BrainModel
             fallbackKept += o.fallbackKept;
             regionRoutes += o.regionRoutes;
             regionRoutesFound += o.regionRoutesFound;
+            motionEndStops += o.motionEndStops;
+            roleReleases += o.roleReleases;
             for (std::size_t i = 0; i < outcomes.size(); ++i)
                 outcomes[i] += o.outcomes[i];
             solveUsMax = std::max(solveUsMax, o.solveUsMax);
@@ -141,6 +163,9 @@ namespace BrainModel
         bool regionRoute = false;               // the escape walks a RegionRoute (its end must pass TargetOk)
         Ms regionRouteAskedAt{ 0 }, lastRegionRouteAt{ -100000 };
         std::uint32_t regionRouteGoal = 0;      // the next goal of the last RegionRoute (m-10: one goal per step)
+        Ms outOfRoleSince{ 0 };                 // Hold away from the stock point since (Config::roleSlack)
+        Ms lastBrainAt{ -100000 };              // Config::brainCadence
+        std::uint32_t brainRevision = 0;        // the hazard revision the last brain step saw
         Counters c;
     };
 
@@ -161,6 +186,7 @@ namespace BrainModel
         std::uint32_t revision = 1;             // bump when a hazard is added (every view rebuilds)
         // Stock follow: the point the bot's follow motion runs to; false = it stands.
         std::function<bool(std::size_t, Vec3&)> follow;
+        Vec3 chaseTarget{};                     // Config::chaseLanding: the center of what the chase runs to
         // Diagnostics: every solve with its input, its plan and where it ran (the bot's mode before it, and whether
         // it is the Escape re-check's re-solve).
         enum class SolveAt { Spot, ReCheck, Reroute };
@@ -192,7 +218,14 @@ namespace BrainModel
         {
             std::uint32_t budget = cfg.solvesPerUpdate;
             for (std::size_t i = 0; i < bots.size(); ++i)
+            {
+                Bot& b = bots[i];
+                if (cfg.brainCadence > Ms(0) && now - b.lastBrainAt < cfg.brainCadence && b.brainRevision == revision)
+                    continue;
+                b.lastBrainAt = now;
+                b.brainRevision = revision;
                 Brain(i, now, budget);
+            }
             for (std::size_t i = 0; i < bots.size(); ++i)
                 Move(i, now);
         }
@@ -301,6 +334,7 @@ namespace BrainModel
             b.routePending = false;
             b.regionRoute = false;
             b.moveFrom = now + cfg.params.startDelay;
+            b.outOfRoleSince = Ms(0);
         }
 
         void SolveAndApply(Bot& b, Solver::Input const& in, Ms now)
@@ -328,6 +362,7 @@ namespace BrainModel
             b.plan.arriveAt = now;
             b.plan.holdUntil = until;
             b.mode = Mode::Hold;
+            b.outOfRoleSince = Ms(0);
             ++b.c.motionStops;
         }
 
@@ -366,28 +401,48 @@ namespace BrainModel
             Solver::Input motion = in;
             motion.params.startDelay = Ms(0);
             Solver::PathCheck const pc = Solver::CheckPath(motion, { b.pos, end }, now, false);
-            if (pc.ok)
+            // WP-Q2: the end of the motion passes TargetOk from its arrival as well.
+            std::uint32_t endHit = 0;
+            Ms const arrival = now + Solver::Detail::TravelMs(Dist(b.pos, end), Solver::Detail::Speed(in));
+            bool const endOk = !cfg.watchEndCheck
+                || Solver::TargetOk(in, end, arrival, std::max(arrival, horizonEnd));
+            if (pc.ok && endOk)
                 return;
+            if (!endOk)
+            {
+                Solver::PointSafe(in, end, arrival, std::max(arrival, horizonEnd), &endHit);
+                if (pc.ok)
+                    ++b.c.motionEndStops;
+            }
             // TryReroute
             bool deferred = false;
             float const toGo = Dist(b.pos, end);
             bool const endSafe = Solver::PointSafe(in, end, now, horizonEnd);
-            if (toGo >= 2.f && endSafe)
+            // WP-Q2: an end that fails re-routes toward the bot's role band, while the bot is outside it.
+            bool const bandReroute = !endOk && in.role.present
+                && (Dist(b.pos, in.role.anchor) > in.role.maxYd || Dist(b.pos, in.role.anchor) < in.role.minYd);
+            if (bandReroute || (endOk && toGo >= 2.f && endSafe))
             {
                 if (!CanSolve(b, now, budget))
                     deferred = true;
                 else
                 {
                     Solver::Input r = in;
-                    r.role.present = true;
-                    r.role.anchor = end;
-                    r.role.minYd = 0.f;
-                    r.role.maxYd = 3.f;
+                    bool const toBand = bandReroute;
+                    Vec3 const anchor = toBand ? in.role.anchor : end;
+                    float const away = toBand ? Dist(b.pos, anchor) : toGo;
+                    if (!toBand)
+                    {
+                        r.role.present = true;
+                        r.role.anchor = end;
+                        r.role.minYd = 0.f;
+                        r.role.maxYd = 3.f;
+                    }
                     r.reroute = true;
                     Solver::Plan plan = RunSolve(b, r, now, SolveAt::Reroute);
                     bool const moving = plan.outcome == Solver::Outcome::Move
                         || plan.outcome == Solver::Outcome::GraceMove;
-                    if (moving && Dist(plan.target, end) <= toGo - in.params.rerouteGainYd)
+                    if (moving && Dist(plan.target, anchor) <= away - in.params.rerouteGainYd)
                     {
                         plan.holdUntil = plan.arriveAt;
                         BeginEscape(b, std::move(plan), now);
@@ -397,8 +452,8 @@ namespace BrainModel
                     }
                 }
             }
-            HoldHere(b, now, pc.firstHit, deferred);
-            if (!deferred && cfg.routeEnable && endSafe)
+            HoldHere(b, now, pc.ok ? endHit : pc.firstHit, deferred);
+            if (!pc.ok && !deferred && cfg.routeEnable && endSafe)
             {
                 b.routePending = true;
                 b.routeGoal = end;
@@ -585,8 +640,28 @@ namespace BrainModel
                         b.plan = Solver::Plan();
                         StepWatch(i, in, now, budget, tasks);
                     }
-                    else if (!Solver::TargetOk(in, b.pos, now, horizonEnd) && CanSolve(b, now, budget))
-                        SolveAndApply(b, in, now);
+                    else if (!Solver::TargetOk(in, b.pos, now, horizonEnd))
+                    {
+                        if (CanSolve(b, now, budget))
+                            SolveAndApply(b, in, now);
+                    }
+                    else if (cfg.roleSlack > Ms(0) && TaskHoldUntil(tasks, now) <= now)
+                    {
+                        // StepHold's role-band release: away from the stock point for roleSlack -> Watch.
+                        Vec3 f;
+                        bool const away = follow && follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd;
+                        if (!away)
+                            b.outOfRoleSince = Ms(0);
+                        else if (b.outOfRoleSince == Ms(0))
+                            b.outOfRoleSince = now;
+                        else if (now - b.outOfRoleSince >= cfg.roleSlack)
+                        {
+                            b.plan = Solver::Plan();
+                            b.outOfRoleSince = Ms(0);
+                            b.mode = Mode::Watch;
+                            ++b.c.roleReleases;
+                        }
+                    }
                     break;
             }
         }
@@ -605,7 +680,7 @@ namespace BrainModel
             else if (b.mode == Mode::Watch && follow)
             {
                 Vec3 f;
-                if (follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd)
+                if (follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd && !ChaseRefused(i, now))
                     to = f;
             }
             b.moving = false;
@@ -622,6 +697,16 @@ namespace BrainModel
                 }
             }
             Judge(b, now, end);
+        }
+
+        // Config::chaseLanding: the lock refuses the chase (its target's center is unsafe).
+        bool ChaseRefused(std::size_t i, Ms now) const
+        {
+            if (!cfg.chaseLanding)
+                return false;
+            std::vector<Task> tasks;
+            Solver::Input const in = View(i, now, tasks);
+            return !in.hazards.empty() && !Solver::PointSafe(in, chaseTarget, now, now + in.params.horizon);
         }
 
         // Hits on the exact hitboxes in (now, end]: a plain Zone when it resolves, a projectile while its body covers

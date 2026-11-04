@@ -8,7 +8,9 @@
  * 1. registry revision changed since the bot's view, or a mechanic hidden by fallibility becomes visible
  *    (nextPerceptionAt) -> SetNextCheckDelay(0);
  * 2. mode not Idle and FastTickMs since its last brain step -> SetNextCheckDelay(0). This replaces the 0.5-3 s react
- *    delay playerbots gives bots without a real master while a mechanic matters to the bot;
+ *    delay playerbots gives bots without a real master while a mechanic matters to the bot. The woken bot thinks on
+ *    the next update, so the rule counts that update's gap in (LockRules::FastTickDue, WP-Q2): a 100 ms map update
+ *    otherwise gives a brain step every 200 ms;
  * 3. casting or channelling: leaveBy is refreshed here (view only, no solve, no paths) and a cast or channel that
  *    would end after leaveBy - margin is interrupted (PlayerbotAI::RequestSpellInterrupt, consumed on the next AI
  *    tick), the bot woken, and cast-time spells and item uses locked for kNoCastAfterBreak. A released bot (stuck,
@@ -289,6 +291,9 @@ namespace BossMechanics
 
             // M4: mode clocks and leak detectors, from the state the bot's update left (before the waker acts).
             bool const released = BotBrain::Released(botAI, *st, now);
+            // WP-Q2: the time since the previous sample, the map's update interval, for the fast tick below.
+            Milliseconds const gap = st->clockAt > Milliseconds(0) && now > st->clockAt ? now - st->clockAt
+                : Milliseconds(0);
             TickModeClock(*st, now, released);
             Milliseconds remaining{ 0 };
             Spell const* spell = CurrentCast(bot, remaining);
@@ -331,7 +336,8 @@ namespace BossMechanics
 
             if (revision != st->seenRevision || now >= st->nextPerceptionAt)
                 Wake(botAI, *st);
-            else if (st->mode != MechanicBotMode::Idle && now - st->lastBrainAt >= fastTick)
+            else if (st->mode != MechanicBotMode::Idle
+                && LockRules::FastTickDue((now - st->lastBrainAt).count(), gap.count(), fastTick.count()))
                 Wake(botAI, *st);
         }
 

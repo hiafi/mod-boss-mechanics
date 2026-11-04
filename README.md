@@ -814,7 +814,9 @@ tick, when the contexts are appended to the ten class lists.
 
 Right after each registry tick (full map updates) the waker sets `SetNextCheckDelay(0)` for a bot whose view is behind
 the registry revision, for which a mechanic hidden by fallibility becomes visible, or that is not Idle and has not run
-its brain for `FastTickMs` (bots without a real master otherwise tick every 0.5-3 s). A bot preparing a cast does not
+its brain for `FastTickMs` (bots without a real master otherwise tick every 0.5-3 s). The woken bot thinks on the
+next map update, so the fast-tick rule counts that update's gap in (WP-Q2): on a 100 ms update (the sim, a loaded map)
+it used to wake one update late, a brain step every 200 ms. A bot preparing a cast does not
 run its engine (`PlayerbotAI::UpdateAI` yields only in `SPELL_STATE_PREPARING`; a channel is `SPELL_STATE_CASTING`
 and the brain keeps running through it), so the waker refreshes its `leaveBy` and interrupts a cast or channel that
 would end after `leaveBy - SafetyMarginMs`, unless the bot is released. After a break the lock holds back cast-time
@@ -832,7 +834,14 @@ earlier than the bare margin would allow.
 ### Lock
 
 - **Idle, Watch, released**: nothing is blocked, except: Watch with an unsafe spot whose solve is deferred locks as
-  Escape, and for 500 ms after a cast break cast-time spells and item uses are blocked in every mode.
+  Escape, and for 500 ms after a cast break cast-time spells and item uses are blocked in every mode. M4 WP-Q2, Idle
+  and Watch (not released): a gap closer whose landing fails the bot's hazards over the horizon is refused, since a
+  leap or a charge cannot be stopped once cast (a Heroic Leap at the pull into the boss's warned front cone). Probed
+  at the destination's center and at its reach + 1 yd on the bot's side: Charge, Intercept and the other
+  `CastReachTargetSpellAction`s, the named movers that close in (`LockRules::NamedMoverLanding`), spells with a
+  CHARGE or JUMP effect, the scripted movers that land at the target. The stock melee chase (`reach melee`) gets the
+  same test. Watch itself also stops a stock motion whose end fails TargetOk from its arrival, not only one whose
+  path does (the chase back into alexei's Out of bounds).
 - **Escape**: blocked: every movement action but ours, movement spells, any spell with a cast time or a channel.
   Allowed: instants (heals too), auto-attack and the stock target picks, `set facing`, ours.
 - **Hold**: blocked: every movement action but ours, movement spells, a cast or channel that would end after
@@ -932,7 +941,8 @@ through, casts judged with no spell id (only casts that could run: spells the bo
 on the map; in the open world one whose scope holds the bot's group), pulls ended (a pull pending or running when the
 brain left Idle: playerbots' pull would zero every other action for up to 15 s, so the brain runs its `pull end`),
 and forced leak passes. A fifth, `m4 routes and bands`, counts the region routes (and those found) and the out-of-band
-time (ms; and the part of it inside a task window).
+time (ms; and the part of it inside a task window). A sixth, `m4 landings` (WP-Q2), counts the gap closers and chases
+refused for their landing and the Watch motions stopped for their end.
 `BossMechanics.Bots.ForceLeaks = N` (debug only, never on a live realm) proves the leak detectors fire: the lock lets
 the blocks they can see through (a foreign mover, a cast-time spell or item in Escape or Hold, a look-away turn) until
 each detector has counted N since the counters' last reset, and every leak is logged as `lock leak in ...`. Passes

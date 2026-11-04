@@ -1,11 +1,12 @@
 // Standalone tests for src/MechanicLockRules.h, the pure rules of the bots' lock multiplier (STAGE-M4-HANDOFF §3.5,
 // WP-X; STAGE-M4-L-REPORT §6.3, §10 X1-X3): the scripted-mover table and its conditions, the named movers and the
 // turning self casts, and the look-away cast rule; WP-X2: the waker's cast facing step (X6), the pull requests (X8) and
-// the forced-leak passes (BossMechanics.Bots.ForceLeaks).
+// the forced-leak passes (BossMechanics.Bots.ForceLeaks); WP-Q2: the gap closers' landings and the waker's fast tick.
 // Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicLockRules.h"
+#include <algorithm>
 #include <cstdint>
 #include <set>
 
@@ -196,6 +197,94 @@ namespace
         CHECK(!ForceLeakPasses(LeakKind::None, 0, 1));  // a block no detector sees never passes
         CHECK(!ForceLeakPasses(LeakKind::None, 0, 100));
     }
+
+    // WP-Q2: where each named mover lands (every name in the list has a decision), and which scripted movers land
+    // next to their target.
+    void TestMoverLanding()
+    {
+        CHECK(NamedMoverLanding("heroic leap") == MoverLanding::CurrentTarget);
+        CHECK(NamedMoverLanding("cmbt grappling hook") == MoverLanding::CurrentTarget);
+        CHECK(NamedMoverLanding("heroic leap loose") == MoverLanding::LooseEnemy);
+        for (char const* name : { "cmbt blade rush", "cmbt pack blade rush", "shadowstep", "subt shadowstep",
+                 "arms intervene", "subt death from above" })
+            CHECK(NamedMoverLanding(name) == MoverLanding::CastTarget);
+        // Away from the target: never judged by a landing.
+        for (char const* name : { "blink back", "disengage", "hunter disengage" })
+            CHECK(NamedMoverLanding(name) == MoverLanding::None);
+        // Not movers.
+        for (char const* name : { "", "charge", "reach melee", "heroic leap::x", "frozen orb" })
+            CHECK(NamedMoverLanding(name) == MoverLanding::None);
+        // Every named mover is either a gap closer or one of the three that land away.
+        std::uint32_t away = 0;
+        for (std::string_view const name : kNamedMovers)
+            away += NamedMoverLanding(name) == MoverLanding::None;
+        CHECK(away == 3);
+
+        for (uint32_t id : { 204148u, 51690u, 8676u, 203963u, 204400u })
+            CHECK(ScriptedMoverLandsAtTarget(id));
+        CHECK(!ScriptedMoverLandsAtTarget(48020));     // Demonic Circle: Teleport goes to the circle
+        CHECK(!ScriptedMoverLandsAtTarget(0));
+        // Every scripted mover has a decision: all but the teleport home land at the target.
+        std::uint32_t atTarget = 0;
+        for (ScriptedMover const& mover : kScriptedMovers)
+            atTarget += ScriptedMoverLandsAtTarget(mover.spellId);
+        CHECK(atTarget == kScriptedMovers.size() - 1);
+
+        // The near probe: the destination's reach + kLandingReachYd, never past the bot.
+        CHECK(LandingNearProbeYd(12.f, 1.5f) == 1.5f + kLandingReachYd);
+        CHECK(LandingNearProbeYd(2.f, 1.5f) == 2.f);
+        CHECK(LandingNearProbeYd(0.f, 1.5f) == 0.f);
+    }
+
+    // WP-Q2: the waker's fast tick counts the next update's gap in, so the brain steps every FastTickMs on any map
+    // update interval, not every FastTickMs + one update.
+    void TestFastTickDue()
+    {
+        // The sim (100 ms updates, FastTickMs 100): due right after the step that ran the brain, so the AI runs on
+        // the next update, 100 ms after it. The M4 rule (gap 0) waited one update more: a step every 200 ms.
+        CHECK(FastTickDue(0, 100, 100));
+        CHECK(!FastTickDue(0, 0, 100));
+        CHECK(FastTickDue(100, 0, 100));
+        // Live (10 ms updates): due at 90 ms, the step lands at 100 ms (was 110).
+        CHECK(!FastTickDue(80, 10, 100));
+        CHECK(FastTickDue(90, 10, 100));
+        // A gap longer than FastTickMs counts as FastTickMs (a stall never wakes earlier than every update).
+        CHECK(FastTickDue(0, 2000, 100));
+        CHECK(!FastTickDue(0, -50, 100));                                   // a negative gap is 0
+        // FastTickMs 0: every update.
+        CHECK(FastTickDue(0, 0, 0));
+        // Simulated cadence: brain steps at the updates where the wake from the previous update applies.
+        for (int64_t gap : { 10, 25, 50, 100 })
+        {
+            int64_t lastBrain = 0;
+            int64_t worst = 0;
+            bool woken = true;      // the first update thinks (a registry change woke it)
+            for (int64_t t = gap; t <= 5000; t += gap)
+            {
+                if (woken)
+                {
+                    worst = std::max(worst, t - lastBrain);
+                    lastBrain = t;
+                }
+                woken = FastTickDue(t - lastBrain, gap, 100);
+            }
+            CHECK(worst == std::max<int64_t>(100, gap));
+            // As built (no gap): one update more.
+            lastBrain = 0;
+            int64_t worstOld = 0;
+            woken = true;
+            for (int64_t t = gap; t <= 5000; t += gap)
+            {
+                if (woken)
+                {
+                    worstOld = std::max(worstOld, t - lastBrain);
+                    lastBrain = t;
+                }
+                woken = FastTickDue(t - lastBrain, 0, 100);
+            }
+            CHECK(worstOld == 100 + gap);
+        }
+    }
 }
 
 int main()
@@ -208,5 +297,7 @@ int main()
     TestCastFacingStep();
     TestPullRequests();
     TestForceLeakPasses();
+    TestMoverLanding();
+    TestFastTickDue();
     return Report("lock_rules_test");
 }

@@ -100,6 +100,10 @@ namespace BossMechanics
         uint32 unknownCasts = 0;    // possible casts judged with no known spell id (no cast-time or movement test)
         uint32 pullBlocks = 0;      // X8: `pull` requests refused while an encounter is live (also in lockBlocks)
         uint32 pullsEnded = 0;      // M-3: a pull pending or running when the brain left Idle, ended (`pull end`)
+        // M4 WP-Q2: Idle/Watch gap closers and melee chases refused because they would land in a hazard (also in
+        // lockBlocks), and Watch motions stopped because the spot they end on fails TargetOk (also in motionStops).
+        uint32 landingBlocks = 0;
+        uint32 motionEndStops = 0;
         // BossMechanics.Bots.ForceLeaks: blocked judgements let through (per candidate judged), by the detector each
         // feeds. Many passes of a kind and no leak of that kind over a run point at a blind detector.
         uint32 forcedMoves = 0;

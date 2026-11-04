@@ -136,6 +136,9 @@ namespace BossMechanics
             // M4 WP-Q's counters (STAGE-M4-R-REPORT nit 7): region routes and the out-of-band clocks.
             handler->PSendSysMessage("  m4 routes and bands: region routes {} ({} found), out of band {} ms ({} ms "
                 "with a task)", c.regionRoutes, c.regionRoutesFound, c.msOutOfBand, c.msOutOfBandTask);
+            // WP-Q2: unsafe landings refused (gap closers, the melee chase) and Watch motions stopped for their end.
+            handler->PSendSysMessage("  m4 landings: gap closers and chases refused {}, motions stopped for their end "
+                "{}", c.landingBlocks, c.motionEndStops);
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

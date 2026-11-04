@@ -209,6 +209,62 @@ namespace BossMechanics::LockRules
     {
         return budget != 0 && kind != LeakKind::None && leaksCounted < budget;
     }
+
+    // M4 WP-Q2 (m4-s2 Frontal/1): where a gap closer lands, for the lock's landing test in Idle and Watch. Those modes
+    // let every mover through (Escape, Hold and Freeze block them all), and Watch stops a stock walk once it sees it;
+    // a leap or a charge cannot be stopped once cast, so its landing is judged before it runs.
+    enum class MoverLanding : uint8_t
+    {
+        None,           // not a gap closer: it moves the bot away or elsewhere (Blink, Disengage, a teleport home)
+        CastTarget,     // next to the action's own target (Shadowstep, Blade Rush, Death from Above, Intervene)
+        CurrentTarget,  // next to the bot's current target (plain Actions: Heroic Leap, Grappling Hook)
+        LooseEnemy,     // next to the Prot shell's "prot loose enemy" value ("heroic leap loose")
+    };
+
+    // The landing of a named mover (kNamedMovers); None for any other name.
+    inline MoverLanding NamedMoverLanding(std::string_view name)
+    {
+        if (name == "heroic leap" || name == "cmbt grappling hook")
+            return MoverLanding::CurrentTarget;
+        if (name == "heroic leap loose")
+            return MoverLanding::LooseEnemy;
+        if (name == "cmbt blade rush" || name == "cmbt pack blade rush" || name == "shadowstep"
+            || name == "subt shadowstep" || name == "arms intervene" || name == "subt death from above")
+            return MoverLanding::CastTarget;
+        return MoverLanding::None;     // "blink back", "disengage", "hunter disengage", and every non-mover
+    }
+
+    // A scripted mover (kScriptedMovers) that lands next to its cast target: Death from Above, Killing Spree, Ambush
+    // (from stealth), Grappling Hook, Heroic Leap. Demonic Circle: Teleport goes to the circle, not the target.
+    inline bool ScriptedMoverLandsAtTarget(uint32_t spellId)
+    {
+        return spellId == 204148 || spellId == 51690 || spellId == 8676 || spellId == 203963 || spellId == 204400;
+    }
+
+    // The near probe of the landing test, as a distance from the destination unit's center toward the bot: its reach
+    // plus kLandingReachYd (a charge stops there), never past the bot. The other probe is the center itself (a leap
+    // lands on it). `centerToBotYd` is the 2D distance between them.
+    inline constexpr float kLandingReachYd = 1.0f;
+
+    inline float LandingNearProbeYd(float centerToBotYd, float destCombatReachYd)
+    {
+        float const probe = destCombatReachYd + kLandingReachYd;
+        return probe < centerToBotYd ? probe : centerToBotYd;
+    }
+
+    // M4 WP-Q2: the waker's fast tick (BossMechanics.Bots.FastTickMs). A bot woken in the waker runs its AI on the
+    // map's next update, not this one, so the wake is due once the last brain step will be FastTickMs old by then.
+    // `gapMs` is the time since the waker's previous sample of the bot (the map's update interval; 0 when unknown),
+    // capped at FastTickMs. Without it a map that updates every 100 ms (the sim, a loaded live map) runs a mechanics
+    // bot's brain every 200 ms, not every 100: the wake comes on the update after the one that ran the brain.
+    inline bool FastTickDue(int64_t sinceBrainMs, int64_t gapMs, int64_t fastTickMs)
+    {
+        if (gapMs < 0)
+            gapMs = 0;
+        if (gapMs > fastTickMs)
+            gapMs = fastTickMs;
+        return sinceBrainMs + gapMs >= fastTickMs;
+    }
 }
 
 #endif

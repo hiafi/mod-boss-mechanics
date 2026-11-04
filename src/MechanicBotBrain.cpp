@@ -963,33 +963,44 @@ namespace BossMechanics
         // by a validated path, when that end is safe and the solver finds a clean target closer to it. The bot then
         // holds nothing (holdUntil = arrival): Watch takes the stock motion back, and re-routes again if it still
         // crosses. Returns false when the caller should hold instead (deferred is set when only the solve rate limit
-        // or budget said no).
+        // or budget said no). WP-Q2, `endUnsafe`: the motion's end itself fails; a clean target that closes in on
+        // the bot's role band (round a puddle at the boss's reach) replaces it.
         bool TryReroute(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            ViewCtx& ctx, std::vector<Geo::Vec3> const& motion, bool& deferred)
+            ViewCtx& ctx, std::vector<Geo::Vec3> const& motion, bool& deferred, bool endUnsafe = false)
         {
             deferred = false;
             Solver::Input& in = st.input;
             Geo::Vec3 const end = motion.back();
             float const toGo = Dist2d(in.bot, end);
-            if (toGo < kRerouteMinYd || !Solver::PointSafe(in, end, now, now + in.params.horizon))
+            Solver::RoleBand const role = in.role;
+            // An end that fails: what the motion was after is the bot's role band (a melee's reach of its target),
+            // anywhere in it, so the band anchors the re-route when the bot has one (and is outside it); else the
+            // end does, and must be safe.
+            bool const toBand = endUnsafe && role.present;
+            Geo::Vec3 const anchor = toBand ? role.anchor : end;
+            float const away = toBand ? Dist2d(in.bot, anchor) : toGo;
+            if (toBand ? away <= role.maxYd && away >= role.minYd
+                : toGo < kRerouteMinYd || endUnsafe || !Solver::PointSafe(in, end, now, now + in.params.horizon))
                 return false;
             if (!CanSolve(bot, st, now, cfg))
             {
                 deferred = true;
                 return false;
             }
-            Solver::RoleBand const role = in.role;
-            in.role.present = true;
-            in.role.anchor = end;
-            in.role.minYd = 0.f;
-            in.role.maxYd = kRerouteBandYd;
+            if (!toBand)
+            {
+                in.role.present = true;
+                in.role.anchor = end;
+                in.role.minYd = 0.f;
+                in.role.maxYd = kRerouteBandYd;
+            }
             in.reroute = true;
             Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx);
             in.role = role;
             in.reroute = false;
             bool const moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
-            // The solver offered only targets that close in on the end; its real path end (a navmesh snap) may not.
-            if (!moving || Dist2d(plan.target, end) > toGo - in.params.rerouteGainYd)
+            // The solver offered only targets that close in on the anchor; its real path end (a navmesh snap) may not.
+            if (!moving || Dist2d(plan.target, anchor) > away - in.params.rerouteGainYd)
                 return false;
             plan.holdUntil = plan.arriveAt;
             BeginEscape(st, std::move(plan), now);
@@ -1258,14 +1269,33 @@ namespace BossMechanics
             if (RemainingSpline(bot, motion))
             {
                 Solver::PathCheck const pc = CheckMotion(in, motion);
-                if (!pc.ok)
+                // WP-Q2 (m4-s2 Zone/5): the spot the motion ends on must pass TargetOk from its arrival as well. The
+                // path check alone let the stock chase walk a melee bot back into a warned zone whose window opens
+                // after the walk ends (alexei's Out of bounds on the group, at the boss); the bot then stood in it,
+                // solved, left, and was walked back in by the next chase.
+                // Judged whatever the path check says, so a path that fails into a failing end re-routes toward the
+                // role band (TryReroute's endUnsafe), not toward that end. A failed check's arriveAt is its start: the
+                // arrival comes from the motion's length.
+                Milliseconds const arrival = now + Solver::Detail::TravelMs(Solver::Detail::PathLength(motion),
+                    Solver::Detail::Speed(in));
+                Milliseconds const endTo = std::max(arrival, horizonEnd);
+                uint32 endHit = 0;
+                bool const endOk = Solver::TargetOk(in, motion.back(), arrival, endTo);
+                if (!endOk)
+                {
+                    Solver::PointSafe(in, motion.back(), arrival, endTo, &endHit);
+                    if (pc.ok)
+                        ++st.counters.motionEndStops;
+                }
+                if (!pc.ok || !endOk)
                 {
                     bool deferred = false;
-                    if (TryReroute(reg, bot, st, now, cfg, ctx, motion, deferred))
+                    if (TryReroute(reg, bot, st, now, cfg, ctx, motion, deferred, !endOk))
                         return;
-                    HoldHere(st, now, cfg, pc.firstHit, deferred);
-                    // M3 §3.8: the greedy hop found nothing; a route search runs on a later brain step.
-                    if (!deferred && cfg.routeEnable
+                    HoldHere(st, now, cfg, pc.ok ? endHit : pc.firstHit, deferred);
+                    // M3 §3.8: the greedy hop found nothing; a route search runs on a later brain step (not for an
+                    // end that fails: a route there ends on the same spot).
+                    if (!pc.ok && !deferred && cfg.routeEnable
                         && Solver::PointSafe(in, motion.back(), now, now + in.params.horizon))
                     {
                         st.routePending = true;

@@ -2,13 +2,15 @@
 // host with the brain model (tests/brain_model.h) and the view's rules for the player kinds, in the dpssim mechanics
 // layout (SimMechanicsScenario: the boss on the origin, the tank 3 yd in front, the others on an arc at 12 yd, the
 // healer at 18 yd, towards the anchor at 180 degrees). Each scenario runs with the fix off and on: off reproduces the
-// sweep's failure, on clears it. STAGE-M4-Q-REPORT has the numbers.
+// sweep's failure, on clears it. STAGE-M4-Q-REPORT has the numbers. WP-Q2 (STAGE-M4-Q2-REPORT): the m4-s2 Zone/5
+// chase back into alexei's Out of bounds, and the geometry of the lock's landing test (m4-s2 Frontal/1).
 // Build: tests/run.sh. `fight_test bench` prints the lane-set Fallback cost only.
 
 #include "check.h"
 #include "brain_model.h"
 #include "MechanicAssign.h"
 #include "MechanicJudge.h"
+#include "MechanicLockRules.h"
 #include "MechanicViewRules.h"
 #include <algorithm>
 #include <array>
@@ -606,6 +608,170 @@ namespace
         CHECK(Solver::RegionRoute(none, oracle, rp).outcome == Solver::Outcome::Safe);
     }
 
+    // ---- WP-Q2: alexei's heroic Out of bounds + Hold still, the melee chase (m4-s2 Zone/5) -------------------------
+
+    // After the desks (slot 5) the group stands on a 12 yd ring and the melee chase walks back to the boss. Slot 6
+    // registers Out of bounds (`circle 7 4000 at=group persist=6000`) on the group's centroid, near the boss, and
+    // Hold still (window from the same 4 s): from 4 s - SafetyMarginMs - Freeze.SettleMs (3.45 s) nobody moves, and
+    // whoever stands in the circle then takes all six ticks. `regDelay` is how long the chase ran before slot 6
+    // registers. Returns the bots inside the circle (exact hitbox) at the freeze. `fixed`: the WP-Q2 build (the lock
+    // refuses the chase toward an unsafe landing, Watch checks where a stock motion ends, a brain step every 100 ms);
+    // else the M4 build on a 100 ms map update (path check only, a brain step every 200 ms). The role-band release
+    // (RoleSlackMs 1 s) runs in both.
+    std::uint32_t RunOutOfBoundsChase(Ms regDelay, bool fixed, std::uint32_t* endStops = nullptr,
+        float* deepest = nullptr)
+    {
+        Fight f(false);
+        f.w.cfg.watchEndCheck = fixed;
+        f.w.cfg.chaseLanding = fixed;
+        f.w.cfg.brainCadence = Ms(fixed ? 100 : 200);
+        f.w.cfg.roleSlack = Ms(1000);
+        // On the desks' 12 yd ring round the group, so the centroid (the circle's center) lies near the boss.
+        std::array<float, 5> const bearing{ { 180.f, 36.f, 108.f, 252.f, 324.f } };
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = At(12.f, bearing[i]);
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        Ms const reg = kStart + regDelay;
+        Ms const freezeAt = reg + Ms(4000 - 300 - 250);
+        Vec3 center{};
+        std::uint32_t inside = 0;
+        f.Run(kStart, freezeAt + f.w.cfg.step, nullptr, [&](Ms now)
+        {
+            // Registered after the bots' update, as Registry::Tick runs after the players: seen on the next one.
+            if (now == reg)
+            {
+                for (BrainModel::Bot const& b : f.w.bots)
+                {
+                    center.x += b.pos.x / 5.f;
+                    center.y += b.pos.y / 5.f;
+                }
+                Solver::Hazard oob;
+                oob.id = 5;
+                oob.shape = Shape::Circle(7.f);
+                oob.poses = { Pose{ center.x, center.y, 0.f, 0.f } };
+                oob.marginYd = kMargin;
+                oob.timing = Solver::MakeInterval(reg + Ms(4000), reg + Ms(10000));
+                f.w.AddHazard(oob);
+            }
+            if (now < freezeAt && now + f.w.cfg.step >= freezeAt)
+                for (BrainModel::Bot const& b : f.w.bots)
+                    inside += Solver::SignedDistance(Shape::Circle(7.f), Pose{ center.x, center.y, 0.f, 0.f },
+                        b.pos) <= 0.f;
+            // How deep a bot walks back in during the warning, once it has left (its escape out takes 1 s).
+            if (deepest && now >= reg + Ms(1500) && now < freezeAt)
+                for (BrainModel::Bot const& b : f.w.bots)
+                    *deepest = std::min(*deepest, Dist(b.pos, center));
+        });
+        if (endStops)
+            *endStops += f.w.Total().motionEndStops;
+        return inside;
+    }
+
+    void TestOutOfBoundsChase()
+    {
+        // 20 phases of the chase against slot 6's registration: as built, some melee bot is walked back into the
+        // circle by the chase after its role-band release and stands in it when Hold still freezes the group (the
+        // sweep's 6 Zone/5 hits per tank run); with the end check and the 100 ms brain step nobody is inside.
+        std::uint32_t before = 0;
+        std::uint32_t after = 0;
+        std::uint32_t endStops = 0;
+        std::uint32_t phasesBefore = 0;
+        float deepBefore = 100.f;
+        float deepAfter = 100.f;
+        for (int d = 0; d < 2000; d += 100)
+        {
+            std::uint32_t const b = RunOutOfBoundsChase(Ms(d), false, nullptr, &deepBefore);
+            before += b;
+            phasesBefore += b > 0;
+            after += RunOutOfBoundsChase(Ms(d), true, &endStops, &deepAfter);
+        }
+        std::printf("alexei out of bounds + hold still, chase back from the desks, 20 phases: %u bots in the circle "
+            "at the freeze as built (%u phases, the chase walks them back to %.1f yd of its 7 yd), %u with WP-Q2 "
+            "(nearest %.1f yd, %u motions stopped for their end)\n", before, phasesBefore, deepBefore, after, deepAfter,
+            endStops);
+        CHECK(before > 0);
+        CHECK(deepBefore < 7.f);
+        CHECK(after == 0);
+        CHECK(deepAfter >= 7.f + kMargin);
+        CHECK(endStops > 0);
+    }
+
+    // WP-Q2: the melee chase's reach point lies in a lasting puddle on the bot's side of the boss (cookie's Fish Stew,
+    // `circle 4 1500 ... persist=8000`, here 2 yd). The boss's center is clear, so the lock lets the chase start;
+    // Watch sees its end fail and re-routes it round the puddle into reach (endUnsafe), instead of holding it off
+    // the puddle for 8 s. Returns the ms the bot spent within melee reach (3.8 yd) and the hits.
+    std::uint32_t RunChaseRoundPuddle(bool endCheck, std::uint32_t& hits)
+    {
+        Fight f(false);
+        f.w.cfg.watchEndCheck = endCheck;
+        f.w.cfg.chaseLanding = true;
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = i == 2 ? At(12.f, 170.f) : At(30.f, 90.f + 20.f * static_cast<float>(i));
+        f.melee = { { false, false, true, false, false } };
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        Solver::Hazard puddle;
+        puddle.id = 7;
+        puddle.shape = Shape::Circle(2.f);
+        puddle.poses = { Pose{ At(3.5f, 170.f).x, At(3.5f, 170.f).y, 0.f, 0.f } };
+        puddle.marginYd = kMargin;
+        puddle.timing = Solver::MakeInterval(kStart + Ms(500), kStart + Ms(8500));
+        f.w.AddHazard(puddle);
+        std::uint32_t inReach = 0;
+        f.Run(kStart, kStart + Ms(8500), nullptr, [&](Ms)
+        {
+            inReach += Dist(f.w.bots[2].pos, f.boss) <= 3.8f ? 100 : 0;
+        });
+        hits = f.w.bots[2].c.hits;
+        return inReach;
+    }
+
+    void TestChaseRoundPuddle()
+    {
+        std::uint32_t hitsPath = 0;
+        std::uint32_t hitsEnd = 0;
+        std::uint32_t const path = RunChaseRoundPuddle(false, hitsPath);
+        std::uint32_t const end = RunChaseRoundPuddle(true, hitsEnd);
+        std::printf("melee chase into a lasting puddle at the boss's reach, 8 s: in reach %u ms with the path check "
+            "only, %u ms with the end check and its re-route; hits %u / %u\n", path, end, hitsPath, hitsEnd);
+        CHECK(hitsEnd == 0);
+        CHECK(end >= 5000);
+        CHECK(end >= path);
+    }
+
+    // The WP-Q2 landing test's geometry (MechanicBotLock.cpp LandingUnsafe), on smite's first front cone (`frontal 8
+    // 2000 angle=90` at the pull): a leap onto the boss's center, or a charge stopping at its reach + 1 yd on the
+    // bot's side, lands in the warned cone from in front, and not from behind.
+    void TestLandingProbes()
+    {
+        Solver::Input in;
+        in.now = kStart;
+        Solver::Hazard cone;
+        cone.id = 1;
+        cone.shape = Shape::Cone(90.f, 8.f);
+        cone.poses = { Pose{ 0.f, 0.f, 0.f, Geo::DegToRad(180.f) } };   // facing the group (towards -x)
+        cone.marginYd = kMargin;
+        cone.timing = Solver::MakeInstant(kStart + Ms(2000), Ms(500));
+        in.hazards.push_back(cone);
+        Ms const to = kStart + in.params.horizon;
+        float const bossReach = 1.5f;
+        auto probe = [&](Vec3 const& bot)
+        {
+            float const d = Dist(bot, Vec3{});
+            float const k = LockRules::LandingNearProbeYd(d, bossReach) / d;
+            return Vec3{ bot.x * k, bot.y * k, 0.f };
+        };
+        Vec3 const front = At(12.f, 175.f);     // the Arms bot's start, on the group's arc
+        Vec3 const back = At(12.f, 5.f);
+        CHECK(!Solver::PointSafe(in, Vec3{}, kStart, to));              // the center: the cone's apex
+        CHECK(!Solver::PointSafe(in, probe(front), kStart, to));
+        CHECK(Solver::PointSafe(in, probe(back), kStart, to));
+        CHECK(std::fabs(Dist(probe(front), Vec3{}) - (bossReach + LockRules::kLandingReachYd)) < 0.001f);
+        // Never past the bot.
+        CHECK(LockRules::LandingNearProbeYd(1.f, bossReach) == 1.f);
+        // After the cone (and its post-resolve hold and margin) the landing is clear again.
+        CHECK(Solver::PointSafe(in, probe(front), kStart + Ms(3000), to + Ms(3000)));
+    }
+
     // ---- G7: solve cost --------------------------------------------------------------------------------------
 
     void AddLaneSet(Solver::Input& in, Lcg& rng, Ms reg, std::uint32_t& id)
@@ -927,6 +1093,9 @@ int main(int argc, char** argv)
     TestRas();
     TestRegionRoute();
     TestAlexei();
+    TestOutOfBoundsChase();
+    TestChaseRoundPuddle();
+    TestLandingProbes();
     TestG7Exact();
     Bench(true);
     return Report("fight_test");
