@@ -59,6 +59,7 @@ namespace BossMechanics
         uint32 minSolveIntervalMs = 150;                        // BossMechanics.Bots.MinSolveIntervalMs
         uint32 movingAnchorRecheckMs = 250;                     // BossMechanics.Bots.MovingAnchorRecheckMs
         uint32 roleSlackMs = 1000;                              // BossMechanics.Bots.RoleSlackMs
+        uint32 chaseReleaseMs = 3000;                           // BossMechanics.Bots.ChaseReleaseMs (M4 WP-F2)
         float rangedDistanceYd = 22.f;                          // BossMechanics.Bots.RangedDistanceYd
         float facingSlackDeg = 15.f;                            // BossMechanics.Bots.FacingSlackDeg
         bool debug = false;                                     // BossMechanics.Bots.Debug

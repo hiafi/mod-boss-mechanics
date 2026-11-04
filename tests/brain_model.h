@@ -14,6 +14,9 @@
 //   * Hold: holdUntil reached -> Watch in the same step; a spot failing TargetOk solves; optionally (Config::roleSlack)
 //     the role-band release back to Watch.
 // Optionally (Config::brainCadence) a bot thinks only every so often, or on the update after a hazard was added.
+// WP-F2 (STAGE-M4-R2-REPORT M-1, M-2, m-6), with Config::chaseLanding: the lock's melee-ring test on the chase, the
+// chase clock, the recovery role solve, the chase valve (a release to the stock AI), and the blocked band; TryReroute's
+// band re-route only beyond the band (a healer or a too-close bot toward the motion's end).
 // Solves are rate limited per bot (MinSolveIntervalMs) and per update (kMaxSolvesPerMapUpdate); a bot denied a solve
 // tries again on the next update. Movement: our escape (after the start delay) or stock follow, straight lines at run
 // speed; Hold stands still. Not modeled: perception and fallibility, the stuck clock (straight legs never stall),
@@ -26,6 +29,8 @@
 #ifndef MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 #define MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 
+#include "MechanicLanding.h"
+#include "MechanicLockRules.h"
 #include "MechanicRoute.h"
 #include <algorithm>
 #include <array>
@@ -78,10 +83,24 @@ namespace BrainModel
         // brain's StepWatch); false = the M4 build, the path check alone.
         bool watchEndCheck = true;
         // M4 WP-Q2: the lock's landing test on the melee chase (MechanicBotLock.cpp, ReachMeleeAction): with
-        // World::follow as the melee chase, stock follow does not start while its target's center
-        // (World::chaseTarget) fails PointSafe over the horizon. Off by default: crowd_test's follow is stock follow
-        // round the GM, which the lock does not judge.
+        // World::follow as the melee chase, stock follow does not start while its landing fails over the horizon.
+        // Off by default: crowd_test's follow is stock follow round the GM, which the lock does not judge.
         bool chaseLanding = false;
+        // WP-F2 (STAGE-M4-R2-REPORT M-1): with chaseLanding, the chase is refused only while no point of the melee
+        // ring (Landing::RingSafe, radius the bot's role band maxYd round World::chaseTarget) is safe, or the band is
+        // blocked (m-6); false = the WP-Q2 build, the target's center alone (PointSafe).
+        bool chaseRing = true;
+        // WP-F2 (M-1 fix 3): a refused chase gets a role solve toward the band (kChaseSolveEvery, kChaseSolveBackoff).
+        bool chaseRecovery = true;
+        // WP-F2 (M-1 fix 4): the chase valve, BossMechanics.Bots.ChaseReleaseMs (a tank half of it; 0 = off), only
+        // while a ring point stays clear for LockRules::ChaseValveWindowMs (chaseValveWindow; false = the plain valve).
+        Ms chaseRelease{ 3000 };
+        bool chaseValveWindow = true;
+        // WP-F2 (M-2): an unsafe end re-routes toward the role band only beyond its maxYd (and never for a healer);
+        // false = the WP-Q2 build, outside the band either way.
+        bool bandRerouteBeyondOnly = true;
+        // WP-F2 (m-6): a failed band re-route blocks the band until the hazard ends (BlockBand); false = WP-Q2.
+        bool bandBlock = true;
         // The brain's role-band release (StepHold, BossMechanics.Bots.RoleSlackMs): a hold that is not a task hold
         // goes back to Watch once the bot has been away from its stock point (follow) this long. 0 = not modeled
         // (holds last to holdUntil).
@@ -101,6 +120,7 @@ namespace BrainModel
         std::uint32_t routes = 0, routesFound = 0, routesGrown = 0, routeLoops = 0;
         std::uint32_t hits = 0, deniedSolves = 0, fallbackKept = 0, regionRoutes = 0, regionRoutesFound = 0;
         std::uint32_t motionEndStops = 0, roleReleases = 0;
+        std::uint32_t msChaseRefused = 0, chaseReleases = 0, chaseSolves = 0, landingBlocks = 0;
         std::array<std::uint32_t, 5> outcomes{};
         std::int64_t solveUsMax = 0, solveUsTotal = 0, routeUsMax = 0;
         // Per Fallback: pass 1 spent its whole MaxPathChecks budget (a budget stop) or not.
@@ -129,6 +149,10 @@ namespace BrainModel
             regionRoutesFound += o.regionRoutesFound;
             motionEndStops += o.motionEndStops;
             roleReleases += o.roleReleases;
+            msChaseRefused += o.msChaseRefused;
+            chaseReleases += o.chaseReleases;
+            chaseSolves += o.chaseSolves;
+            landingBlocks += o.landingBlocks;
             for (std::size_t i = 0; i < outcomes.size(); ++i)
                 outcomes[i] += o.outcomes[i];
             solveUsMax = std::max(solveUsMax, o.solveUsMax);
@@ -166,6 +190,12 @@ namespace BrainModel
         Ms outOfRoleSince{ 0 };                 // Hold away from the stock point since (Config::roleSlack)
         Ms lastBrainAt{ -100000 };              // Config::brainCadence
         std::uint32_t brainRevision = 0;        // the hazard revision the last brain step saw
+        // WP-F2: the chase clock, the recovery solve's clock, the blocked band, the valve's release.
+        LockRules::ChaseClock chase;
+        Ms lastChaseSolveAt{ -100000 }, nextChaseSolveAt{ 0 }, bandBlockedUntil{ 0 };
+        std::uint32_t bandBlockedBy = 0;
+        bool releaseForChase = false;
+        bool followMoved = false;               // stock follow moved the bot in the last step (a spline in flight)
         Counters c;
     };
 
@@ -187,6 +217,9 @@ namespace BrainModel
         // Stock follow: the point the bot's follow motion runs to; false = it stands.
         std::function<bool(std::size_t, Vec3&)> follow;
         Vec3 chaseTarget{};                     // Config::chaseLanding: the center of what the chase runs to
+        // WP-F2: bots that are healers (TryReroute's patient anchor) and tanks (the valve at half the time).
+        std::function<bool(std::size_t)> isHealer;
+        std::function<bool(std::size_t)> isTank;
         // Diagnostics: every solve with its input, its plan and where it ran (the bot's mode before it, and whether
         // it is the Escape re-check's re-solve).
         enum class SolveAt { Spot, ReCheck, Reroute };
@@ -366,20 +399,96 @@ namespace BrainModel
             ++b.c.motionStops;
         }
 
+        static bool OutOfMeleeBand(Solver::Input const& in, Vec3 const& pos)
+        {
+            return in.role.present && in.role.minYd <= 0.f && Dist(pos, in.role.anchor) > in.role.maxYd;
+        }
+
+        std::int64_t ChaseStale() const
+        {
+            return LockRules::ChaseRunStaleMs(static_cast<std::uint32_t>(cfg.params.holdCap.count()));
+        }
+
+        std::int64_t ChaseReleaseFor(std::size_t i) const
+        {
+            return LockRules::ChaseReleaseMsFor(static_cast<std::uint32_t>(cfg.chaseRelease.count()),
+                isTank && isTank(i));
+        }
+
+        // The brain's BlockBand (m-6).
+        void BlockBand(Bot& b, Ms now, std::uint32_t hazardId)
+        {
+            Ms until = now + cfg.params.holdCap;
+            for (Solver::Hazard const& h : hazards)
+                if (h.id == hazardId && h.timing.to < Solver::kForever)
+                    until = std::max(until, h.timing.to + cfg.params.marginMs);
+            b.bandBlockedUntil = until;
+            b.bandBlockedBy = hazardId;
+        }
+
+        // The brain's StepChaseValve: released to the stock AI for the release time.
+        bool ChaseValve(std::size_t i, Solver::Input const& in, Ms now)
+        {
+            Bot& b = bots[i];
+            if (cfg.chaseRelease <= Ms(0) || !OutOfMeleeBand(in, b.pos))
+                return false;
+            std::int64_t const release = ChaseReleaseFor(i);
+            if (!LockRules::ChaseValveDue(b.chase, now.count(), release, ChaseStale())
+                || (cfg.chaseValveWindow && !Landing::RingSafe(in, chaseTarget, b.pos, in.role.maxYd, now,
+                    now + Ms(LockRules::ChaseValveWindowMs(release)))))
+                return false;
+            LockRules::ChaseInReach(b.chase);
+            b.bandBlockedUntil = Ms(0);
+            b.bandBlockedBy = 0;
+            ++b.c.chaseReleases;
+            ++b.c.releases;
+            b.mode = Mode::Watch;
+            b.plan = Solver::Plan();
+            b.routePending = false;
+            b.releaseUntil = now + Ms(release);
+            b.releaseForChase = true;
+            return true;
+        }
+
+        // The brain's StepChaseRecovery: a role solve toward the band while the chase is refused.
+        bool ChaseRecovery(Bot& b, Solver::Input const& in, Ms now, std::uint32_t& budget)
+        {
+            if (!cfg.chaseRecovery || !LockRules::ChaseRefusedNow(b.chase, now.count()) || !OutOfMeleeBand(in, b.pos)
+                || now < b.nextChaseSolveAt || now - b.lastChaseSolveAt < Ms(500))
+                return false;
+            if (!CanSolve(b, now, budget))
+                return false;
+            b.lastChaseSolveAt = now;
+            ++b.c.chaseSolves;
+            float const away = Dist(b.pos, in.role.anchor);
+            Solver::Input r = in;
+            r.roleSolve = true;
+            Solver::Plan plan = RunSolve(b, r, now);
+            bool const moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
+            if (!moving || Dist(plan.target, in.role.anchor) > away - in.params.rerouteGainYd)
+            {
+                b.nextChaseSolveAt = now + Ms(2000);
+                return false;
+            }
+            BeginEscape(b, std::move(plan), now);
+            return true;
+        }
+
         void StepWatch(std::size_t i, Solver::Input& in, Ms now, std::uint32_t& budget, std::vector<Task> const& tasks)
         {
             Bot& b = bots[i];
             Ms const horizonEnd = now + in.params.horizon;
+            bool const released = now < b.releaseUntil;
             if (!Solver::TargetOk(in, b.pos, now, horizonEnd))
             {
                 b.mode = Mode::Watch;
-                if (now < b.releaseUntil)
+                if (released)
                     return;
                 if (CanSolve(b, now, budget))
                     SolveAndApply(b, in, now);
                 return;
             }
-            if (now >= b.releaseUntil)
+            if (!released)
             {
                 // HoldForTasks
                 Ms const until = TaskHoldUntil(tasks, now);
@@ -395,9 +504,20 @@ namespace BrainModel
                 }
             }
             b.mode = Mode::Watch;
-            Vec3 end;
-            if (!follow || !follow(i, end) || Dist(b.pos, end) <= cfg.followSlackYd)
+            if (!released && ChaseValve(i, in, now))
                 return;
+            if (released && b.releaseForChase)
+                return;
+            Vec3 end;
+            // With the lock on the chase, a motion exists only once the chase started (the lock judges it before it
+            // runs; the brain sees the spline on its next step); a refused chase has none: the recovery solve.
+            bool const noMotion = cfg.chaseLanding && !b.followMoved;
+            if (noMotion || !follow || !follow(i, end) || Dist(b.pos, end) <= cfg.followSlackYd)
+            {
+                if (!released)
+                    ChaseRecovery(b, in, now, budget);
+                return;
+            }
             Solver::Input motion = in;
             motion.params.startDelay = Ms(0);
             Solver::PathCheck const pc = Solver::CheckPath(motion, { b.pos, end }, now, false);
@@ -407,7 +527,11 @@ namespace BrainModel
             bool const endOk = !cfg.watchEndCheck
                 || Solver::TargetOk(in, end, arrival, std::max(arrival, horizonEnd));
             if (pc.ok && endOk)
+            {
+                if (!released)
+                    ChaseRecovery(b, in, now, budget);
                 return;
+            }
             if (!endOk)
             {
                 Solver::PointSafe(in, end, arrival, std::max(arrival, horizonEnd), &endHit);
@@ -418,10 +542,18 @@ namespace BrainModel
             bool deferred = false;
             float const toGo = Dist(b.pos, end);
             bool const endSafe = Solver::PointSafe(in, end, now, horizonEnd);
-            // WP-Q2: an end that fails re-routes toward the bot's role band, while the bot is outside it.
-            bool const bandReroute = !endOk && in.role.present
-                && (Dist(b.pos, in.role.anchor) > in.role.maxYd || Dist(b.pos, in.role.anchor) < in.role.minYd);
-            if (bandReroute || (endOk && toGo >= 2.f && endSafe))
+            bool const blocked = cfg.bandBlock && !endOk && now < b.bandBlockedUntil && endHit == b.bandBlockedBy;
+            bool const healer = isHealer && isHealer(i);
+            // WP-Q2: an end that fails re-routes toward the bot's role band; WP-F2 (M-2): only beyond its maxYd, never
+            // for a healer; a healer, or a bot inside its band's minYd, toward the motion's end, which then need not be
+            // safe; any other bot holds.
+            float const fromAnchor = in.role.present ? Dist(b.pos, in.role.anchor) : 0.f;
+            bool const bandReroute = !endOk && in.role.present && (cfg.bandRerouteBeyondOnly
+                ? !healer && fromAnchor > in.role.maxYd : fromAnchor > in.role.maxYd || fromAnchor < in.role.minYd);
+            bool const tooClose = in.role.present && fromAnchor < in.role.minYd;
+            bool const endReroute = toGo >= 2.f
+                && (endOk ? endSafe : cfg.bandRerouteBeyondOnly && (healer || tooClose));
+            if (!blocked && (bandReroute || endReroute))
             {
                 if (!CanSolve(b, now, budget))
                     deferred = true;
@@ -453,6 +585,12 @@ namespace BrainModel
                 }
             }
             HoldHere(b, now, pc.ok ? endHit : pc.firstHit, deferred);
+            if (!endOk && !deferred && cfg.bandBlock && OutOfMeleeBand(in, b.pos))
+            {
+                if (!blocked)
+                    BlockBand(b, now, endHit);
+                LockRules::NoteChaseRefusal(b.chase, now.count(), ChaseStale());
+            }
             if (!pc.ok && !deferred && cfg.routeEnable && endSafe)
             {
                 b.routePending = true;
@@ -511,6 +649,7 @@ namespace BrainModel
                 b.mode = Mode::Watch;
                 b.plan = Solver::Plan();
                 b.releaseUntil = now + Ms(1500);
+                b.releaseForChase = false;
                 ++b.c.releases;
                 return;
             }
@@ -574,6 +713,13 @@ namespace BrainModel
                 return;
             }
             Ms const horizonEnd = now + in.params.horizon;
+            // WP-F2: in reach (or no melee band) ends a run of chase refusals and a blocked band.
+            if (!OutOfMeleeBand(in, b.pos))
+            {
+                LockRules::ChaseInReach(b.chase);
+                b.bandBlockedUntil = Ms(0);
+                b.bandBlockedBy = 0;
+            }
             if (b.routePending && now > b.routeAskedAt)
             {
                 b.routePending = false;
@@ -645,11 +791,17 @@ namespace BrainModel
                         if (CanSolve(b, now, budget))
                             SolveAndApply(b, in, now);
                     }
+                    else if (TaskHoldUntil(tasks, now) <= now && now < b.bandBlockedUntil && ChaseValve(i, in, now))
+                    {
+                        // StepHold: the chase valve also ends a hold on a blocked band.
+                    }
                     else if (cfg.roleSlack > Ms(0) && TaskHoldUntil(tasks, now) <= now)
                     {
-                        // StepHold's role-band release: away from the stock point for roleSlack -> Watch.
+                        // StepHold's role-band release: away from the stock point for roleSlack -> Watch; none while
+                        // the band is blocked (WP-F2 m-6).
                         Vec3 f;
-                        bool const away = follow && follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd;
+                        bool const away = follow && follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd
+                            && now >= b.bandBlockedUntil;
                         if (!away)
                             b.outOfRoleSince = Ms(0);
                         else if (b.outOfRoleSince == Ms(0))
@@ -672,6 +824,7 @@ namespace BrainModel
             Ms const end = now + cfg.step;
             Vec3 to = b.pos;
             Ms from = now;
+            bool followed = false;
             if (b.mode == Mode::Escape)
             {
                 to = b.plan.waypoints.empty() ? b.plan.target : b.plan.waypoints[b.wp];
@@ -680,10 +833,19 @@ namespace BrainModel
             else if (b.mode == Mode::Watch && follow)
             {
                 Vec3 f;
-                if (follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd && !ChaseRefused(i, now))
-                    to = f;
+                if (follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd)
+                {
+                    if (!ChaseRefused(i, now))
+                    {
+                        to = f;
+                        followed = true;
+                    }
+                    else
+                        b.c.msChaseRefused += static_cast<std::uint32_t>(cfg.step.count());
+                }
             }
             b.moving = false;
+            b.followMoved = followed;
             if (end > from)
             {
                 float const d = Dist(b.pos, to);
@@ -699,14 +861,32 @@ namespace BrainModel
             Judge(b, now, end);
         }
 
-        // Config::chaseLanding: the lock refuses the chase (its target's center is unsafe).
-        bool ChaseRefused(std::size_t i, Ms now) const
+        // Config::chaseLanding: the lock refuses the chase (MechanicBotLock.cpp ChaseRefused): no point of the melee
+        // ring is safe, or the band is blocked (chaseRing); the target's center is unsafe (the WP-Q2 build). A released
+        // bot is the stock AI's. A refusal goes on the chase clock.
+        bool ChaseRefused(std::size_t i, Ms now)
         {
-            if (!cfg.chaseLanding)
+            Bot& b = bots[i];
+            if (!cfg.chaseLanding || now < b.releaseUntil)
                 return false;
             std::vector<Task> tasks;
             Solver::Input const in = View(i, now, tasks);
-            return !in.hazards.empty() && !Solver::PointSafe(in, chaseTarget, now, now + in.params.horizon);
+            if (in.hazards.empty())
+                return false;
+            Ms const to = now + in.params.horizon;
+            bool refused = false;
+            if (cfg.chaseRing && in.role.present)
+                refused = (cfg.bandBlock && now < b.bandBlockedUntil)
+                    || !Landing::RingSafe(in, chaseTarget, b.pos, in.role.maxYd, now, to);
+            else
+                refused = !Solver::PointSafe(in, chaseTarget, now, to);
+            if (refused)
+            {
+                ++b.c.landingBlocks;
+                if (cfg.chaseRing)
+                    LockRules::NoteChaseRefusal(b.chase, now.count(), ChaseStale());
+            }
+            return refused;
         }
 
         // Hits on the exact hitboxes in (now, end]: a plain Zone when it resolves, a projectile while its body covers

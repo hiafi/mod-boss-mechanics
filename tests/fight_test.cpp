@@ -3,7 +3,10 @@
 // layout (SimMechanicsScenario: the boss on the origin, the tank 3 yd in front, the others on an arc at 12 yd, the
 // healer at 18 yd, towards the anchor at 180 degrees). Each scenario runs with the fix off and on: off reproduces the
 // sweep's failure, on clears it. STAGE-M4-Q-REPORT has the numbers. WP-Q2 (STAGE-M4-Q2-REPORT): the m4-s2 Zone/5
-// chase back into alexei's Out of bounds, and the geometry of the lock's landing test (m4-s2 Frontal/1).
+// chase back into alexei's Out of bounds, and the geometry of the lock's landing test (m4-s2 Frontal/1). WP-F2
+// (STAGE-M4-R2-REPORT): the lock's landing verdicts, melee bots stranded by the chase refusal (a lasting zone or a mine
+// on a rooted boss's center, a frontal's apex), the chase valve, the Hunter flee and the healer re-route, and the
+// ring hazard's creep.
 // Build: tests/run.sh. `fight_test bench` prints the lane-set Fallback cost only.
 
 #include "check.h"
@@ -77,6 +80,10 @@ namespace
         std::array<bool, 5> melee{ { true, false, false, false, false } };
         bool bands = true;
         Vec3 const boss{ 0.f, 0.f, 0.f };
+        // The melee band's maxYd (BotRole: reach - 0.5) and where the melee chase stops; it starts beyond the band +
+        // 0.5 yd. The sim's defaults; WP-F2's ring tests use a live melee range (5 yd: band 4.5, chase to 4).
+        float meleeYd = 3.8f;
+        float chaseYd = 3.5f;
 
         explicit Fight(bool rangedActor, float rangedYd = 12.f)
         {
@@ -92,12 +99,15 @@ namespace
                     : At(i == 1 ? rangedYd + 6.f : rangedYd, bearing[i]));
                 w.bots.push_back(b);
             }
+            // Bot 0 tanks (the chase valve at half the time), bot 1 heals (re-routes toward its patient).
+            w.isTank = [](std::size_t i) { return i == 0; };
+            w.isHealer = [](std::size_t i) { return i == 1; };
             w.follow = [this](std::size_t i, Vec3& to)
             {
                 float const d = Dist(w.bots[i].pos, boss);
-                if (!melee[i] || d <= 4.3f)
+                if (!melee[i] || d <= meleeYd + 0.5f)
                     return false;
-                float const k = 3.5f / d;
+                float const k = chaseYd / d;
                 to = { w.bots[i].pos.x * k, w.bots[i].pos.y * k, 0.f };
                 return true;
             };
@@ -110,7 +120,7 @@ namespace
             in.role.present = true;
             in.role.anchor = i == 1 ? w.bots[0].pos : boss;
             in.role.minYd = melee[i] ? 0.f : 8.f;
-            in.role.maxYd = melee[i] ? 3.8f : 28.f;
+            in.role.maxYd = melee[i] ? meleeYd : 28.f;
         }
 
         // Another bot's circle as the view places it (ViewRules::PlaceOtherCircle): at its planned spot once it
@@ -619,11 +629,12 @@ namespace
     // else the M4 build on a 100 ms map update (path check only, a brain step every 200 ms). The role-band release
     // (RoleSlackMs 1 s) runs in both.
     std::uint32_t RunOutOfBoundsChase(Ms regDelay, bool fixed, std::uint32_t* endStops = nullptr,
-        float* deepest = nullptr)
+        float* deepest = nullptr, bool valveWindow = true, std::uint32_t* releases = nullptr)
     {
         Fight f(false);
         f.w.cfg.watchEndCheck = fixed;
         f.w.cfg.chaseLanding = fixed;
+        f.w.cfg.chaseValveWindow = valveWindow;
         f.w.cfg.brainCadence = Ms(fixed ? 100 : 200);
         f.w.cfg.roleSlack = Ms(1000);
         // On the desks' 12 yd ring round the group, so the centroid (the circle's center) lies near the boss.
@@ -664,6 +675,8 @@ namespace
         });
         if (endStops)
             *endStops += f.w.Total().motionEndStops;
+        if (releases)
+            *releases += f.w.Total().chaseReleases;
         return inside;
     }
 
@@ -697,9 +710,10 @@ namespace
     }
 
     // WP-Q2: the melee chase's reach point lies in a lasting puddle on the bot's side of the boss (cookie's Fish Stew,
-    // `circle 4 1500 ... persist=8000`, here 2 yd). The boss's center is clear, so the lock lets the chase start;
-    // Watch sees its end fail and re-routes it round the puddle into reach (endUnsafe), instead of holding it off
-    // the puddle for 8 s. Returns the ms the bot spent within melee reach (3.8 yd) and the hits.
+    // `circle 4 1500 ... persist=8000`, here 2 yd). The rest of the melee ring is clear, so the lock lets the chase
+    // start; Watch sees its end fail and re-routes it round the puddle into reach (endUnsafe), instead of holding it
+    // off the puddle for 8 s. Returns the ms the bot spent within melee range (4.3 yd; the band is range - 0.5) and
+    // the hits.
     std::uint32_t RunChaseRoundPuddle(bool endCheck, std::uint32_t& hits)
     {
         Fight f(false);
@@ -719,7 +733,7 @@ namespace
         std::uint32_t inReach = 0;
         f.Run(kStart, kStart + Ms(8500), nullptr, [&](Ms)
         {
-            inReach += Dist(f.w.bots[2].pos, f.boss) <= 3.8f ? 100 : 0;
+            inReach += Dist(f.w.bots[2].pos, f.boss) <= 4.3f ? 100 : 0;
         });
         hits = f.w.bots[2].c.hits;
         return inReach;
@@ -738,9 +752,13 @@ namespace
         CHECK(end >= path);
     }
 
-    // The WP-Q2 landing test's geometry (MechanicBotLock.cpp LandingUnsafe), on smite's first front cone (`frontal 8
-    // 2000 angle=90` at the pull): a leap onto the boss's center, or a charge stopping at its reach + 1 yd on the
-    // bot's side, lands in the warned cone from in front, and not from behind.
+    // The lock's landing verdicts (MechanicLanding.h, the functions MechanicBotLock.cpp calls), on smite's first front
+    // cone (`frontal 8 2000 angle=90` at the pull, apex on the boss's center). STAGE-M4-R2-REPORT m-4: the WP-Q2
+    // test proved the near probe safe from behind while the verdict probed the center first and refused every Charge
+    // from behind; this runs the verdicts themselves. A charge stops at the boss's reach on the bot's side: refused in
+    // front, allowed behind. Heroic Leap lands on the center: refused from anywhere. Shadowstep lands behind the boss
+    // by its facing (here away from the group): allowed even from in front. The melee chase is refused only when no
+    // point of the melee ring is safe: allowed from either side.
     void TestLandingProbes()
     {
         Solver::Input in;
@@ -753,23 +771,363 @@ namespace
         cone.timing = Solver::MakeInstant(kStart + Ms(2000), Ms(500));
         in.hazards.push_back(cone);
         Ms const to = kStart + in.params.horizon;
-        float const bossReach = 1.5f;
-        auto probe = [&](Vec3 const& bot)
-        {
-            float const d = Dist(bot, Vec3{});
-            float const k = LockRules::LandingNearProbeYd(d, bossReach) / d;
-            return Vec3{ bot.x * k, bot.y * k, 0.f };
-        };
+        Landing::Dest boss;
+        boss.combatReachYd = 1.5f;
+        boss.facing = Geo::DegToRad(180.f);
+        using LockRules::LandingSpot;
         Vec3 const front = At(12.f, 175.f);     // the Arms bot's start, on the group's arc
         Vec3 const back = At(12.f, 5.f);
-        CHECK(!Solver::PointSafe(in, Vec3{}, kStart, to));              // the center: the cone's apex
-        CHECK(!Solver::PointSafe(in, probe(front), kStart, to));
-        CHECK(Solver::PointSafe(in, probe(back), kStart, to));
-        CHECK(std::fabs(Dist(probe(front), Vec3{}) - (bossReach + LockRules::kLandingReachYd)) < 0.001f);
-        // Never past the bot.
-        CHECK(LockRules::LandingNearProbeYd(1.f, bossReach) == 1.f);
-        // After the cone (and its post-resolve hold and margin) the landing is clear again.
-        CHECK(Solver::PointSafe(in, probe(front), kStart + Ms(3000), to + Ms(3000)));
+        // The WP-Q2 verdict (center first, then the near probe): it refused the charge from behind as well.
+        auto asBuilt = [&](Vec3 const& bot)
+        {
+            return !Solver::PointSafe(in, boss.center, kStart, to)
+                || Landing::LandingUnsafe(in, LandingSpot::Reach, boss, bot, kStart, to);
+        };
+        CHECK(asBuilt(front));
+        CHECK(asBuilt(back));
+        CHECK(Landing::LandingUnsafe(in, LandingSpot::Reach, boss, front, kStart, to));
+        CHECK(!Landing::LandingUnsafe(in, LandingSpot::Reach, boss, back, kStart, to));
+        CHECK(Landing::LandingUnsafe(in, LandingSpot::Center, boss, front, kStart, to));
+        CHECK(Landing::LandingUnsafe(in, LandingSpot::Center, boss, back, kStart, to));
+        CHECK(Landing::LandingUnsafe(in, LandingSpot::CenterOrReach, boss, back, kStart, to));
+        CHECK(!Landing::LandingUnsafe(in, LandingSpot::Behind, boss, front, kStart, to));
+        CHECK(!Landing::LandingUnsafe(in, LandingSpot::None, boss, front, kStart, to));
+        // Where they stop: the charge at reach + kLandingReachYd on the bot's side, Shadowstep behind the facing.
+        Vec3 const charge = Landing::LandingPoint(LandingSpot::Reach, boss, front);
+        CHECK(std::fabs(Dist(charge, Vec3{}) - (boss.combatReachYd + LockRules::kLandingReachYd)) < 0.001f);
+        CHECK(Dist(charge, front) < Dist(Vec3{}, front));
+        Vec3 const behind = Landing::LandingPoint(LandingSpot::Behind, boss, front);
+        CHECK(behind.x > 2.4f && std::fabs(behind.y) < 0.001f);
+        CHECK(LockRules::LandingNearProbeYd(1.f, boss.combatReachYd) == 1.f);     // never past the bot
+        // The chase: a safe ring point from either side (the first one found is on the bot's side from behind).
+        Vec3 safe{};
+        CHECK(Landing::RingSafe(in, boss.center, front, 4.5f, kStart, to, &safe));
+        CHECK(Landing::RingSafe(in, boss.center, back, 4.5f, kStart, to, &safe));
+        CHECK(std::fabs(Dist(safe, Landing::RingPoint(boss.center, back, 4.5f, 0)) ) < 0.001f);
+        // After the cone (its post-resolve hold and margin) the charge from in front is clear again.
+        CHECK(!Landing::LandingUnsafe(in, LandingSpot::Reach, boss, front, kStart + Ms(3000), to + Ms(3000)));
+        // The ring covers the circle evenly: every point at the radius, none twice.
+        for (std::uint32_t k = 0; k < Landing::kRingPoints; ++k)
+        {
+            Vec3 const p = Landing::RingPoint(boss.center, back, 4.5f, k);
+            CHECK(std::fabs(Dist(p, Vec3{}) - 4.5f) < 0.001f);
+            for (std::uint32_t j = 0; j < k; ++j)
+                CHECK(Dist(p, Landing::RingPoint(boss.center, back, 4.5f, j)) > 1.f);
+        }
+    }
+
+    // ---- WP-F2 (STAGE-M4-R2-REPORT M-1): melee bots and tanks stranded by the chase refusal ------------------------
+
+    struct ReturnRun
+    {
+        Ms firstInReach{ -1 };          // from kStart; -1 = never
+        std::uint32_t msInReach = 0;
+        std::uint32_t hits = 0;
+        float nearest = 1000.f;         // the bot's nearest approach to the boss
+        BrainModel::Counters c;
+    };
+
+    // One melee bot (index 2, or the tank, 0) pushed out to `start` round a rooted boss on the origin, the other
+    // members far away. `asBuilt`: the WP-Q2 lock (the chase refused while the boss's center is unsafe; no recovery
+    // solve, no valve, no blocked band); else WP-F2 with the valve at `releaseMs` (0 = off). A live melee range (band
+    // 4.5 yd, the chase stops at 4).
+    ReturnRun RunReturn(std::vector<Solver::Hazard> const& hz, Vec3 const& start, bool asBuilt, Ms releaseMs,
+        Ms length, bool tank = false)
+    {
+        Fight f(false);
+        std::size_t const me = tank ? 0 : 2;
+        f.melee = { { tank, false, !tank, false, false } };
+        f.meleeYd = 4.5f;
+        f.chaseYd = 4.f;
+        f.w.cfg.chaseLanding = true;
+        f.w.cfg.chaseRing = !asBuilt;
+        f.w.cfg.chaseRecovery = !asBuilt;
+        f.w.cfg.bandBlock = !asBuilt;
+        f.w.cfg.chaseRelease = asBuilt ? Ms(0) : releaseMs;
+        f.w.cfg.roleSlack = Ms(1000);
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = i == me ? start : At(30.f, 90.f + 20.f * static_cast<float>(i));
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        for (Solver::Hazard const& h : hz)
+            f.w.AddHazard(h);
+        ReturnRun r;
+        f.Run(kStart, kStart + length, nullptr, [&](Ms now)
+        {
+            float const d = Dist(f.w.bots[me].pos, f.boss);
+            r.nearest = std::min(r.nearest, d);
+            if (d <= f.meleeYd + 0.5f)     // within melee range (the band is range - 0.5)
+            {
+                r.msInReach += 100;
+                if (r.firstInReach < Ms(0))
+                    r.firstInReach = now + f.w.cfg.step - kStart;
+            }
+        });
+        r.hits = f.w.bots[me].c.hits;
+        r.c = f.w.bots[me].c;
+        return r;
+    }
+
+    // R2 M-1 cases 2-3 and fix 6: a lasting zone over a rooted boss's center (a cookie puddle, a `persist` zone), and
+    // a mine on its center (the dummy and sim minefield lays one there in about half its slices). The melee ring
+    // round the center is clear: the WP-Q2 lock refused the chase for the zone's whole life, WP-F2 lets it through.
+    void TestRingChase()
+    {
+        Solver::Hazard zone;
+        zone.id = 11;
+        zone.shape = Shape::Circle(2.5f);
+        zone.poses = { Pose{} };
+        zone.marginYd = kMargin;
+        zone.timing = Solver::MakeInterval(kStart + Ms(500), kStart + Ms(20000));
+        ReturnRun const zoneBefore = RunReturn({ zone }, At(8.f, 160.f), true, Ms(3000), Ms(12000));
+        ReturnRun const zoneAfter = RunReturn({ zone }, At(8.f, 160.f), false, Ms(3000), Ms(12000));
+
+        Solver::Hazard mine;
+        mine.id = 12;
+        mine.shape = Shape::Circle(3.f);
+        mine.poses = { Pose{} };
+        mine.marginYd = kMargin;
+        mine.timing = Solver::MakeMineArmed(kStart - Ms(5000), Solver::kForever, Ms(500));
+        ReturnRun const mineBefore = RunReturn({ mine }, At(6.f, 200.f), true, Ms(3000), Ms(12000));
+        ReturnRun const mineAfter = RunReturn({ mine }, At(6.f, 200.f), false, Ms(3000), Ms(12000));
+        ReturnRun const mineTank = RunReturn({ mine }, At(6.f, 200.f), false, Ms(3000), Ms(12000), true);
+
+        std::printf("melee back to a rooted boss, 12 s: lasting zone on its center in reach %u ms as built, %u ms "
+            "with the ring test (first at %lld ms, hits %u); mine on its center %u / %u ms (tank %u ms, hits %u/%u)\n",
+            zoneBefore.msInReach, zoneAfter.msInReach, static_cast<long long>(zoneAfter.firstInReach.count()),
+            zoneAfter.hits, mineBefore.msInReach, mineAfter.msInReach, mineTank.msInReach, mineAfter.hits,
+            mineTank.hits);
+        CHECK(zoneBefore.msInReach == 0);
+        CHECK(zoneAfter.firstInReach >= Ms(0) && zoneAfter.firstInReach <= Ms(1500));
+        CHECK(zoneAfter.msInReach >= 10000);
+        CHECK(zoneAfter.hits == 0);
+        CHECK(mineBefore.msInReach == 0);
+        CHECK(mineAfter.firstInReach >= Ms(0) && mineAfter.firstInReach <= Ms(1500));
+        CHECK(mineAfter.msInReach >= 10000);
+        CHECK(mineAfter.hits == 0);
+        CHECK(mineTank.msInReach >= 10000);
+        CHECK(mineTank.hits == 0);
+    }
+
+    // R2 M-1 case 1 and fix 6: smite's front cone (apex on the center, resolving at 2 s) with a melee bot behind the
+    // boss. The WP-Q2 lock refused the chase (and every Charge) until the cone was over; the back of the ring is clear.
+    void TestFrontalChase()
+    {
+        Solver::Hazard cone;
+        cone.id = 13;
+        cone.shape = Shape::Cone(90.f, 8.f);
+        cone.poses = { Pose{ 0.f, 0.f, 0.f, Geo::DegToRad(180.f) } };
+        cone.marginYd = kMargin;
+        cone.timing = Solver::MakeInstant(kStart + Ms(2000), Ms(500));
+        ReturnRun const before = RunReturn({ cone }, At(10.f, 10.f), true, Ms(3000), Ms(5000));
+        ReturnRun const after = RunReturn({ cone }, At(10.f, 10.f), false, Ms(3000), Ms(5000));
+        std::printf("melee behind a boss casting its front cone: first in reach at %lld ms as built, %lld ms with the "
+            "ring test (hits %u / %u)\n", static_cast<long long>(before.firstInReach.count()),
+            static_cast<long long>(after.firstInReach.count()), before.hits, after.hits);
+        CHECK(before.firstInReach > Ms(2500));
+        CHECK(after.firstInReach >= Ms(0) && after.firstInReach <= Ms(1500));
+        CHECK(after.hits == 0);
+    }
+
+    // R2 M-1 fixes 3-4: the whole melee ring under a zone. `circle 6 10000`: warned 10 s, so from the pull it fails
+    // every ring point over the horizon. Without the valve the bot only closes to the zone's edge (the recovery
+    // solve) and waits; with it, after ChaseReleaseMs (a tank half of it) it walks in and fights, and leaves in time.
+    // The valve needs the ring clear for the release plus the walk in and out: without that it walks the melee back
+    // into alexei's Out of bounds at its Hold still.
+    void TestChaseValve()
+    {
+        Solver::Hazard zone;
+        zone.id = 14;
+        zone.shape = Shape::Circle(6.f);
+        zone.poses = { Pose{} };
+        zone.marginYd = kMargin;
+        zone.timing = Solver::MakeInterval(kStart + Ms(10000), kStart + Ms(12000));
+        ReturnRun const off = RunReturn({ zone }, At(14.f, 160.f), false, Ms(0), Ms(12500));
+        ReturnRun const on = RunReturn({ zone }, At(14.f, 160.f), false, Ms(3000), Ms(12500));
+        ReturnRun const tank = RunReturn({ zone }, At(14.f, 160.f), false, Ms(3000), Ms(12500), true);
+        std::printf("whole melee ring under a zone warned 10 s: no valve in reach %u ms (nearest %.1f yd, %u recovery "
+            "solves, %u ms refused); valve 3 s in reach %u ms from %lld ms (%u releases, hits %u); tank from %lld ms "
+            "(%u ms, hits %u)\n", off.msInReach, off.nearest, off.c.chaseSolves, off.c.msChaseRefused, on.msInReach,
+            static_cast<long long>(on.firstInReach.count()), on.c.chaseReleases, on.hits,
+            static_cast<long long>(tank.firstInReach.count()), tank.msInReach, tank.hits);
+        CHECK(off.msInReach == 0);
+        CHECK(off.c.chaseReleases == 0);
+        CHECK(off.c.chaseSolves > 0);
+        CHECK(off.nearest < 10.f);                      // the recovery solve closed in on the zone
+        CHECK(off.nearest >= 6.f + kMargin - 0.05f);
+        CHECK(off.c.msChaseRefused > 0);
+        CHECK(off.hits == 0);
+        CHECK(on.c.chaseReleases >= 1);
+        CHECK(on.firstInReach >= Ms(3000) && on.firstInReach <= Ms(5000));
+        CHECK(on.msInReach >= 1000);
+        CHECK(on.hits == 0);
+        CHECK(tank.firstInReach >= Ms(1500) && tank.firstInReach < on.firstInReach);
+        CHECK(tank.hits == 0);
+
+        // alexei's Out of bounds with the plain valve, and with its window.
+        std::uint32_t plain = 0;
+        std::uint32_t windowed = 0;
+        std::uint32_t plainReleases = 0;
+        for (int d = 0; d < 2000; d += 100)
+        {
+            plain += RunOutOfBoundsChase(Ms(d), true, nullptr, nullptr, false, &plainReleases);
+            windowed += RunOutOfBoundsChase(Ms(d), true, nullptr, nullptr, true);
+        }
+        std::printf("alexei out of bounds + hold still, 20 phases: %u bots in the circle with a plain valve (%u "
+            "releases), %u with its window\n", plain, plainReleases, windowed);
+        CHECK(plain > 0);
+        CHECK(windowed == 0);
+    }
+
+    // ---- WP-F2 (STAGE-M4-R2-REPORT M-2): the band re-route of a ranged bot too close to its target -----------------
+
+    // A Hunter 5 yd from the boss (its band is [8, 28]) flees straight out to 12 yd (stock `flee`), and the flee ends
+    // in a lasting puddle. WP-Q2 re-routed an unsafe end toward the band's anchor whenever the bot was outside the
+    // band, so the Hunter walked toward the boss, fled again, and so on into melee range. WP-F2 re-routes it toward
+    // the flee's end. Returns the nearest the Hunter got to the boss after its first flee, and its final distance.
+    void RunHunterFlee(bool fixed, float& nearest, float& last, std::uint32_t& reroutes, std::uint32_t& hits,
+        float& fromPuddle)
+    {
+        Fight f(false);
+        f.melee = { { false, false, false, false, false } };
+        f.w.cfg.bandRerouteBeyondOnly = fixed;
+        f.w.cfg.roleSlack = Ms(1000);
+        std::size_t const me = 3;
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = i == me ? At(5.f, 190.f) : At(30.f, 90.f + 20.f * static_cast<float>(i));
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        f.w.follow = [&f](std::size_t i, Vec3& to)
+        {
+            Vec3 const p = f.w.bots[i].pos;
+            float const d = Dist(p, f.boss);
+            if (i != me || d >= 8.f || d < 0.01f)
+                return false;
+            to = { p.x * 12.f / d, p.y * 12.f / d, 0.f };
+            return true;
+        };
+        Solver::Hazard puddle;
+        puddle.id = 15;
+        puddle.shape = Shape::Circle(2.5f);
+        puddle.poses = { Pose{ At(12.f, 190.f).x, At(12.f, 190.f).y, 0.f, 0.f } };
+        puddle.marginYd = kMargin;
+        puddle.timing = Solver::MakeInterval(kStart + Ms(300), kStart + Ms(15000));
+        f.w.AddHazard(puddle);
+        nearest = 1000.f;
+        f.Run(kStart, kStart + Ms(10000), nullptr, [&](Ms now)
+        {
+            if (now >= kStart + Ms(500))
+                nearest = std::min(nearest, Dist(f.w.bots[me].pos, f.boss));
+        });
+        last = Dist(f.w.bots[me].pos, f.boss);
+        fromPuddle = Dist(f.w.bots[me].pos, At(12.f, 190.f));
+        reroutes = f.w.bots[me].c.reroutes;
+        hits = f.w.bots[me].c.hits;
+    }
+
+    void TestHunterFlee()
+    {
+        float nearBefore = 0.f;
+        float lastBefore = 0.f;
+        float nearAfter = 0.f;
+        float lastAfter = 0.f;
+        std::uint32_t reBefore = 0;
+        std::uint32_t reAfter = 0;
+        std::uint32_t hitsBefore = 0;
+        std::uint32_t hitsAfter = 0;
+        float puddleBefore = 0.f;
+        float puddleAfter = 0.f;
+        RunHunterFlee(false, nearBefore, lastBefore, reBefore, hitsBefore, puddleBefore);
+        RunHunterFlee(true, nearAfter, lastAfter, reAfter, hitsAfter, puddleAfter);
+        std::printf("hunter 5 yd from the boss, flee into a lasting puddle, 10 s: as built nearest %.1f yd, last %.1f "
+            "yd, %u re-routes; WP-F2 nearest %.1f yd, last %.1f yd (%.1f yd from the puddle), %u re-routes (hits %u / "
+            "%u)\n", nearBefore, lastBefore, reBefore, nearAfter, lastAfter, puddleAfter, reAfter, hitsBefore,
+            hitsAfter);
+        CHECK(nearBefore < 4.f);                        // walked toward the boss
+        CHECK(nearAfter >= 4.5f);
+        CHECK(lastAfter >= 8.f);                        // in its band, out of the puddle
+        CHECK(puddleAfter >= 2.5f + kMargin);
+        CHECK(hitsAfter == 0);
+    }
+
+    // R2 M-2, the healer: its band is the tank's, so the WP-Q2 band re-route walked a healer whose way to a patient
+    // ends in a lasting puddle toward the tank. WP-F2 re-routes it toward the patient. The healer 33 yd from the tank
+    // (beyond its band) walks to 6 yd of a patient 20 yd away; the puddle lies on that end. Returns the healer's final
+    // distance to the patient and to the tank.
+    void RunHealerToPatient(bool fixed, float& toPatient, float& toTank, std::uint32_t& hits)
+    {
+        Fight f(false);
+        f.melee = { { false, false, false, false, false } };
+        f.w.cfg.bandRerouteBeyondOnly = fixed;
+        std::size_t const me = 1;
+        Vec3 const patient = At(30.f, 40.f);
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = i == me ? At(30.f, 0.f) : (i == 4 ? patient : (i == 0 ? At(3.f, 180.f)
+                : At(30.f, 200.f + 20.f * static_cast<float>(i))));
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        Vec3 const end{ patient.x + (At(30.f, 0.f).x - patient.x) * 0.3f, patient.y + (At(30.f, 0.f).y - patient.y)
+            * 0.3f, 0.f };
+        f.w.follow = [&f, end](std::size_t i, Vec3& to)
+        {
+            if (i != 1 || Dist(f.w.bots[i].pos, end) < 1.f)
+                return false;
+            to = end;
+            return true;
+        };
+        Solver::Hazard puddle;
+        puddle.id = 17;
+        puddle.shape = Shape::Circle(2.5f);
+        puddle.poses = { Pose{ end.x, end.y, 0.f, 0.f } };
+        puddle.marginYd = kMargin;
+        puddle.timing = Solver::MakeInterval(kStart + Ms(300), kStart + Ms(15000));
+        f.w.AddHazard(puddle);
+        f.Run(kStart, kStart + Ms(6000), nullptr, nullptr);
+        toPatient = Dist(f.w.bots[me].pos, patient);
+        toTank = Dist(f.w.bots[me].pos, f.w.bots[0].pos);
+        hits = f.w.bots[me].c.hits;
+    }
+
+    void TestHealerToPatient()
+    {
+        float patientBefore = 0.f;
+        float tankBefore = 0.f;
+        float patientAfter = 0.f;
+        float tankAfter = 0.f;
+        std::uint32_t hitsBefore = 0;
+        std::uint32_t hitsAfter = 0;
+        RunHealerToPatient(false, patientBefore, tankBefore, hitsBefore);
+        RunHealerToPatient(true, patientAfter, tankAfter, hitsAfter);
+        std::printf("healer to a patient, its way ending in a lasting puddle, 6 s: as built %.1f yd from the patient "
+            "(%.1f from the tank), WP-F2 %.1f yd (%.1f) (hits %u / %u)\n", patientBefore, tankBefore, patientAfter,
+            tankAfter, hitsBefore, hitsAfter);
+        CHECK(patientAfter < patientBefore);
+        CHECK(patientAfter <= 12.f);
+        CHECK(hitsAfter == 0);
+    }
+
+    // ---- WP-F2 (STAGE-M4-R2-REPORT m-6): a ring-shaped hazard over the melee band -------------------------------
+
+    // A lasting donut on the boss (hole 2 yd, outer 7 yd) over the whole melee band, and a melee bot outside it. The
+    // WP-Q2 lock let the chase start (the center is clear); Watch stopped it a brain step later, the hold released
+    // after RoleSlackMs and the next chase crept it in again, a re-route solve per cycle. WP-F2 refuses the chase on
+    // the ring and holds the blocked band: no creep, no churn.
+    void TestRingHazardCreep()
+    {
+        Solver::Hazard donut;
+        donut.id = 16;
+        donut.shape = Shape::Donut(2.f, 7.f);
+        donut.poses = { Pose{} };
+        donut.marginYd = kMargin;
+        donut.timing = Solver::MakeInterval(kStart + Ms(500), kStart + Ms(15000));
+        ReturnRun const before = RunReturn({ donut }, At(9.f, 170.f), true, Ms(0), Ms(8000));
+        // The WP-Q2 build ran the center-only lock; this arm keeps it and adds only the end check's re-route.
+        ReturnRun const after = RunReturn({ donut }, At(9.f, 170.f), false, Ms(0), Ms(8000));
+        std::printf("melee outside a lasting donut over its band, 8 s: as built nearest %.2f yd, %u solves, %u "
+            "motions stopped; WP-F2 nearest %.2f yd, %u solves (%u recovery), %u motions stopped (hits %u / %u)\n",
+            before.nearest, before.c.solves, before.c.motionStops, after.nearest, after.c.solves, after.c.chaseSolves,
+            after.c.motionStops, before.hits, after.hits);
+        CHECK(after.nearest >= 7.f + kMargin - 0.05f);
+        CHECK(after.c.solves < before.c.solves || before.c.solves == 0);
+        CHECK(after.c.motionStops <= 1);
+        CHECK(after.hits == 0);
     }
 
     // ---- G7: solve cost --------------------------------------------------------------------------------------
@@ -1096,6 +1454,12 @@ int main(int argc, char** argv)
     TestOutOfBoundsChase();
     TestChaseRoundPuddle();
     TestLandingProbes();
+    TestRingChase();
+    TestFrontalChase();
+    TestChaseValve();
+    TestHunterFlee();
+    TestHealerToPatient();
+    TestRingHazardCreep();
     TestG7Exact();
     Bench(true);
     return Report("fight_test");

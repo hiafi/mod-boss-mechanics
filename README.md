@@ -814,13 +814,16 @@ tick, when the contexts are appended to the ten class lists.
 
 Right after each registry tick (full map updates) the waker sets `SetNextCheckDelay(0)` for a bot whose view is behind
 the registry revision, for which a mechanic hidden by fallibility becomes visible, or that is not Idle and has not run
-its brain for `FastTickMs` (bots without a real master otherwise tick every 0.5-3 s). The woken bot thinks on the
-next map update, so the fast-tick rule counts that update's gap in (WP-Q2): on a 100 ms update (the sim, a loaded map)
-it used to wake one update late, a brain step every 200 ms. A bot preparing a cast does not
-run its engine (`PlayerbotAI::UpdateAI` yields only in `SPELL_STATE_PREPARING`; a channel is `SPELL_STATE_CASTING`
-and the brain keeps running through it), so the waker refreshes its `leaveBy` and interrupts a cast or channel that
-would end after `leaveBy - SafetyMarginMs`, unless the bot is released. After a break the lock holds back cast-time
-spells and item uses for 500 ms, so the cast is not restarted and broken again.
+its brain for `FastTickMs` (bots without a real master otherwise tick every 0.5-3 s). The woken bot thinks some time
+after the wake, so the fast-tick rule counts that lead in (WP-Q2): on a 100 ms update (the sim, a loaded map) it used
+to wake one update late, a brain step every 200 ms. The lead is measured (WP-F2): the smallest delay seen from a wake
+to the brain step after it, never more than the full-update gap. In the sim that is the step; live a bot also updates
+on the partial updates, one world tick after the wake, and the full-update gap alone woke it up to 1.7x too often on a
+loaded realm. An engaged bot so thinks every `FastTickMs` at the most, up to one full-update gap later. A bot
+preparing a cast does not run its engine (`PlayerbotAI::UpdateAI` yields only in `SPELL_STATE_PREPARING`; a channel is
+`SPELL_STATE_CASTING` and the brain keeps running through it), so the waker refreshes its `leaveBy` and interrupts a
+cast or channel that would end after `leaveBy - SafetyMarginMs`, unless the bot is released. After a break the lock
+holds back cast-time spells and item uses for 500 ms, so the cast is not restarted and broken again.
 
 M3: a frozen bot is never broken for a hazard (it cannot leave). Under look-away, a cast with
 `SPELL_FACING_FLAG_INFRONT` on a target outside the chosen arc is broken when a look-away window opens before it ends:
@@ -837,11 +840,26 @@ earlier than the bare margin would allow.
   Escape, and for 500 ms after a cast break cast-time spells and item uses are blocked in every mode. M4 WP-Q2, Idle
   and Watch (not released): a gap closer whose landing fails the bot's hazards over the horizon is refused, since a
   leap or a charge cannot be stopped once cast (a Heroic Leap at the pull into the boss's warned front cone). Probed
-  at the destination's center and at its reach + 1 yd on the bot's side: Charge, Intercept and the other
-  `CastReachTargetSpellAction`s, the named movers that close in (`LockRules::NamedMoverLanding`), spells with a
-  CHARGE or JUMP effect, the scripted movers that land at the target. The stock melee chase (`reach melee`) gets the
-  same test. Watch itself also stops a stock motion whose end fails TargetOk from its arrival, not only one whose
-  path does (the chase back into alexei's Out of bounds).
+  where it really stops (WP-F2, `MechanicLanding.h`): a charge (Charge, Intercept and the other
+  `CastReachTargetSpellAction`s, a CHARGE effect, Blade Rush, Intervene) at the target's reach + 1 yd on the bot's
+  side; a jump (a JUMP effect, Heroic Leap, Grappling Hook) on its center; Shadowstep and Ambush behind it by its
+  facing; Death from Above and Killing Spree at both the center and the reach. A cast at a position is not judged
+  (its point is the action's own). The spell-id part runs only for a bot in Watch or in combat.
+- **The melee chase** (`reach melee`, WP-F2): refused only while no point of the melee ring round its target (16
+  points at the bot's melee band, its own side first) is safe over the horizon, or while Watch found no way round the
+  hazard the last chase ended in (a blocked band, below). A refused melee bot gets a role solve toward the band every
+  0.5 s (2 s after one that found nothing closer), and its time out of reach goes to `msChaseRefused`. After
+  `ChaseReleaseMs` of refusals out of reach (a tank half of it) the chase valve releases it to the stock AI for as long,
+  so it walks into melee and fights there; only while some ring point stays clear for that time + 2 s, so the valve
+  never walks the melee into a zone about to resolve (alexei's Out of bounds at its Hold still). Tanks follow the same
+  rules: they are exempt from a Frontal only while they are its source's current victim (not at the pull, nor after
+  an aggro loss), and never from a Zone.
+- **Watch** also stops a stock motion whose end fails TargetOk from its arrival, not only one whose path does (the
+  chase back into alexei's Out of bounds). A melee bot or tank beyond its band re-routes toward the band; every other
+  bot (a ranged bot too close to its target, a healer walking to its patient) toward the motion's end, which then
+  need not be safe (WP-F2: the band re-route pulled a Hunter's flee back toward the boss, and a healer toward the
+  tank). No re-route found: the band is blocked until the hazard ends (`HoldCapMs` when endless): the hold keeps the
+  spot past `RoleSlackMs` and Watch holds again without a new solve.
 - **Escape**: blocked: every movement action but ours, movement spells, any spell with a cast time or a channel.
   Allowed: instants (heals too), auto-attack and the stock target picks, `set facing`, ours.
 - **Hold**: blocked: every movement action but ours, movement spells, a cast or channel that would end after
@@ -885,6 +903,7 @@ named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `s
 | `MinSolveIntervalMs` | 150 | per bot, except the first solve after a registry change |
 | `MovingAnchorRecheckMs` | 250 | re-view cadence while a hazard is unit-anchored |
 | `RoleSlackMs` | 1000 | out of the role band this long while holding -> release the hold |
+| `ChaseReleaseMs` | 3000 | chase valve: a melee bot refused its chase this long is released as long (a tank: half) |
 | `RangedDistanceYd` | 22 | ranged and healer band [8, this + 6] (melee: melee range - 0.5) |
 | `FacingSlackDeg` | 15 | turning cones and lines are checked at +-this |
 | `Debug` | 0 | one log line per solve with why it failed, the view self-check (`module.bossmechanics.bots`) |
@@ -942,7 +961,8 @@ on the map; in the open world one whose scope holds the bot's group), pulls ende
 brain left Idle: playerbots' pull would zero every other action for up to 15 s, so the brain runs its `pull end`),
 and forced leak passes. A fifth, `m4 routes and bands`, counts the region routes (and those found) and the out-of-band
 time (ms; and the part of it inside a task window). A sixth, `m4 landings` (WP-Q2), counts the gap closers and chases
-refused for their landing and the Watch motions stopped for their end.
+refused for their landing (per candidate judged), the Watch motions stopped for their end, and (WP-F2) the time out
+of reach with the chase refused (`msChaseRefused`), the chase valve's releases and the recovery solves.
 `BossMechanics.Bots.ForceLeaks = N` (debug only, never on a live realm) proves the leak detectors fire: the lock lets
 the blocks they can see through (a foreign mover, a cast-time spell or item in Escape or Hold, a look-away turn) until
 each detector has counted N since the counters' last reset, and every leak is logged as `lock leak in ...`. Passes

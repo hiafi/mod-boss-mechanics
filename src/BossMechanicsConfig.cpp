@@ -58,6 +58,7 @@ namespace BossMechanics
             b.minSolveIntervalMs = GetClampedU32("BossMechanics.Bots.MinSolveIntervalMs", 150, 0, 5000);
             b.movingAnchorRecheckMs = GetClampedU32("BossMechanics.Bots.MovingAnchorRecheckMs", 250, 50, 5000);
             b.roleSlackMs = GetClampedU32("BossMechanics.Bots.RoleSlackMs", 1000, 0, 60000);
+            b.chaseReleaseMs = GetClampedU32("BossMechanics.Bots.ChaseReleaseMs", 3000, 500, 60000);
             b.rangedDistanceYd = GetClampedFloat("BossMechanics.Bots.RangedDistanceYd", 22.f, 8.f, 40.f);
             b.facingSlackDeg = GetClampedFloat("BossMechanics.Bots.FacingSlackDeg", 15.f, 0.f, 90.f);
             b.debug = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Debug", false);

@@ -4,7 +4,8 @@
  * escapes, holds or freezes lives here.
  *
  * | Mode         | Blocked                                                       | Allowed                           |
- * | Idle, Watch  | nothing (the brain polices foreign motion itself)             | everything                        |
+ * | Idle, Watch  | gap closers landing in a hazard, the chase into an unsafe     | everything else                   |
+ * |              | melee ring (WP-Q2, WP-F2); the brain polices foreign motion   |                                   |
  * | Escape       | every movement action but ours; movement spells; every spell  | instants (heals too), auto-attack |
  * |              | with a cast time or a channel                                 | and target picks, facing, ours    |
  * | Hold         | every movement action but ours; movement spells; a cast-time  | casts that end in time, instants, |
@@ -38,6 +39,13 @@
  * - BossMechanics.Bots.ForceLeaks (debug, 0 = off): the blocks the leak detectors can see are let through until each
  *   detector has counted that many leaks since the counters' reset (forcedMoves, forcedCasts, forcedTurns), to
  *   prove the detectors fire.
+ *
+ * M4, WP-Q2 / WP-F2 (STAGE-M4-Q2-REPORT F1, F2; STAGE-M4-R2-REPORT M-1, m-5): in Idle and Watch a gap closer is
+ * refused when the spot it really stops on fails the bot's hazards over the horizon (MechanicLanding.h: a charge at
+ * the target's reach on the bot's side, a jump on its center, Shadowstep behind it; a position cast is not judged),
+ * and the stock melee chase (`reach melee`) only while no point of the melee ring round its target is safe, or the
+ * brain found no way round the hazard its last end failed on. Refused chases feed the brain's recovery solve and the
+ * chase valve (BossMechanics.Bots.ChaseReleaseMs): a melee bot or tank refused that long is released to the stock AI.
  *
  * Multipliers are per engine, so the strategy registers this in the combat and the non-combat engine alike.
  */

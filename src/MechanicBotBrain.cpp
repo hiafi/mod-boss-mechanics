@@ -21,6 +21,8 @@
 #include "MechanicBotFacing.h"
 #include "MechanicBotRole.h"
 #include "MechanicBotView.h"
+#include "MechanicLanding.h"
+#include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "MechanicRoute.h"
 #include "MotionMaster.h"
@@ -92,6 +94,11 @@ namespace BossMechanics
         constexpr Milliseconds kParkHold{ 500 };
         // Look-away: a new facing goes onto the reservation board when it moved more than this.
         constexpr float kRepublishFacingDeg = 5.f;
+        // WP-F2 (STAGE-M4-R2-REPORT M-1): a melee bot out of reach whose chase the lock refuses gets a role solve
+        // toward the melee band at most this often...
+        constexpr Milliseconds kChaseSolveEvery{ 500 };
+        // ...and after one that found nothing closer, no new one for this long.
+        constexpr Milliseconds kChaseSolveBackoff{ 2000 };
 
         using CostClock = std::chrono::steady_clock;
 
@@ -197,6 +204,13 @@ namespace BossMechanics
         float Dist2d(Geo::Vec3 const& a, Geo::Vec3 const& b)
         {
             return Geo::Dist2d(a.x, a.y, b.x, b.y);
+        }
+
+        // WP-F2: the bot has a melee band (BotRole::RoleBandOf: melee and tanks in combat, [0, reach - 0.5] round the
+        // victim), and is outside it.
+        bool OutOfMeleeBand(Player const* bot, Solver::RoleBand const& role, Geo::Vec3 const& pos)
+        {
+            return bot->IsInCombat() && role.present && role.minYd <= 0.f && Dist2d(pos, role.anchor) > role.maxYd;
         }
 
         bool SameMap(Player const* a, Player const* b)
@@ -722,13 +736,17 @@ namespace BossMechanics
             st.regionRoutePending = false;
             st.regionRouteGoal = 0;
             st.regionRoute = false;
+            LockRules::ChaseInReach(st.chase);
+            st.bandBlockedUntil = Milliseconds(0);
+            st.bandBlockedBy = 0;
         }
 
         // Gives the bot back to the stock AI for `duration` (STAGE-M2-REVIEW M1): mode Watch, no plan, nothing
         // locked, no cast break; an unsafe spot is not solved again until releaseUntil (or, forRoot, until the bot can
-        // move again). Its reservations go (M3): the others plan against where it really stands.
+        // move again). Its reservations go (M3): the others plan against where it really stands. forChase (WP-F2, the
+        // chase valve): Watch does not police its stock motion either, so the chase reaches melee.
         void Release(Registry* reg, Player const* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            bool forRoot, char const* why)
+            bool forRoot, char const* why, Milliseconds duration = kReleaseFor, bool forChase = false)
         {
             st.mode = MechanicBotMode::Watch;
             st.plan = Solver::Plan();
@@ -742,12 +760,13 @@ namespace BossMechanics
             st.regionRoutePending = false;
             st.regionRouteGoal = 0;
             st.regionRoute = false;
-            st.releaseUntil = now + kReleaseFor;
+            st.releaseUntil = now + duration;
             st.releaseForRoot = forRoot;
+            st.releaseForChase = forChase;
             ++st.counters.releases;
             DropBoard(reg, bot, st);
             if (cfg.debug)
-                LOG_INFO(kLog, "Bot {}: escape released ({}) for {} ms", bot->GetName(), why, kReleaseFor.count());
+                LOG_INFO(kLog, "Bot {}: escape released ({}) for {} ms", bot->GetName(), why, duration.count());
         }
 
         // Hold where the bot stands (its foreign motion was unsafe): until the hazard it would have crossed is over,
@@ -963,24 +982,29 @@ namespace BossMechanics
         // by a validated path, when that end is safe and the solver finds a clean target closer to it. The bot then
         // holds nothing (holdUntil = arrival): Watch takes the stock motion back, and re-routes again if it still
         // crosses. Returns false when the caller should hold instead (deferred is set when only the solve rate limit
-        // or budget said no). WP-Q2, `endUnsafe`: the motion's end itself fails; a clean target that closes in on
-        // the bot's role band (round a puddle at the boss's reach) replaces it.
+        // or budget said no).
+        // `endUnsafe` (WP-Q2): the motion's end itself fails. A bot beyond its band (the melee chase round a puddle at
+        // the boss's reach) re-routes toward the band, anywhere in it. WP-F2 (STAGE-M4-R2-REPORT M-2): only beyond
+        // its maxYd, where closer to the anchor is toward the band. A ranged bot too close to its target (a Hunter's
+        // flee ending in a puddle) went toward the boss, and a healer (`healer`, whose band is the tank's) toward the
+        // tank instead of its patient: both re-route toward the motion's end instead, which then need not be safe
+        // (the solver offers safe targets only). Any other unsafe end holds, as before WP-Q2 (an end-anchored
+        // re-route for every bot raised the barrage crowd's hits by half, tests/crowd_test.cpp).
         bool TryReroute(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            ViewCtx& ctx, std::vector<Geo::Vec3> const& motion, bool& deferred, bool endUnsafe = false)
+            ViewCtx& ctx, std::vector<Geo::Vec3> const& motion, bool& deferred, bool endUnsafe, bool healer)
         {
             deferred = false;
             Solver::Input& in = st.input;
             Geo::Vec3 const end = motion.back();
             float const toGo = Dist2d(in.bot, end);
             Solver::RoleBand const role = in.role;
-            // An end that fails: what the motion was after is the bot's role band (a melee's reach of its target),
-            // anywhere in it, so the band anchors the re-route when the bot has one (and is outside it); else the
-            // end does, and must be safe.
-            bool const toBand = endUnsafe && role.present;
+            float const fromAnchor = role.present ? Dist2d(in.bot, role.anchor) : 0.f;
+            bool const toBand = endUnsafe && !healer && role.present && fromAnchor > role.maxYd;
+            bool const toUnsafeEnd = endUnsafe && (healer || (role.present && fromAnchor < role.minYd));
             Geo::Vec3 const anchor = toBand ? role.anchor : end;
-            float const away = toBand ? Dist2d(in.bot, anchor) : toGo;
-            if (toBand ? away <= role.maxYd && away >= role.minYd
-                : toGo < kRerouteMinYd || endUnsafe || !Solver::PointSafe(in, end, now, now + in.params.horizon))
+            float const away = toBand ? fromAnchor : toGo;
+            if (!toBand && (toGo < kRerouteMinYd || (endUnsafe && !toUnsafeEnd)
+                || (!endUnsafe && !Solver::PointSafe(in, end, now, now + in.params.horizon))))
                 return false;
             if (!CanSolve(bot, st, now, cfg))
             {
@@ -1228,6 +1252,73 @@ namespace BossMechanics
             st.reserved = true;
         }
 
+        // WP-F2 (STAGE-M4-R2-REPORT m-6): a motion's end failed on hazard `hazardId` and no re-route was found: until
+        // that hazard ends (+ marginMs; HoldCapMs when it is endless or unknown, as an end that fails only on a player
+        // kind), Hold keeps the spot past the role release, Watch holds again without a new re-route, and the lock
+        // refuses the melee chase. The ring hazard over the melee band no longer creeps the bot in a brain step at a
+        // time, or costs a solve per cycle.
+        void BlockBand(MechanicBotState& st, Milliseconds now, BotConfig const& cfg, uint32 hazardId)
+        {
+            Solver::Input const& in = st.input;
+            Milliseconds until = now + Milliseconds(cfg.holdCapMs);
+            if (Solver::Hazard const* h = FindHazard(in, hazardId))
+                if (h->timing.to < Solver::kForever)
+                    until = std::max(until, h->timing.to + in.params.marginMs);
+            st.bandBlockedUntil = until;
+            st.bandBlockedBy = hazardId;
+        }
+
+        // WP-F2 (R2 M-1 fix 4): the chase valve. A melee bot or tank out of reach whose chase has been refused for
+        // ChaseReleaseMs (a tank half of it; LockRules::ChaseValveDue) goes to the stock AI for that long: the lock
+        // allows everything, Watch does not police its motion, and its spot is not solved, so it walks into melee and
+        // fights there. Only while some point of the melee ring stays clear for the walk in, the release and the walk
+        // out (LockRules::ChaseValveWindowMs): the refusal looked a whole horizon ahead. Once released, the run starts
+        // again.
+        bool StepChaseValve(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
+        {
+            Solver::Input const& in = st.input;
+            if (!OutOfMeleeBand(bot, in.role, in.bot))
+                return false;
+            int64 const release = LockRules::ChaseReleaseMsFor(cfg.chaseReleaseMs, PlayerbotAI::IsTank(bot));
+            if (!LockRules::ChaseValveDue(st.chase, now.count(), release, LockRules::ChaseRunStaleMs(cfg.holdCapMs)))
+                return false;
+            Milliseconds const window(LockRules::ChaseValveWindowMs(release));
+            if (!Landing::RingSafe(in, in.role.anchor, in.bot, in.role.maxYd, now, now + window))
+                return false;
+            LockRules::ChaseInReach(st.chase);
+            st.bandBlockedUntil = Milliseconds(0);
+            st.bandBlockedBy = 0;
+            ++st.counters.chaseReleases;
+            Release(&reg, bot, st, now, cfg, false, "chase valve", Milliseconds(release), true);
+            return true;
+        }
+
+        // WP-F2 (R2 M-1 fix 3): the lock refused the melee chase (no safe point of the melee ring, or the band is
+        // blocked): a role solve now and then, so a safe spot nearer the band is taken instead of standing where the
+        // bot was pushed. Backed off like the healer's sight solve when it finds nothing closer.
+        bool StepChaseRecovery(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
+            ViewCtx& ctx)
+        {
+            Solver::Input& in = st.input;
+            if (!LockRules::ChaseRefusedNow(st.chase, now.count()) || !OutOfMeleeBand(bot, in.role, in.bot)
+                || now < st.nextChaseSolveAt || now - st.lastChaseSolveAt < kChaseSolveEvery)
+                return false;
+            if (!CanSolve(bot, st, now, cfg))
+                return false;
+            st.lastChaseSolveAt = now;
+            ++st.counters.chaseSolves;
+            float const away = Dist2d(in.bot, in.role.anchor);
+            Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true);
+            bool const moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
+            if (!moving || Dist2d(plan.target, in.role.anchor) > away - in.params.rerouteGainYd)
+            {
+                st.nextChaseSolveAt = now + kChaseSolveBackoff;
+                return false;
+            }
+            BeginEscape(st, std::move(plan), now);
+            return true;
+        }
+
         // Idle/Watch (§3.4 step 4): solve when the spot fails TargetOk; hold for live tasks; re-route or hold when
         // only the current motion is unsafe; then the tank and healer tasks.
         void StepWatch(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
@@ -1265,8 +1356,12 @@ namespace BossMechanics
                     return;
                 }
             }
+            bool const released = BotBrain::Released(botAI, st, now);
+            if (!released && StepChaseValve(reg, bot, st, now, cfg))
+                return;
             std::vector<Geo::Vec3> motion;
-            if (RemainingSpline(bot, motion))
+            // The chase valve's release: the stock AI's walk into melee is not policed (the lock allows it too).
+            if (!(released && st.releaseForChase) && RemainingSpline(bot, motion))
             {
                 Solver::PathCheck const pc = CheckMotion(in, motion);
                 // WP-Q2 (m4-s2 Zone/5): the spot the motion ends on must pass TargetOk from its arrival as well. The
@@ -1279,6 +1374,9 @@ namespace BossMechanics
                 Milliseconds const arrival = now + Solver::Detail::TravelMs(Solver::Detail::PathLength(motion),
                     Solver::Detail::Speed(in));
                 Milliseconds const endTo = std::max(arrival, horizonEnd);
+                // endHit: the hazard the end fails on, for the hold's length. 0 when the end fails only on what
+                // PointSafe does not see (a player kind: a region, a carried shape, a due HoldStill): the hold then
+                // runs the full HoldCapMs instead of to a hazard's end (STAGE-M4-R2-REPORT nit 2; acceptable).
                 uint32 endHit = 0;
                 bool const endOk = Solver::TargetOk(in, motion.back(), arrival, endTo);
                 if (!endOk)
@@ -1290,9 +1388,20 @@ namespace BossMechanics
                 if (!pc.ok || !endOk)
                 {
                     bool deferred = false;
-                    if (TryReroute(reg, bot, st, now, cfg, ctx, motion, deferred, !endOk))
+                    // WP-F2 (m-6): the band is blocked by the hazard this end still fails on: hold, no new re-route.
+                    bool const blocked = !endOk && now < st.bandBlockedUntil && endHit == st.bandBlockedBy;
+                    if (!blocked && TryReroute(reg, bot, st, now, cfg, ctx, motion, deferred, !endOk,
+                        PlayerbotAI::IsHeal(bot)))
                         return;
                     HoldHere(st, now, cfg, pc.ok ? endHit : pc.firstHit, deferred);
+                    // A melee bot or tank out of reach whose chase ends in the hazard: the band is blocked, and the
+                    // hold counts toward the chase valve, as a refusal by the lock (other bots have no melee band).
+                    if (!endOk && !deferred && OutOfMeleeBand(bot, in.role, in.bot))
+                    {
+                        if (!blocked)
+                            BlockBand(st, now, cfg, endHit);
+                        LockRules::NoteChaseRefusal(st.chase, now.count(), LockRules::ChaseRunStaleMs(cfg.holdCapMs));
+                    }
                     // M3 §3.8: the greedy hop found nothing; a route search runs on a later brain step (not for an
                     // end that fails: a route there ends on the same spot).
                     if (!pc.ok && !deferred && cfg.routeEnable
@@ -1307,6 +1416,8 @@ namespace BossMechanics
             }
             st.mode = MechanicBotMode::Watch;
             if (StepTankFacing(bot, st, now, cfg))
+                return;
+            if (!released && StepChaseRecovery(reg, bot, st, now, cfg, ctx))
                 return;
             StepHealerSight(reg, bot, st, now, cfg, ctx);
         }
@@ -1486,7 +1597,7 @@ namespace BossMechanics
 
         // M4 WP-Q (G5): the out-of-band clock, sampled once per brain step with the mode the bot is in now (the
         // waker's mode clocks' rule; a gap over 2 s is not counted).
-        void TickBandClock(MechanicBotState& st, Milliseconds now)
+        void TickBandClock(Player const* bot, MechanicBotState& st, Milliseconds now)
         {
             Milliseconds const last = st.bandClockAt;
             st.bandClockAt = now;
@@ -1495,12 +1606,21 @@ namespace BossMechanics
             bool const locked = st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold
                 || st.mode == MechanicBotMode::Freeze;
             Solver::RoleBand const& role = st.input.role;
-            if (!locked || !role.present)
+            if (!role.present)
                 return;
             float const d = Dist2d(st.input.bot, role.anchor);
             if (d >= role.minYd && d <= role.maxYd)
                 return;
             uint32 const ms = static_cast<uint32>((now - last).count());
+            // WP-F2 (R2 m-3): Idle or Watch out of the melee band with the chase refused (not released): what the
+            // lock's chase refusal costs a melee bot, which msOutOfBand does not see.
+            if (!locked)
+            {
+                if (bot && LockRules::ChaseRefusedNow(st.chase, now.count()) && OutOfMeleeBand(bot, role, st.input.bot)
+                    && !(now < st.releaseUntil))
+                    st.counters.msChaseRefused += ms;
+                return;
+            }
             st.counters.msOutOfBand += ms;
             if (TaskHoldUntil(st, now) > now)
                 st.counters.msOutOfBandTask += ms;
@@ -1542,6 +1662,10 @@ namespace BossMechanics
                 st.outOfRoleSince = Milliseconds(0);
                 return;
             }
+            // WP-F2: a hold on a blocked band (m-6) ends early when the chase valve is due.
+            if (now < st.bandBlockedUntil && !BotBrain::Released(botAI, st, now)
+                && StepChaseValve(reg, bot, st, now, cfg))
+                return;
             // Out of the role band for RoleSlackMs: give the spot back to stock movement (Watch polices its path).
             // Solve would only answer Safe here (the spot is safe), so the hold is released instead of re-solved.
             Solver::RoleBand const& role = in.role;
@@ -1551,7 +1675,8 @@ namespace BossMechanics
                 return;
             }
             float const d = Dist2d(in.bot, role.anchor);
-            if (d >= role.minYd && d <= role.maxYd)
+            // WP-F2 (m-6): no release while the band is blocked (Watch would walk the bot a step into it again).
+            if ((d >= role.minYd && d <= role.maxYd) || now < st.bandBlockedUntil)
             {
                 st.outOfRoleSince = Milliseconds(0);
                 return;
@@ -1699,6 +1824,12 @@ namespace BossMechanics
             return;
         st.brainRan = true;
         st.lastBrainAt = now;
+        // WP-F2 (R2 m-2): the delay from the waker's wake to this step, for the fast tick's lead.
+        if (st.wakeAt > Milliseconds(0) && now > st.wakeAt)
+        {
+            st.wakeLeadMs = LockRules::NextWakeLead(st.wakeLeadMs, (now - st.wakeAt).count());
+            st.wakeAt = Milliseconds(0);
+        }
 
         Player* bot = botAI ? botAI->GetBot() : nullptr;
         if (!bot || !bot->IsInWorld() || !bot->GetMap())
@@ -1740,7 +1871,14 @@ namespace BossMechanics
             return;
         }
         in.role = BotRole::RoleBandOf(botAI, bot, cfg);
-        TickBandClock(st, now);
+        TickBandClock(bot, st, now);
+        // WP-F2: in reach of its target (or with no melee band) ends a run of chase refusals and a blocked band.
+        if (!OutOfMeleeBand(bot, in.role, in.bot))
+        {
+            LockRules::ChaseInReach(st.chase);
+            st.bandBlockedUntil = Milliseconds(0);
+            st.bandBlockedBy = 0;
+        }
         BotRole::FillSightReach(bot, cfg, in);
         BotRole::FillPark(bot, *reg, st, cfg, now, in);
         st.tankWarning = HasRole(st, BotTaskRole::Tank, now);

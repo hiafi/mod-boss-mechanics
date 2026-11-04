@@ -3,7 +3,8 @@
 # Pure headers only (src/MechanicGeometry.h, src/MechanicMath.h, src/MechanicSolver.h, src/MechanicFallibility.h,
 # src/BossMechanicsIds.h, src/MechanicAssign.h, src/MechanicRoute.h,
 # src/MechanicViewRules.h, src/MechanicDrill.h, src/MechanicDrillPlan.h, src/MechanicLockRules.h, src/MechanicLeaks.h,
-# src/MechanicCost.h; tests/brain_model.h models the brain's step cycle on them): no server build needed.
+# src/MechanicCost.h, src/MechanicLanding.h; tests/brain_model.h models the brain's step cycle on them): no server
+# build needed.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -26,29 +26,44 @@ namespace BossMechanics::LockRules
     // A spell that moves its caster from a core C++ script, so its spell effects do not show it (the lock's effect
     // test sees CHARGE, LEAP, JUMP and TELEPORT_UNITS only). Hardcoded, not a conf key: the scripts make them movers,
     // so a new one needs a rebuild anyway, and the ids are dbc-tools reserved ranges that do not drift.
+    // M4 WP-F2 (STAGE-M4-R2-REPORT m-5): the spot a gap closer really stops on, for the lock's landing test in Idle
+    // and Watch (MechanicLanding.h LandingPoint). None: it does not land next to its target (a teleport home).
+    enum class LandingSpot : uint8_t
+    {
+        None,
+        Center,         // on the target's center: a jump at the unit (SPELL_EFFECT_JUMP, MoveJump), Heroic Leap
+        Reach,          // at the target's reach on the bot's side: a charge (Spell::EffectCharge's collision point)
+        Behind,         // behind the target, by its facing: Shadowstep, Ambush from stealth
+        CenterOrReach,  // a scripted landing near the target the lock does not model exactly: both probes
+    };
+
     struct ScriptedMover
     {
         uint32_t spellId;
         MoverRule rule;
+        LandingSpot landing;    // where a cast at a unit lands (STAGE-M4-R2-REPORT nit 4: kept with the row)
     };
 
     // tests/lock_rules_test.cpp pins this list: removing a row fails the test.
     inline constexpr std::array<ScriptedMover, 6> kScriptedMovers = { {
-        // Death from Above: the DUMMY hit launches the leap (spell_rogue_subtlety.cpp, Rogue::LaunchDeathFromAbove).
-        { 204148, MoverRule::Always },
+        // Death from Above: the DUMMY hit launches the leap (spell_rogue_subtlety.cpp, Rogue::LaunchDeathFromAbove;
+        // its landing point is RogueMechanics' own pick near the target).
+        { 204148, MoverRule::Always, LandingSpot::CenterOrReach },
         // Killing Spree: 57840 TELEPORT_UNITS on every hit for 2 s (spell_rogue_combat.cpp,
         // spell_rog_killing_spree_rework).
-        { 51690, MoverRule::Always },
+        { 51690, MoverRule::Always, LandingSpot::CenterOrReach },
         // Ambush: from stealth out of melee range, 203726 teleports the rogue behind the target
         // (spell_rogue_shared.cpp, spell_rog_ambush). Only 8676 carries the script; the retired ranks do not, and are
         // not listed.
-        { 8676, MoverRule::StealthOutOfMelee },
-        // Grappling Hook: a MoveJump to the ground point (spell_rogue_combat.cpp; also a named mover).
-        { 203963, MoverRule::Always },
-        // Heroic Leap: a MoveJump to the ground point (spell_warrior_shared.cpp; also a named mover).
-        { 204400, MoverRule::Always },
+        { 8676, MoverRule::StealthOutOfMelee, LandingSpot::Behind },
+        // Grappling Hook: a MoveJump to the ground point, the target's position (spell_rogue_combat.cpp; also a named
+        // mover).
+        { 203963, MoverRule::Always, LandingSpot::Center },
+        // Heroic Leap: a MoveJump to the ground point, the target's position (spell_warrior_shared.cpp; also a named
+        // mover).
+        { 204400, MoverRule::Always, LandingSpot::Center },
         // Demonic Circle: Teleport: NearTeleportTo the circle (spell_warlock.cpp). No rework row casts it today.
-        { 48020, MoverRule::Always },
+        { 48020, MoverRule::Always, LandingSpot::None },
     } };
 
     // The table row of a spell, or nullptr.
@@ -234,16 +249,54 @@ namespace BossMechanics::LockRules
         return MoverLanding::None;     // "blink back", "disengage", "hunter disengage", and every non-mover
     }
 
-    // A scripted mover (kScriptedMovers) that lands next to its cast target: Death from Above, Killing Spree, Ambush
-    // (from stealth), Grappling Hook, Heroic Leap. Demonic Circle: Teleport goes to the circle, not the target.
-    inline bool ScriptedMoverLandsAtTarget(uint32_t spellId)
+    // WP-F2 (m-5): where a named mover that closes in stops. Heroic Leap and Grappling Hook jump onto the target's
+    // position; Blade Rush (203980) and Intervene (3411) are charges; Shadowstep (36554) teleports behind the target;
+    // Death from Above picks its own spot near it.
+    inline LandingSpot NamedMoverSpot(std::string_view name)
     {
-        return spellId == 204148 || spellId == 51690 || spellId == 8676 || spellId == 203963 || spellId == 204400;
+        switch (NamedMoverLanding(name))
+        {
+            case MoverLanding::None:
+                return LandingSpot::None;
+            case MoverLanding::CurrentTarget:
+            case MoverLanding::LooseEnemy:
+                return LandingSpot::Center;
+            case MoverLanding::CastTarget:
+                break;
+        }
+        if (name == "shadowstep" || name == "subt shadowstep")
+            return LandingSpot::Behind;
+        if (name == "subt death from above")
+            return LandingSpot::CenterOrReach;
+        return LandingSpot::Reach;     // Blade Rush, Intervene
     }
 
-    // The near probe of the landing test, as a distance from the destination unit's center toward the bot: its reach
-    // plus kLandingReachYd (a charge stops there), never past the bot. The other probe is the center itself (a leap
-    // lands on it). `centerToBotYd` is the 2D distance between them.
+    // The landing of a scripted mover cast at a unit (its table row); None for an unlisted id or one that lands
+    // elsewhere (Demonic Circle: Teleport goes to the circle, not the target).
+    inline LandingSpot ScriptedMoverSpot(uint32_t spellId)
+    {
+        ScriptedMover const* mover = FindScriptedMover(spellId);
+        return mover ? mover->landing : LandingSpot::None;
+    }
+
+    inline bool ScriptedMoverLandsAtTarget(uint32_t spellId)
+    {
+        return ScriptedMoverSpot(spellId) != LandingSpot::None;
+    }
+
+    // A spell's effects that carry its caster to the cast unit, as the lock reads them (Spell::EffectCharge,
+    // EffectChargeDest, EffectJump, EffectJumpDest): a charge stops at the target's reach on the caster's side, a jump
+    // lands on the target's position. A jump wins over a charge (the center probe is the stricter one only for it).
+    inline LandingSpot SpellEffectSpot(bool charge, bool jump)
+    {
+        if (jump)
+            return LandingSpot::Center;
+        return charge ? LandingSpot::Reach : LandingSpot::None;
+    }
+
+    // The probe of a charge or a Behind landing, as a distance from the destination unit's center: its reach plus
+    // kLandingReachYd (a charge stops at the reach's collision point); a Reach probe never lies past the bot.
+    // `centerToBotYd` is the 2D distance between them.
     inline constexpr float kLandingReachYd = 1.0f;
 
     inline float LandingNearProbeYd(float centerToBotYd, float destCombatReachYd)
@@ -252,18 +305,109 @@ namespace BossMechanics::LockRules
         return probe < centerToBotYd ? probe : centerToBotYd;
     }
 
-    // M4 WP-Q2: the waker's fast tick (BossMechanics.Bots.FastTickMs). A bot woken in the waker runs its AI on the
-    // map's next update, not this one, so the wake is due once the last brain step will be FastTickMs old by then.
-    // `gapMs` is the time since the waker's previous sample of the bot (the map's update interval; 0 when unknown),
-    // capped at FastTickMs. Without it a map that updates every 100 ms (the sim, a loaded live map) runs a mechanics
-    // bot's brain every 200 ms, not every 100: the wake comes on the update after the one that ran the brain.
-    inline bool FastTickDue(int64_t sinceBrainMs, int64_t gapMs, int64_t fastTickMs)
+    // ---- WP-F2 (STAGE-M4-R2-REPORT M-1): the melee chase's safety valve -------------------------------------------
+
+    // The lock refuses the stock melee chase only while no point of the melee ring round its target is safe
+    // (MechanicLanding.h RingSafe); the brain counts a chase whose end fails with no band re-route as refused too.
+    // A melee bot or tank refused for its release time (BossMechanics.Bots.ChaseReleaseMs; a tank half of it), out of
+    // reach all along, is released to the stock AI for that long (the brain's Release, "chase valve"): it walks back
+    // into melee and stays. A stranded bot loses all its damage, a tank its threat (R2 Q-1 ruling: tanks are not
+    // exempt, they get the valve at half the time). The refusal looks a whole horizon ahead (HorizonMs, 10 s), so the
+    // valve only needs the ring to be clear for the walk in, the release and the walk out (ChaseValveWindowMs): a
+    // valve that walked the bot back into a zone about to resolve put the melee into alexei's Out of bounds at its
+    // Hold still (fight_test TestChaseValve), the m4-s2 Zone/5 the lock was made for.
+    struct ChaseClock
     {
-        if (gapMs < 0)
-            gapMs = 0;
-        if (gapMs > fastTickMs)
-            gapMs = fastTickMs;
-        return sinceBrainMs + gapMs >= fastTickMs;
+        int64_t refusedSince = 0;   // the first refusal of the current run (0 = none)
+        int64_t lastRefusedAt = 0;  // the run's last refusal
+    };
+
+    // A refusal "stands" this long after it was judged (msChaseRefused, the brain's recovery solve): a few AI ticks.
+    inline constexpr int64_t kChaseRefusedNowMs = 500;
+    // A run of refusals ends when none came for HoldCapMs + this (a bot held for an unsafe chase end is not judged
+    // again before its hold ends).
+    inline constexpr int64_t kChaseRunGapMs = 1000;
+
+    inline int64_t ChaseRunStaleMs(uint32_t holdCapMs)
+    {
+        return static_cast<int64_t>(holdCapMs) + kChaseRunGapMs;
+    }
+
+    inline int64_t ChaseReleaseMsFor(uint32_t releaseMs, bool tank)
+    {
+        return tank ? releaseMs / 2 : releaseMs;
+    }
+
+    // One refused chase at `nowMs`.
+    inline void NoteChaseRefusal(ChaseClock& c, int64_t nowMs, int64_t staleMs)
+    {
+        if (c.lastRefusedAt != 0 && nowMs - c.lastRefusedAt > staleMs)
+            c.refusedSince = 0;
+        if (c.refusedSince == 0)
+            c.refusedSince = nowMs;
+        c.lastRefusedAt = nowMs;
+    }
+
+    // The brain, every step: a bot in reach of its target, with no melee band, or just released ends the run.
+    inline void ChaseInReach(ChaseClock& c)
+    {
+        c.refusedSince = 0;
+        c.lastRefusedAt = 0;
+    }
+
+    // The last chase judgement refused it, a moment ago.
+    inline bool ChaseRefusedNow(ChaseClock const& c, int64_t nowMs)
+    {
+        return c.lastRefusedAt != 0 && nowMs - c.lastRefusedAt <= kChaseRefusedNowMs;
+    }
+
+    // The walk in and out a valve release must find clear on some point of the ring, beyond the release itself.
+    inline constexpr int64_t kChaseValveSlackMs = 2000;
+
+    inline int64_t ChaseValveWindowMs(int64_t releaseMs)
+    {
+        return releaseMs + kChaseValveSlackMs;
+    }
+
+    // The valve is due: an unbroken run of refusals (none staleMs apart) at least releaseMs long, still going.
+    inline bool ChaseValveDue(ChaseClock const& c, int64_t nowMs, int64_t releaseMs, int64_t staleMs)
+    {
+        return c.refusedSince != 0 && nowMs - c.lastRefusedAt <= staleMs && nowMs - c.refusedSince >= releaseMs;
+    }
+
+    // M4 WP-Q2: the waker's fast tick (BossMechanics.Bots.FastTickMs). A bot woken in the waker runs its AI some time
+    // after the wake, not in this update, so the wake is due once the last brain step will be FastTickMs old by then.
+    // `leadMs` is that delay, capped at FastTickMs (0 when unknown: never early). Without it a map that updates every
+    // 100 ms (the sim, a loaded live map) runs a mechanics bot's brain every 200 ms, not every 100.
+    inline bool FastTickDue(int64_t sinceBrainMs, int64_t leadMs, int64_t fastTickMs)
+    {
+        if (leadMs < 0)
+            leadMs = 0;
+        if (leadMs > fastTickMs)
+            leadMs = fastTickMs;
+        return sinceBrainMs + leadMs >= fastTickMs;
+    }
+
+    // WP-F2 (STAGE-M4-R2-REPORT m-2): the wake's lead is measured, not assumed. The map's full-update interval (the
+    // waker's own gap) is the lead in the sim, where a bot updates on full updates only; live, Map::Update ticks
+    // players on the partial updates too, so a woken bot thinks one world tick after the wake, often well before the
+    // next full update, and the full-update gap would wake it up to 1.7x too often under load. The brain stamps the
+    // time from a wake to the brain step that follows it; the waker keeps the smallest one seen (a lead that comes
+    // later than the estimate only delays a step, one that comes earlier would shorten it) and never more than its
+    // own gap. -1 = none measured yet (FastTickDue then uses 0).
+    inline int64_t NextWakeLead(int64_t estimateMs, int64_t measuredMs)
+    {
+        if (measuredMs < 0)
+            return estimateMs;
+        return estimateMs < 0 || measuredMs < estimateMs ? measuredMs : estimateMs;
+    }
+
+    // The lead FastTickDue gets: the estimate, never past the waker's own gap (0 when there is none yet).
+    inline int64_t WakeLeadFor(int64_t estimateMs, int64_t gapMs)
+    {
+        if (estimateMs < 0 || gapMs <= 0)
+            return 0;
+        return estimateMs < gapMs ? estimateMs : gapMs;
     }
 }
 

@@ -24,6 +24,7 @@
 #include "MechanicFallibility.h"
 #include "MechanicGeometry.h"
 #include "MechanicLeaks.h"
+#include "MechanicLockRules.h"
 #include "MechanicSolver.h"
 #include "ObjectGuid.h"
 #include "Value.h"
@@ -81,6 +82,7 @@ namespace BossMechanics
         Milliseconds escapeChainSince{ 0 };                 // start of an unbroken run of escapes (hard ceiling)
         Milliseconds releaseUntil{ 0 };                     // released: an unsafe spot is not solved until then
         bool releaseForRoot = false;                        // ...and the release ends as soon as the bot can move
+        bool releaseForChase = false;                       // ...by the chase valve (WP-F2): Watch lets its motion be
         bool pendingEscape = false;                         // Watch, spot unsafe, solve deferred: lock as in Escape
         Milliseconds noCastUntil{ 0 };                      // after a cast break: cast-time spells, item uses blocked
         Milliseconds lastCastBreakAt{ 0 };
@@ -149,6 +151,14 @@ namespace BossMechanics
         // when it goes back to Idle.
         bool pullEndChecked = false;
         Milliseconds bandClockAt{ 0 };                      // G5: the out-of-band clock's last sample (0 = none)
+        // ---- M4 WP-F2 (STAGE-M4-R2-REPORT M-1, m-2, m-6) ----
+        LockRules::ChaseClock chase;                        // the lock's melee-chase refusals and the safety valve
+        Milliseconds lastChaseSolveAt{ 0 };                 // the brain's recovery solve for a refused chase
+        Milliseconds nextChaseSolveAt{ 0 };                 // ...none before this (one that stayed backs off)
+        Milliseconds bandBlockedUntil{ 0 };                 // m-6: no band re-route found; hold, no release before
+        uint32 bandBlockedBy = 0;                           // ...the hazard the motion's end failed on
+        Milliseconds wakeAt{ 0 };                           // m-2: the waker's last wake (0 = none pending)
+        int64 wakeLeadMs = -1;                              // ...the smallest wake-to-brain delay seen (-1 = none)
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

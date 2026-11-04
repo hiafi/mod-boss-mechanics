@@ -1,14 +1,17 @@
 // Standalone tests for src/MechanicLockRules.h, the pure rules of the bots' lock multiplier (STAGE-M4-HANDOFF §3.5,
 // WP-X; STAGE-M4-L-REPORT §6.3, §10 X1-X3): the scripted-mover table and its conditions, the named movers and the
 // turning self casts, and the look-away cast rule; WP-X2: the waker's cast facing step (X6), the pull requests (X8) and
-// the forced-leak passes (BossMechanics.Bots.ForceLeaks); WP-Q2: the gap closers' landings and the waker's fast tick.
+// the forced-leak passes (BossMechanics.Bots.ForceLeaks); WP-Q2: the gap closers' landings and the waker's fast tick;
+// WP-F2: where each closer stops, the chase clock and its valve, and the measured wake lead.
 // Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicLockRules.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <set>
+#include <vector>
 
 using namespace BossMechanics::LockRules;
 
@@ -234,55 +237,202 @@ namespace
         CHECK(LandingNearProbeYd(12.f, 1.5f) == 1.5f + kLandingReachYd);
         CHECK(LandingNearProbeYd(2.f, 1.5f) == 2.f);
         CHECK(LandingNearProbeYd(0.f, 1.5f) == 0.f);
+
+        // WP-F2 (STAGE-M4-R2-REPORT m-5, nit 4): where each one stops, kept with its row.
+        CHECK(NamedMoverSpot("heroic leap") == LandingSpot::Center);
+        CHECK(NamedMoverSpot("heroic leap loose") == LandingSpot::Center);
+        CHECK(NamedMoverSpot("cmbt grappling hook") == LandingSpot::Center);
+        CHECK(NamedMoverSpot("shadowstep") == LandingSpot::Behind);
+        CHECK(NamedMoverSpot("subt shadowstep") == LandingSpot::Behind);
+        CHECK(NamedMoverSpot("cmbt blade rush") == LandingSpot::Reach);
+        CHECK(NamedMoverSpot("cmbt pack blade rush") == LandingSpot::Reach);
+        CHECK(NamedMoverSpot("arms intervene") == LandingSpot::Reach);
+        CHECK(NamedMoverSpot("subt death from above") == LandingSpot::CenterOrReach);
+        for (std::string_view const name : kNamedMovers)
+            CHECK((NamedMoverSpot(name) == LandingSpot::None) == (NamedMoverLanding(name) == MoverLanding::None));
+        CHECK(NamedMoverSpot("reach melee") == LandingSpot::None);
+        CHECK(ScriptedMoverSpot(204400) == LandingSpot::Center);    // Heroic Leap
+        CHECK(ScriptedMoverSpot(203963) == LandingSpot::Center);    // Grappling Hook
+        CHECK(ScriptedMoverSpot(8676) == LandingSpot::Behind);      // Ambush
+        CHECK(ScriptedMoverSpot(204148) == LandingSpot::CenterOrReach);
+        CHECK(ScriptedMoverSpot(51690) == LandingSpot::CenterOrReach);
+        CHECK(ScriptedMoverSpot(48020) == LandingSpot::None);
+        CHECK(ScriptedMoverSpot(0) == LandingSpot::None);
+        // Spell effects: a charge stops at reach, a jump on the center, a spell with both is judged as a jump.
+        CHECK(SpellEffectSpot(true, false) == LandingSpot::Reach);
+        CHECK(SpellEffectSpot(false, true) == LandingSpot::Center);
+        CHECK(SpellEffectSpot(true, true) == LandingSpot::Center);
+        CHECK(SpellEffectSpot(false, false) == LandingSpot::None);
     }
 
-    // WP-Q2: the waker's fast tick counts the next update's gap in, so the brain steps every FastTickMs on any map
-    // update interval, not every FastTickMs + one update.
+    // WP-F2 (STAGE-M4-R2-REPORT M-1 fix 4): the chase clock and its valve.
+    void TestChaseClock()
+    {
+        int64_t const stale = ChaseRunStaleMs(3000);
+        CHECK(stale == 4000);
+        CHECK(ChaseReleaseMsFor(3000, false) == 3000);
+        CHECK(ChaseReleaseMsFor(3000, true) == 1500);        // R2 Q-1 ruling: a tank's valve is half the time
+        CHECK(ChaseValveWindowMs(3000) == 3000 + kChaseValveSlackMs);
+        ChaseClock c;
+        CHECK(!ChaseRefusedNow(c, 1000));
+        CHECK(!ChaseValveDue(c, 1000, 3000, stale));
+        // Refused every AI tick (100 ms) from 1 s: due at 4 s, not before.
+        for (int64_t t = 1000; t < 4000; t += 100)
+        {
+            NoteChaseRefusal(c, t, stale);
+            CHECK(ChaseRefusedNow(c, t));
+            CHECK(!ChaseValveDue(c, t, 3000, stale));
+        }
+        NoteChaseRefusal(c, 4000, stale);
+        CHECK(ChaseValveDue(c, 4000, 3000, stale));
+        CHECK(ChaseValveDue(c, 2500, 1500, stale));           // the tank's at 2.5 s
+        // A refusal stands kChaseRefusedNowMs; the run survives a hold (HoldCapMs) between two refusals.
+        CHECK(ChaseRefusedNow(c, 4000 + kChaseRefusedNowMs));
+        CHECK(!ChaseRefusedNow(c, 4001 + kChaseRefusedNowMs));
+        CHECK(ChaseValveDue(c, 4000 + stale, 3000, stale));
+        CHECK(!ChaseValveDue(c, 4001 + stale, 3000, stale));  // gone stale: no valve on an old run
+        // In reach ends the run.
+        ChaseInReach(c);
+        CHECK(c.refusedSince == 0 && c.lastRefusedAt == 0);
+        CHECK(!ChaseValveDue(c, 5000, 3000, stale));
+        // A stale run starts again at the next refusal.
+        NoteChaseRefusal(c, 10000, stale);
+        NoteChaseRefusal(c, 20000, stale);
+        CHECK(c.refusedSince == 20000);
+        CHECK(!ChaseValveDue(c, 20000, 3000, stale));
+        // A refusal after a hold (3.5 s apart, under the stale gap) keeps the run.
+        NoteChaseRefusal(c, 23500, stale);
+        CHECK(c.refusedSince == 20000);
+        CHECK(ChaseValveDue(c, 23500, 3000, stale));
+    }
+
+    // WP-Q2: the waker's fast tick counts the wake's lead in, so the brain steps every FastTickMs on any map update
+    // interval, not every FastTickMs + one update. WP-F2 (STAGE-M4-R2-REPORT m-2): the lead is measured.
     void TestFastTickDue()
     {
         // The sim (100 ms updates, FastTickMs 100): due right after the step that ran the brain, so the AI runs on
-        // the next update, 100 ms after it. The M4 rule (gap 0) waited one update more: a step every 200 ms.
+        // the next update, 100 ms after it. The M4 rule (lead 0) waited one update more: a step every 200 ms.
         CHECK(FastTickDue(0, 100, 100));
         CHECK(!FastTickDue(0, 0, 100));
         CHECK(FastTickDue(100, 0, 100));
-        // Live (10 ms updates): due at 90 ms, the step lands at 100 ms (was 110).
         CHECK(!FastTickDue(80, 10, 100));
         CHECK(FastTickDue(90, 10, 100));
-        // A gap longer than FastTickMs counts as FastTickMs (a stall never wakes earlier than every update).
+        // A lead longer than FastTickMs counts as FastTickMs; a negative one is 0.
         CHECK(FastTickDue(0, 2000, 100));
-        CHECK(!FastTickDue(0, -50, 100));                                   // a negative gap is 0
+        CHECK(!FastTickDue(0, -50, 100));
         // FastTickMs 0: every update.
         CHECK(FastTickDue(0, 0, 0));
-        // Simulated cadence: brain steps at the updates where the wake from the previous update applies.
-        for (int64_t gap : { 10, 25, 50, 100 })
+        // The lead estimate: the smallest measured, never past the waker's gap, 0 while none is known.
+        CHECK(NextWakeLead(-1, 100) == 100);
+        CHECK(NextWakeLead(100, 15) == 15);
+        CHECK(NextWakeLead(15, 40) == 15);
+        CHECK(NextWakeLead(15, -1) == 15);
+        CHECK(WakeLeadFor(-1, 100) == 0);
+        CHECK(WakeLeadFor(15, 60) == 15);
+        CHECK(WakeLeadFor(100, 60) == 60);
+        CHECK(WakeLeadFor(15, 0) == 0);
+    }
+
+    // The cadence of an engaged bot's brain, simulated: world ticks of `tick(i)` ms; the map's full update (and the
+    // waker after it) on every `fullEvery`-th tick; a woken bot thinks on the next world tick (live: Map::Update ticks
+    // players on the partial updates too) or, `simLike`, on the next full update only (the sim). `measured`: WP-F2,
+    // the lead from the wake to the brain step; else WP-Q2, the full-update gap as the lead. Returns the shortest and
+    // the longest time between two brain steps after the first few.
+    struct Cadence
+    {
+        int64_t shortest = 1000000;
+        int64_t longest = 0;
+    };
+
+    template <class TickFn>
+    Cadence RunCadence(TickFn tick, int fullEvery, bool simLike, bool measured, int64_t fastTick = 100)
+    {
+        Cadence out;
+        int64_t now = 0;
+        int64_t lastBrain = 0;
+        int64_t lastFull = -1;
+        int64_t wakeAt = 0;
+        int64_t lead = -1;
+        bool woken = true;
+        int brains = 0;
+        for (int i = 1; i <= 4000; ++i)
         {
-            int64_t lastBrain = 0;
-            int64_t worst = 0;
-            bool woken = true;      // the first update thinks (a registry change woke it)
-            for (int64_t t = gap; t <= 5000; t += gap)
+            now += tick(i);
+            bool const full = i % fullEvery == 0;
+            // The bot's update (before the waker in the same tick).
+            if (woken && (!simLike || full))
             {
-                if (woken)
+                if (brains > 3)
                 {
-                    worst = std::max(worst, t - lastBrain);
-                    lastBrain = t;
+                    out.shortest = std::min(out.shortest, now - lastBrain);
+                    out.longest = std::max(out.longest, now - lastBrain);
                 }
-                woken = FastTickDue(t - lastBrain, gap, 100);
+                ++brains;
+                if (wakeAt != 0)
+                    lead = NextWakeLead(lead, now - wakeAt);
+                wakeAt = 0;
+                lastBrain = now;
+                woken = false;
             }
-            CHECK(worst == std::max<int64_t>(100, gap));
-            // As built (no gap): one update more.
-            lastBrain = 0;
-            int64_t worstOld = 0;
-            woken = true;
-            for (int64_t t = gap; t <= 5000; t += gap)
+            if (!full)
+                continue;
+            int64_t const gap = lastFull >= 0 ? now - lastFull : 0;
+            lastFull = now;
+            int64_t const useLead = measured ? WakeLeadFor(lead, gap) : gap;
+            if (!woken && FastTickDue(now - lastBrain, useLead, fastTick))
             {
-                if (woken)
-                {
-                    worstOld = std::max(worstOld, t - lastBrain);
-                    lastBrain = t;
-                }
-                woken = FastTickDue(t - lastBrain, 0, 100);
+                woken = true;
+                if (wakeAt == 0)
+                    wakeAt = now;
             }
-            CHECK(worstOld == 100 + gap);
+        }
+        return out;
+    }
+
+    void TestFastTickCadence()
+    {
+        // The sim: 100 ms full updates only. Every 100 ms, as WP-Q2 made it.
+        Cadence const sim = RunCadence([](int) { return int64_t(100); }, 1, true, true);
+        CHECK(sim.shortest == 100 && sim.longest == 100);
+        // Live, a loaded realm (R2 m-2's table): 15 ms world ticks, a full update every 4 (60 ms), and 25 ms ticks
+        // (100 ms). WP-Q2's rule thought every 60 ms on the first; the measured lead never under FastTickMs.
+        Cadence const old15 = RunCadence([](int) { return int64_t(15); }, 4, false, false);
+        Cadence const new15 = RunCadence([](int) { return int64_t(15); }, 4, false, true);
+        Cadence const new25 = RunCadence([](int) { return int64_t(25); }, 4, false, true);
+        std::printf("fast tick, 15 ms world ticks / 60 ms full updates: WP-Q2 %lld..%lld ms, WP-F2 %lld..%lld ms; "
+            "25 ms ticks: WP-F2 %lld..%lld ms\n", static_cast<long long>(old15.shortest),
+            static_cast<long long>(old15.longest), static_cast<long long>(new15.shortest),
+            static_cast<long long>(new15.longest), static_cast<long long>(new25.shortest),
+            static_cast<long long>(new25.longest));
+        CHECK(old15.shortest < 100);
+        CHECK(new15.shortest >= 100);
+        CHECK(new15.longest <= 100 + 60 + 15);
+        CHECK(new25.shortest >= 100);
+        CHECK(new25.longest <= 100 + 100 + 25);
+        // An unloaded live realm: 10 ms ticks, a full update every tick.
+        Cadence const idle = RunCadence([](int) { return int64_t(10); }, 1, false, true);
+        CHECK(idle.shortest >= 100 && idle.longest <= 110);
+        // Mixed intervals: world ticks of 5 to 45 ms (a fixed pseudo-random mix), full updates every 1 to 4 ticks.
+        // Never faster than FastTickMs, less a tick shorter than any seen before (the lead is a measurement: one
+        // within 5 ms here), never slower than FastTickMs + the longest full-update gap + a tick.
+        for (int fullEvery : { 1, 2, 3, 4 })
+        {
+            uint32_t state = 12345u + static_cast<uint32_t>(fullEvery);
+            auto mixed = [&state](int)
+            {
+                state = state * 1664525u + 1013904223u;
+                return static_cast<int64_t>(5 + (state >> 16) % 41);
+            };
+            Cadence const m = RunCadence(mixed, fullEvery, false, true);
+            CHECK(m.shortest >= 95);
+            CHECK(m.longest <= 100 + 45 * fullEvery + 45);
+        }
+        // The sim at other steps: every max(FastTickMs, step) (a step is one full update).
+        for (int64_t step : { 25, 50, 75, 100, 150 })
+        {
+            Cadence const c = RunCadence([step](int) { return step; }, 1, true, true);
+            int64_t const want = step >= 100 ? step : (100 + step - 1) / step * step;
+            CHECK(c.shortest == want && c.longest == want);
         }
     }
 }
@@ -298,6 +448,8 @@ int main()
     TestPullRequests();
     TestForceLeakPasses();
     TestMoverLanding();
+    TestChaseClock();
     TestFastTickDue();
+    TestFastTickCadence();
     return Report("lock_rules_test");
 }

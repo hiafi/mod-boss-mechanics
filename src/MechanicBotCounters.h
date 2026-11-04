@@ -90,8 +90,8 @@ namespace BossMechanics
         uint32 regionRoutesFound = 0;
         // M4 WP-Q (G5): ms in Escape, Hold or Freeze with the bot outside its role band (melee reach of its target,
         // the ranged band, follow distance), sampled by the brain; ...of them while a task holds it (a Stack, Bait,
-        // Spread or Spot window). What a melee loses to the lock is msOutOfBand; what a re-position inside a task
-        // window could win back is at most msOutOfBandTask.
+        // Spread or Spot window). What a re-position inside a task window could win back is at most msOutOfBandTask.
+        // A melee loses to the lock msOutOfBand plus msChaseRefused (below).
         uint32 msOutOfBand = 0;
         uint32 msOutOfBandTask = 0;
         // M4 lock (STAGE-M4-HANDOFF §3.5, WP-X; MechanicBotLock.cpp).
@@ -101,9 +101,17 @@ namespace BossMechanics
         uint32 pullBlocks = 0;      // X8: `pull` requests refused while an encounter is live (also in lockBlocks)
         uint32 pullsEnded = 0;      // M-3: a pull pending or running when the brain left Idle, ended (`pull end`)
         // M4 WP-Q2: Idle/Watch gap closers and melee chases refused because they would land in a hazard (also in
-        // lockBlocks), and Watch motions stopped because the spot they end on fails TargetOk (also in motionStops).
+        // lockBlocks; one per candidate judged, not per refusal), and Watch motions whose end fails TargetOk (each one
+        // is then re-routed or held, so it is also in motionStops).
         uint32 landingBlocks = 0;
         uint32 motionEndStops = 0;
+        // M4 WP-F2 (STAGE-M4-R2-REPORT M-1, m-3): ms in Idle or Watch out of the melee band while the lock refuses the
+        // melee chase (no point of the melee ring is safe), sampled by the brain; the times the safety valve
+        // (BossMechanics.Bots.ChaseReleaseMs) let a refused chase through; the recovery role solves run for a refused
+        // chase (also in roleSolves).
+        uint32 msChaseRefused = 0;
+        uint32 chaseReleases = 0;
+        uint32 chaseSolves = 0;
         // BossMechanics.Bots.ForceLeaks: blocked judgements let through (per candidate judged), by the detector each
         // feeds. Many passes of a kind and no leak of that kind over a run point at a blind detector.
         uint32 forcedMoves = 0;

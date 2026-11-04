@@ -342,6 +342,17 @@ BossMechanics.Bots.MovingAnchorRecheckMs = 250
 BossMechanics.Bots.RoleSlackMs = 1000
 
 #
+#    BossMechanics.Bots.ChaseReleaseMs
+#        Description: A melee bot out of reach of its target whose way back into melee is refused because the
+#                     whole melee ring round the target is in a warned danger walks back in anyway after this long,
+#                     and fights there for as long, in milliseconds (500-60000). Only while some spot of the ring
+#                     stays clear for that time plus 2 s. Tanks wait half of it.
+#        Default:     3000
+#
+
+BossMechanics.Bots.ChaseReleaseMs = 3000
+
+#
 #    BossMechanics.Bots.RangedDistanceYd
 #        Description: Ranged bots and healers prefer safe spots between 8 yards and this + 6 yards from their
 #                     anchor (8-40).

@@ -26,6 +26,7 @@
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
 #include "MechanicBotState.h"
+#include "MechanicLanding.h"
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "MovementActions.h"
@@ -198,94 +199,138 @@ namespace
 #endif
     }
 
-    // WP-Q2: a spell whose effects carry its caster to the cast target (Charge, Intercept, Feral Charge, Intervene, the
-    // jumps). LEAP, LEAP_BACK and TELEPORT_UNITS land elsewhere (Blink, Disengage, Shadowstep's own test is by name).
-    bool ChargesToTarget(SpellInfo const* info)
+    // WP-Q2, WP-F2 (STAGE-M4-R2-REPORT m-5): how a spell's effects carry its caster to the cast unit: a charge
+    // (CHARGE, CHARGE_DEST: Spell::EffectCharge stops at the target's reach on the caster's side) or a jump (JUMP,
+    // JUMP_DEST: MoveJump onto the unit's position). LEAP, LEAP_BACK and TELEPORT_UNITS land elsewhere (Blink,
+    // Disengage; Shadowstep's own test is by name).
+    LockRules::LandingSpot SpellLanding(SpellInfo const* info)
     {
+        bool charge = false;
+        bool jump = false;
         for (SpellEffectInfo const& effect : info->GetEffects())
             switch (effect.Effect)
             {
                 case SPELL_EFFECT_CHARGE:
                 case SPELL_EFFECT_CHARGE_DEST:
+                    charge = true;
+                    break;
                 case SPELL_EFFECT_JUMP:
                 case SPELL_EFFECT_JUMP_DEST:
-                    return true;
+                    jump = true;
+                    break;
                 default:
                     break;
             }
-        return false;
+        return LockRules::SpellEffectSpot(charge, jump);
     }
 
-    // WP-Q2 (m4-s2 Frontal/1): the unit a gap closer lands next to, or nullptr when the action is not one
-    // (LockRules::MoverLanding). Charges by type, the plain-Action movers by name, a cast by its spell's effects or the
-    // scripted-mover table (only when this cast moves). `chase`: the action is the stock melee chase, judged by the
-    // destination's center only (a walk; Watch re-routes one whose end fails round a puddle at the target's reach).
-    Unit* GapCloserDestination(PlayerbotAI* botAI, Player* bot, Action* action, bool& chase)
+    // The unit a gap closer lands next to and where it stops, for the Idle/Watch landing test.
+    struct GapCloser
     {
-        chase = false;
+        Unit* dest = nullptr;           // nullptr: not a gap closer (or not judged)
+        LockRules::LandingSpot spot = LockRules::LandingSpot::None;
+        bool chase = false;             // the stock melee chase: judged on the whole melee ring (Landing::RingSafe)
+    };
+
+    // WP-Q2 (m4-s2 Frontal/1): the gap closer an action is (LockRules::MoverLanding, LandingSpot). Charges by type, the
+    // plain-Action movers by name, a cast by its spell's effects or the scripted-mover table (only when this cast
+    // moves). A cast at a position (CastAtPositionAction) lands at its own point, which the action keeps to itself
+    // (FindPosition is protected): it is not judged, never at its unit (R2 m-5; none in the class rotations today).
+    // STAGE-M4-R2-REPORT nit 3: the spell-id path (an id look-up, the spell's effects) runs only for a bot in Watch
+    // or in combat; an Idle bot out of combat has no gap closer worth the look-up per candidate.
+    GapCloser GapCloserOf(PlayerbotAI* botAI, Player* bot, Action* action, bool castLookup)
+    {
+        GapCloser g;
         if (dynamic_cast<CastReachTargetSpellAction*>(action))
-            return action->GetTarget();
+        {
+            g.dest = action->GetTarget();
+            g.spot = LockRules::LandingSpot::Reach;
+            return g;
+        }
         AiObjectContext* context = botAI->GetAiObjectContext();
-        // The stock melee chase too (m4-s2 Zone/5), while a zone covers its target: Watch would stop it a brain step
-        // later (StepWatch, its end fails), but the bot would creep in and out at the zone's edge meanwhile.
+        // The stock melee chase too (m4-s2 Zone/5): refused only while the whole melee ring is unsafe.
         if (dynamic_cast<ReachMeleeAction*>(action))
         {
-            chase = true;
-            return AI_VALUE(Unit*, "current target");
+            g.dest = AI_VALUE(Unit*, "current target");
+            g.chase = true;
+            return g;
         }
+        g.spot = LockRules::NamedMoverSpot(action->getName());
         switch (LockRules::NamedMoverLanding(action->getName()))
         {
             case LockRules::MoverLanding::CastTarget:
-                return action->GetTarget();
+                g.dest = action->GetTarget();
+                return g;
             case LockRules::MoverLanding::CurrentTarget:
-                return AI_VALUE(Unit*, "current target");
+                g.dest = AI_VALUE(Unit*, "current target");
+                return g;
             case LockRules::MoverLanding::LooseEnemy:
             {
                 Value<Unit*>* loose = context->GetValue<Unit*>("prot loose enemy");
-                return loose ? loose->Get() : nullptr;
+                g.dest = loose ? loose->Get() : nullptr;
+                return g;
             }
             case LockRules::MoverLanding::None:
                 break;
         }
-        if (LockRules::IsNamedMoverName(action->getName()))
-            return nullptr;     // a named mover that lands away (Blink back, Disengage)
+        g.spot = LockRules::LandingSpot::None;
+        if (!castLookup || LockRules::IsNamedMoverName(action->getName()))
+            return g;     // a named mover that lands away (Blink back, Disengage)
         CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action);
-        if (!cast)
-            return nullptr;
+        if (!cast || dynamic_cast<CastAtPositionAction*>(cast))
+            return g;
         uint32 const spellId = CastSpellIdOf(botAI, cast);
         SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
         if (!info)
-            return nullptr;
-        if (ChargesToTarget(info))
-            return cast->GetTarget();
-        if (LockRules::ScriptedMoverLandsAtTarget(info->Id)
-            && IsScriptedMover(info, bot, [cast]() -> Unit* { return cast->GetTarget(); }))
-            return cast->GetTarget();
-        return nullptr;
+            return g;
+        g.spot = SpellLanding(info);
+        if (g.spot == LockRules::LandingSpot::None)
+        {
+            g.spot = LockRules::ScriptedMoverSpot(info->Id);
+            if (g.spot != LockRules::LandingSpot::None
+                && !IsScriptedMover(info, bot, [cast]() -> Unit* { return cast->GetTarget(); }))
+                g.spot = LockRules::LandingSpot::None;
+        }
+        if (g.spot != LockRules::LandingSpot::None)
+            g.dest = cast->GetTarget();
+        return g;
     }
 
-    // WP-Q2: the landing next to `dest` fails the bot's hazards over [now, now + horizon]: the destination's center
-    // (a leap lands on it) or, with `nearProbe`, the spot at its reach on the bot's side (a charge stops there). The
+    bool Usable(Player* bot, Unit* dest)
+    {
+        return dest && dest != bot && dest->IsInWorld() && dest->GetMap() == bot->GetMap();
+    }
+
+    Landing::Dest DestOf(Unit* dest)
+    {
+        Landing::Dest d;
+        d.center = { dest->GetPositionX(), dest->GetPositionY(), dest->GetPositionZ() };
+        d.combatReachYd = dest->GetCombatReach();
+        d.facing = dest->GetOrientation();
+        return d;
+    }
+
+    Geo::Vec3 PosOf(Player* bot)
+    {
+        return { bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
+    }
+
+    // WP-F2 (R2 M-1): the melee chase toward `dest` is refused while no point of the melee ring (the bot's melee band
+    // round dest) is safe over the horizon. A refusal goes on the chase clock: the brain releases a bot refused for
+    // BossMechanics.Bots.ChaseReleaseMs (the safety valve), and the lock then allows everything (Released). The
     // brain's view (st.input) is current: the brain steps before the engine picks actions in the same AI tick.
-    bool LandingUnsafe(Player* bot, MechanicBotState const& st, Unit* dest, Milliseconds now, bool nearProbe)
+    bool ChaseRefused(Player* bot, MechanicBotState& st, Unit* dest, Milliseconds now)
     {
         Solver::Input const& in = st.input;
-        if (!dest || dest == bot || !dest->IsInWorld() || dest->GetMap() != bot->GetMap())
-            return false;
-        Milliseconds const to = now + in.params.horizon;
+        float const radius = std::max(0.f, bot->GetMeleeRange(dest) - Landing::kMeleeBandSlackYd);
         Geo::Vec3 const center{ dest->GetPositionX(), dest->GetPositionY(), dest->GetPositionZ() };
-        if (!Solver::PointSafe(in, center, now, to))
-            return true;
-        if (!nearProbe)
+        // R2 m-6: while Watch found no way round the hazard the last chase ended in (MechanicBotBrain BlockBand), the
+        // chase stays refused: it would walk the bot a brain step into it before Watch stops it again.
+        bool const blocked = now < st.bandBlockedUntil;
+        if (!blocked && Landing::RingSafe(in, center, PosOf(bot), radius, now, now + in.params.horizon))
             return false;
-        float const dx = bot->GetPositionX() - center.x;
-        float const dy = bot->GetPositionY() - center.y;
-        float const dist = std::sqrt(dx * dx + dy * dy);
-        if (dist <= 0.01f)
-            return false;
-        float const probe = LockRules::LandingNearProbeYd(dist, dest->GetCombatReach());
-        Geo::Vec3 const nearSpot{ center.x + dx / dist * probe, center.y + dy / dist * probe, center.z };
-        return !Solver::PointSafe(in, nearSpot, now, to);
+        LockRules::NoteChaseRefusal(st.chase, now.count(), LockRules::ChaseRunStaleMs(GetConfig().bots.holdCapMs));
+        return true;
     }
 
     enum class LockVerdict : uint8
@@ -377,18 +422,29 @@ namespace
         bool const afterBreak = now < st.noCastUntil;
         bool const frozen = mode == MechanicBotMode::Freeze;
         bool const idleOrWatch = mode == MechanicBotMode::Idle || mode == MechanicBotMode::Watch;
-        // WP-Q2 (m4-s2 Frontal/1, Zone/5): in Idle and Watch a gap closer (or the melee chase) whose landing fails
-        // the bot's hazards is refused: a Heroic Leap at the pull landed in the boss's warned front cone, too late to
-        // step out. Escape, Hold and Freeze block every mover below anyway.
-        bool chase = false;
+        // WP-Q2 (m4-s2 Frontal/1, Zone/5), WP-F2 (R2 M-1): in Idle and Watch a gap closer whose landing fails the
+        // bot's hazards is refused (a Heroic Leap at the pull landed in the boss's warned front cone, too late to step
+        // out), and so is the melee chase while the whole melee ring is unsafe. Escape, Hold and Freeze block every
+        // mover below anyway.
         if (idleOrWatch && st.viewValid && !st.input.hazards.empty())
-            if (Unit* dest = GapCloserDestination(botAI, bot, action, chase))
-                if (LandingUnsafe(bot, st, dest, now, !chase))
+        {
+            GapCloser const g = GapCloserOf(botAI, bot, action, mode == MechanicBotMode::Watch || bot->IsInCombat());
+            if (Usable(bot, g.dest))
+            {
+                bool refused = false;
+                if (g.chase)
+                    refused = ChaseRefused(bot, st, g.dest, now);
+                else
+                    refused = Landing::LandingUnsafe(st.input, g.spot, DestOf(g.dest), PosOf(bot), now,
+                        now + st.input.params.horizon);
+                if (refused)
                 {
                     Judgement j = Blocked(LockVerdict::BlockMove);
                     j.landing = true;
                     return j;
                 }
+            }
+        }
         if (idleOrWatch && !afterBreak && !lookAway)
             return Allow();
         if (afterBreak && dynamic_cast<UseItemAction*>(action))
