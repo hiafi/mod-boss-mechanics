@@ -2260,6 +2260,31 @@ namespace BossMechanics::Solver
         constexpr std::uint32_t kFallbackRanked = kFallbackProbes + 1;
         constexpr std::uint32_t kStraightChecks = 64;   // straight-line checks per validation pass (cost cap)
 
+        // The bounded Fallback ranking (M4 WP-Q G7, exact since STAGE-M4-R-REPORT m-3): with the top
+        // kFallbackRanked entries full and `last` its worst, how far a candidate (`violated` broken kinds, `dist`
+        // away) must be walked to tell whether it ranks ahead of `last` (time inside, then broken kinds, then
+        // distance). `cap`: the most time inside that still ranks ahead; `walk` false when nothing can (it would
+        // need less than no time inside). The distance is compared, not assumed: the candidates come sorted by 2D
+        // distance and the ranking reads 3D, so a later one can be nearer on stairs or slopes.
+        struct FallbackCap
+        {
+            Ms cap = kForever;
+            bool walk = true;
+        };
+
+        inline FallbackCap FallbackWalkCap(Ms lastInside, std::uint32_t lastViolated, float lastDist,
+            std::uint32_t violated, float dist)
+        {
+            FallbackCap out;
+            if (violated < lastViolated || (violated == lastViolated && dist < lastDist))
+                out.cap = lastInside;               // a tie on time inside ranks it ahead
+            else if (lastInside > Ms(0))
+                out.cap = lastInside - Ms(1);
+            else
+                out.walk = false;
+            return out;
+        }
+
         // The input of the reduced-margin pass: every margin cut to its drift + tightMarginYd. false = no margin
         // changes (the pass would repeat the first one).
         inline bool ReducedMargins(Input const& in, Input& out)
@@ -2636,10 +2661,9 @@ namespace BossMechanics::Solver
             std::vector<Ranked> ranked;
             ranked.reserve(Detail::kFallbackScans);
             // M4 WP-Q (G7, the lane-set Fallbacks of the sweep): only the top kFallbackRanked entries of the ranking
-            // are ever read (the probes down it, then one with a known path). The candidates come nearest first, so a
-            // later one beats the kFallbackRanked-th best so far only with less time inside, or as much and fewer
-            // broken kinds: its walk stops once it is past that (WalkPath's measureCap), or is not walked at all when
-            // it cannot get there (that best spends no time inside). The top, all this solve reads, stays exact.
+            // are ever read (the probes down it, then one with a known path). Once the top is full, a candidate's walk
+            // stops as soon as it cannot rank ahead of the top's worst (WalkPath's measureCap), or is skipped when it
+            // cannot at all (Detail::FallbackWalkCap). The top, all this solve reads, stays exact.
             std::vector<Ranked> top;    // the kFallbackRanked best so far, in ranking order
             top.reserve(Detail::kFallbackRanked + 1);
             for (std::uint32_t i = 0; i < cands.size() && ranked.size() < Detail::kFallbackScans; ++i)
@@ -2655,12 +2679,10 @@ namespace BossMechanics::Solver
                 if (top.size() >= Detail::kFallbackRanked)
                 {
                     Ranked const& last = top.back();
-                    if (violated < last.violated)
-                        cap = last.inside;
-                    else if (last.inside > Ms(0))
-                        cap = last.inside - Ms(1);
-                    else
-                        walk = false;
+                    Detail::FallbackCap const fc = Detail::FallbackWalkCap(last.inside, last.violated, last.dist,
+                        violated, dist);
+                    cap = fc.cap;
+                    walk = fc.walk;
                 }
                 Ms const inside = walk
                     ? Detail::WalkPath(exact, { in.bot, c }, in.now, true, true, cap).timeInsideHot : kForever;
@@ -2788,11 +2810,16 @@ namespace BossMechanics::Solver
     // motion under way: no start delay) spends no more time inside the exact hitboxes while they are hot (drift
     // kept, no yard or time margin: Plan::exposure's measure) than the plan did, and its end lies outside every
     // exact hitbox while hot from the arrival on to `horizonEnd`. `clearOnly`: only a clear plan (exposure 0)
-    // holds; a hot one is solved again (a re-solve may still find it a clean way).
+    // holds; a hot one is solved again (a re-solve may still find it a clean way). A plan that breaks a hard region
+    // (violated > 0: a Stack, a Cluster, the Bait's others range) never holds (STAGE-M4-R-REPORT m-4): it is solved
+    // again on every view change, so a Move that became possible (an ally moved away) is found, and the solve asks
+    // for its region route again.
     inline bool FallbackHolds(Input const& in, Plan const& plan, std::vector<Geo::Vec3> const& rest, Ms horizonEnd,
         bool clearOnly)
     {
         if (plan.outcome != Outcome::Fallback && plan.outcome != Outcome::NoPath)
+            return false;
+        if (plan.violated > 0)
             return false;
         if (rest.empty() || (clearOnly && plan.exposure > Ms(0)))
             return false;

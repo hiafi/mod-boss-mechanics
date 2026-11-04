@@ -1,7 +1,7 @@
 /*
  * mod-boss-mechanics: the `.mech` GM command (STAGE-M1-HANDOFF §3.10). SEC_GAMEMASTER, in game only.
  *
- *   .mech test <shape> <size> <ms> [key=value ...]     (rider=<spell>: the module's spells 205000-205099 only)
+ *   .mech test <shape> <size> <ms> [key=value ...]     (rider=<spell>: the module's spells 205008-205099 only)
  *   .mech clear [all] | .mech list | .mech ledger [name] | .mech weakened <0-7> | .mech markers [range]
  *   .mech palette <get-out color> <get-in color> [cross-lane color] [cell color]
  *                                                    (red yellow blue purple orange green teal white black)
@@ -57,11 +57,13 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Random.h"
+#include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "StringConvert.h"
 #include "TemporarySummon.h"
 #include "Tokenize.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -959,7 +961,7 @@ namespace
 
     constexpr char const* kTestUsage = "Usage: .mech test <shape> <size> <ms> [key=value ...]; shapes: circle donut "
         "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot; "
-        "rider=<spell> takes only the module's spells 205000-205099";
+        "rider=<spell> takes only the module's spells 205008-205099";
 
     // What a `.mech test` line is parsed against (M4): the reference unit stands in for the GM (`anchor=me`, the
     // "nothing selected" case, the facing of lanes, lines and `shift=`), `scope` is the scope player whose group the
@@ -1190,13 +1192,16 @@ namespace
             spec.weak = opt.Bool("weak", false);
             spec.once = opt.Bool("once", false);
             // rider=<spell>: cast on every player hit, the Bait's job hit included (the drill's rotation debuff).
-            // Only the module's reserved block (205000-205099), so a GM cannot cast arbitrary spells through it.
+            // Only the module's block past Weakened and the resolve spells (205008-205099): a GM can neither cast
+            // arbitrary spells through it nor hand out Weakened on a job hit.
             if (opt.Has("rider"))
             {
                 Optional<uint32> rider = Acore::StringTo<uint32>(opt.Str("rider", ""));
-                if (!rider || !Ids::InSpellBlock(*rider) || !sSpellMgr->GetSpellInfo(*rider))
-                    return Acore::StringFormat("rider= takes only a spell of the module's block {}-{}",
-                        Ids::SPELL_BLOCK_FIRST, Ids::SPELL_BLOCK_LAST);
+                if (!rider || !Ids::RiderAllowed(*rider))
+                    return Acore::StringFormat("rider= takes only a spell of the module's block {}-{} (not Weakened "
+                        "or a resolve spell)", Ids::SPELL_RESOLVE_LAST + 1, Ids::SPELL_BLOCK_LAST);
+                if (!sSpellMgr->GetSpellInfo(*rider))
+                    return Acore::StringFormat("rider={}: no such spell (spell_dbc row missing?)", *rider);
                 spec.rider = *rider;
             }
         }
@@ -1300,30 +1305,41 @@ namespace
         owner->NearTeleportTo(pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ(), owner->GetOrientation());
     }
 
-    // `.mech drill` step `weaken <stacks>`: stacks > 0 sets exactly that many on one random member below it (not the
-    // selected unit's victim with pick=nontank); 0 sets every member back to 0. The test encounter records the players,
-    // so `.mech clear` removes the Weakened too.
-    void DrillWeaken(Creature* owner, TestSpec const& spec, uint8 stacks, Dice& dice)
+    // `.mech drill` step `marker <stacks>`: stacks > 0 sets exactly that many Marked (drill) stacks (205009) on one
+    // random member below it (not the selected unit's victim with pick=nontank); 0 removes Marked from every member.
+    // Never touches Weakened: drill setup hands out no Weakened, and a reset leaves the Weakened members earned from
+    // real failures (orchestrator ruling on STAGE-M4-R-REPORT M-2). The encounter records the players, so its end
+    // (and `.mech clear`) removes Marked too. The spell row was checked when the drill was parsed.
+    void DrillMarker(Creature* owner, TestSpec const& spec, uint8 stacks, Dice& dice)
     {
         std::vector<Player*> members = GroupMembers(owner, spec.gm, spec.includeGm);
         if (!stacks)
         {
             for (Player* p : members)
-                if (Weakened::GetStacks(p))
-                    Weakened::SetStacks(p, 0);
+                p->RemoveAurasDueToSpell(Ids::SPELL_MARKED_DRILL);
             return;
         }
         Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected);
         Unit const* victim = spec.pick == TestSpec::Pick::NonTank && selected ? selected->GetVictim() : nullptr;
         members.erase(std::remove_if(members.begin(), members.end(), [stacks, victim](Player const* p)
         {
-            return p == victim || Weakened::GetStacks(p) >= stacks;
+            return p == victim || p->GetAuraCount(Ids::SPELL_MARKED_DRILL) >= stacks;
         }), members.end());
         if (members.empty())
             return;
         Player* p = members[dice.rng.Index(static_cast<uint32>(members.size()))];
-        Weakened::SetStacks(p, stacks);
-        Registry::GetOrCreate(owner->GetMap()).BeginEncounter(owner->GetGUID()).weakenedPlayers.insert(p->GetGUID());
+        Aura* aura = p->GetAura(Ids::SPELL_MARKED_DRILL, p->GetGUID());
+        if (!aura)
+            aura = p->AddAura(Ids::SPELL_MARKED_DRILL, p);
+        if (!aura)
+        {
+            LOG_ERROR("module.bossmechanics", "Marked (drill) ({}) could not be applied to {}",
+                Ids::SPELL_MARKED_DRILL, p->GetGUID().ToString());
+            return;
+        }
+        aura->SetStackAmount(stacks);
+        aura->RefreshDuration();
+        Registry::GetOrCreate(owner->GetMap()).BeginEncounter(owner->GetGUID()).markedPlayers.insert(p->GetGUID());
     }
 
     // ---- the drill runner (M4, MechanicDrillRunner.h) -------------------------------------------------------------
@@ -1386,7 +1402,7 @@ namespace
         // Parse every step now: a bad line fails the whole drill before anything registers.
         struct Planned
         {
-            bool weaken = false;
+            bool marker = false;
             uint8 stacks = 0;
             TestSpec spec;
         };
@@ -1397,15 +1413,21 @@ namespace
             std::string line = step.line;
             std::vector<std::string_view> const head = Acore::Tokenize(line, ' ', false);
             Planned p;
-            if (!head.empty() && head[0] == "weaken")
+            if (!head.empty() && head[0] == "marker")
             {
                 Optional<uint32> n = head.size() >= 2 ? Acore::StringTo<uint32>(head[1]) : std::nullopt;
-                if (!n || *n > Ids::WEAKENED_MAX_STACKS)
+                if (!n || *n > Ids::MARKED_DRILL_MAX_STACKS)
                 {
                     err = Acore::StringFormat("Drill {}: bad step '{}'", def.name, step.line);
                     return false;
                 }
-                p.weaken = true;
+                if (!sSpellMgr->GetSpellInfo(Ids::SPELL_MARKED_DRILL))
+                {
+                    err = Acore::StringFormat("Drill {}: step '{}': no spell {} (Marked (drill); spell_dbc row "
+                        "missing?)", def.name, step.line, Ids::SPELL_MARKED_DRILL);
+                    return false;
+                }
+                p.marker = true;
                 p.stacks = static_cast<uint8>(*n);
                 p.spec.gm = scopeGuid;
                 p.spec.includeGm = self;
@@ -1420,7 +1442,7 @@ namespace
                 planned.push_back(std::move(p));
                 continue;
             }
-            if (!head.empty() && Drill::DamageShape(head[0]))
+            if (!head.empty() && Drill::DamageShape(head[0]) && !opt.percent)
                 line += Acore::StringFormat(" dmg={}", dmg);
             std::vector<std::string_view> const stepTokens = Acore::Tokenize(line, ' ', false);
             Options stepOpt;
@@ -1447,10 +1469,10 @@ namespace
         {
             Planned const& p = planned[at.step];
             Milliseconds const delay(static_cast<int64>(at.delayMs));
-            if (p.weaken)
+            if (p.marker)
                 schedule(delay, [spec = p.spec, stacks = p.stacks, rng](Creature* testOwner)
                 {
-                    DrillWeaken(testOwner, spec, stacks, *rng);
+                    DrillMarker(testOwner, spec, stacks, *rng);
                 });
             else
                 schedule(delay, [spec = p.spec, rng, follow](Creature* testOwner)
@@ -1495,10 +1517,12 @@ namespace
         return true;
     }
 
+    // Atomic (STAGE-M4-R-REPORT m-6): the command runs on the world thread, but programs lay minefields from their
+    // owners' map update threads, which run in parallel.
     uint32 NextMinefieldGroup()
     {
-        static uint32 nextGroup = kFirstMinefieldGroup;
-        return nextGroup++;
+        static std::atomic<uint32> nextGroup{ kFirstMinefieldGroup };
+        return nextGroup.fetch_add(1, std::memory_order_relaxed);
     }
 
     // `count` random points within `spread` yd of `centre`, each on the floor (the centre's height where there is
@@ -1600,12 +1624,30 @@ namespace
         return "?";
     }
 
+    // A failed entry is loud (STAGE-M4-R-REPORT M-1): a LOG_ERROR, a whisper to the training dummy's scope player,
+    // and a record on the owner's encounter, which the sim takes into its report (Sim::TakeProgramErrors). A drill
+    // step that no longer parses (a spell row missing after a deploy) would otherwise drop that drill from every loop
+    // in silence.
+    void ReportProgramError(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e,
+        std::string const& err)
+    {
+        std::string const text = Acore::StringFormat("Program entry {} on {} failed: {}", EntryName(e),
+            owner->GetGUID().ToString(), err);
+        LOG_ERROR("module.bossmechanics", "{}", text);
+        Registry::GetOrCreate(owner->GetMap()).NoteProgramError(owner->GetGUID(), text);
+        if (owner->GetEntry() == Ids::NPC_MECHANIC_DUMMY)
+            if (Player* scope = ScopeOnMap(owner, run.scope))
+                owner->Whisper(Acore::StringFormat("Program entry {} failed: {}", EntryName(e), err), LANG_UNIVERSAL,
+                    scope);
+    }
+
     // One entry at its start; the owner is the boss stand-in. A failure (the scope player gone or dead, nobody to
-    // land on) skips the entry; the program goes on.
+    // land on, a step that does not parse) skips the entry, reported by ReportProgramError; the program goes on.
     void RunProgramEntry(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e)
     {
         std::string err;
-        int32 const dmg = std::max<int32>(run.opt.dmg, 0);
+        // Percent: -1 is the `.mech test` default, a percent of reference health (TestSpec::pct, 20).
+        int32 const dmg = run.opt.percent ? -1 : std::max<int32>(run.opt.dmg, 0);
         Player* scope = ScopeOnMap(owner, run.scope);
         if (e.kind == Drill::EntryKind::Drill)
         {
@@ -1643,8 +1685,7 @@ namespace
             LayMines(owner, spec, points, err);
         }
         if (!err.empty())
-            LOG_DEBUG("module.bossmechanics", "Program entry {} on {}: {}", EntryName(e), owner->GetGUID().ToString(),
-                err);
+            ReportProgramError(owner, run, e, err);
     }
 
     // Schedules every entry of one loop from `start` on the owner's encounter, and the next loop at its end.

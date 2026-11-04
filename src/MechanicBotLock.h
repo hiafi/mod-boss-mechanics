@@ -54,6 +54,7 @@
 
 class Action;
 class PlayerbotAI;
+class SpellInfo;
 
 namespace BossMechanics
 {
@@ -68,6 +69,11 @@ namespace BossMechanics
         // Puts the verdict into playerbots' by-name gate (Engine::SetExecuteActionGate) when the fork has it; a no-op
         // otherwise. Idempotent; world thread, once the glue registers (MechanicBotGate.cpp, LatchBotGlue).
         void InstallSpecificActionGate();
+
+        // The spell moves its caster by its effects (charge, leap, jump, teleport) or is in the scripted-mover table
+        // (MechanicLockRules.h): the lock's movement test, without the per-cast rule of a conditional mover. The leak
+        // detectors use it to tell the bot's own knockback-style move from another unit's knockback.
+        bool MovesCaster(SpellInfo const* info);
     }
 }
 

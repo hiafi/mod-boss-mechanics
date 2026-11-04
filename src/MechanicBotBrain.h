@@ -37,6 +37,13 @@ namespace BossMechanics
         // One brain step at `now` (GameTime ms). Idempotent within one game-time millisecond.
         void Update(PlayerbotAI* botAI, MechanicBotState& state, Milliseconds now);
 
+        // STAGE-M4-R-REPORT M-3, once each time the brain leaves Idle (after Update, from the strategy's triggers): a
+        // pull the bot has pending or running is ended through playerbots' own `pull end` action. PullMultiplier
+        // zeroes every action outside the pull's (ours included) until the pull ends, up to 15 s, and the lock blocks
+        // the pull's own movers in Escape and Hold, so the bot would stand still while the opening mechanics fire.
+        // A pull a human orders later with `do` is left alone (a human's order). True when a pull was ended.
+        bool EndPullOnWake(PlayerbotAI* botAI, MechanicBotState& state);
+
         // Waker, bot casting or channelling: refreshes the view when it is stale (no candidate search, no paths) and
         // returns leaveBy for the bot's current spot (Solver::kForever when nothing threatens it).
         Milliseconds CastLeaveBy(PlayerbotAI* botAI, MechanicBotState& state, Registry const& reg, Milliseconds now);
@@ -58,9 +65,9 @@ namespace BossMechanics
         // Where the move action goes: the current waypoint of a route, else the plan's target.
         Geo::Vec3 MoveTarget(MechanicBotState const& st);
 
-        // M4 cost (§3.6): the brain time of every bot on the map (mapId, instanceId) in the map update at `now`,
-        // summed, then cleared (0 when no brain ran there in that update). The waker calls it once per map update.
-        uint32 TakeMapBrainUs(uint32 mapId, uint32 instanceId, Milliseconds now);
+        // M4 cost (§3.6): the brain time of every bot on the map (mapId, instanceId) since the last take on this
+        // thread, summed, then cleared (0 when no brain ran there). The waker calls it once per map update.
+        uint32 TakeMapBrainUs(uint32 mapId, uint32 instanceId);
     }
 }
 

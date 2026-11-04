@@ -48,6 +48,9 @@ namespace BossMechanics::Solver
         bool found = false;
         float cellYd = 0.f;                 // the cell size used (grows past RouteParams::cellYd for a large box)
         std::uint32_t grown = 0;            // 1: the first box found no route and grew round the obstacle it clipped
+        // RegionRoute only: no route worked and another goal is left (try it with firstGoal = nextGoal).
+        bool moreGoals = false;
+        std::uint32_t nextGoal = 0;
     };
 
     namespace RouteDetail
@@ -1061,20 +1064,27 @@ namespace BossMechanics::Solver
         return plan;
     }
 
-    // Goals RegionRoute tries per call (each one Route search).
-    constexpr std::uint32_t kRegionRouteGoals = 2;
+    // Goals RegionRoute tries per call (each one Route search): one, so one call (one budget unit) never costs more
+    // than one Route (STAGE-M4-R-REPORT m-10: two Routes of the snake + pillar bench took 1.5 ms on the host, over
+    // the 1,000 µs route budget). The caller tries the next goal on a later step (`firstGoal`, RouteStats::moreGoals),
+    // up to kRegionRouteMaxGoals in all.
+    constexpr std::uint32_t kRegionRouteGoals = 1;
+    constexpr std::uint32_t kRegionRouteMaxGoals = 2;
 
     // M4 WP-Q (G2, the Alexei Assembly): a way round the hazards into a hard region the bot cannot reach straight.
     // Solve validates only the oracle's path, which knows walls, not hazards, so a member whose cluster lies past a
     // lasting Zone (the Out of bounds circle on the group) that is hot by the time the straight line crosses it gets
     // a Fallback and stands where it is until the judge. RegionRoute runs Route towards a spot that passes TargetOk:
-    // the candidates (Candidates, nearest first) that pass TargetOk at their straight arrival, at most
-    // kRegionRouteGoals of them, and keeps the first route whose end passes TargetOk at the route's own arrival (the
-    // late rule of the regions included). Outcome Move with the route (`waypoints`, `path`, `target`; answers and
-    // holdUntil as Solve gives them, so the bot holds the region for its window); Safe (the bot stays) when the bot
-    // already passes TargetOk, no live hard region is unmet, or no route works. Hazards only steer the route (Route
-    // ignores regions); the goal's checks bring the regions in. Deterministic for a given input and oracle.
-    inline Plan RegionRoute(Input const& in, PathOracle& oracle, RouteParams const& rp, RouteStats* stats = nullptr)
+    // the candidates (Candidates, nearest first) that pass TargetOk at their straight arrival, the `firstGoal`-th of
+    // them and on (kRegionRouteGoals per call), and keeps the first route whose end passes TargetOk at the route's
+    // own arrival (the late rule of the regions included). Outcome Move with the route (`waypoints`, `path`,
+    // `target`; answers and holdUntil as Solve gives them, so the bot holds the region for its window); Safe (the bot
+    // stays) when the bot already passes TargetOk, no live hard region is unmet, or no route works; then
+    // stats->moreGoals says whether a goal below kRegionRouteMaxGoals is left (stats->nextGoal). Hazards only steer
+    // the route (Route ignores regions); the goal's checks bring the regions in. Deterministic for a given input and
+    // oracle.
+    inline Plan RegionRoute(Input const& in, PathOracle& oracle, RouteParams const& rp, RouteStats* stats = nullptr,
+        std::uint32_t firstGoal = 0)
     {
         RouteStats local;
         RouteStats& st = stats ? *stats : local;
@@ -1084,6 +1094,8 @@ namespace BossMechanics::Solver
         none.arriveAt = in.now;
         none.holdUntil = in.now;
         Ms const horizonEnd = in.now + in.params.horizon;
+        if (firstGoal >= kRegionRouteMaxGoals)
+            return none;
         if (Detail::Frozen(in) || TargetOk(in, in.bot, in.now, horizonEnd))
             return none;
         bool unmet = false;
@@ -1094,12 +1106,22 @@ namespace BossMechanics::Solver
         float const speed = Detail::Speed(in);
         Ms const moveStart = in.now + in.params.startDelay;
         std::uint32_t tried = 0;
+        std::uint32_t eligible = 0;
         std::vector<Geo::Vec3> const cands = Candidates(in);
-        for (std::size_t i = 1; i < cands.size() && tried < kRegionRouteGoals; ++i)
+        for (std::size_t i = 1; i < cands.size(); ++i)
         {
             Geo::Vec3 const& goal = cands[i];
             if (!TargetOk(in, goal, moveStart + Detail::TravelMs(Detail::Dist3(in.bot, goal), speed), horizonEnd))
                 continue;
+            if (eligible++ < firstGoal)
+                continue;
+            if (tried >= kRegionRouteGoals)
+            {
+                // One more goal exists: the caller may try it on a later step.
+                st.moreGoals = firstGoal + tried < kRegionRouteMaxGoals;
+                st.nextGoal = firstGoal + tried;
+                break;
+            }
             ++tried;
             RouteStats rs;
             Plan plan = Route(in, goal, oracle, rp, &rs);

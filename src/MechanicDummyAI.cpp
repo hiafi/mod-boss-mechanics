@@ -20,9 +20,11 @@
 #include "Player.h"
 #include "ScriptedGossip.h"
 #include "StringConvert.h"
+#include "WorldSession.h"
 #include "Tokenize.h"
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace BossMechanics
 {
@@ -40,6 +42,7 @@ namespace BossMechanics
             ACTION_MENU_DAMAGE,
             ACTION_DAMAGE_NONE,
             ACTION_DAMAGE_FLAT,
+            ACTION_DAMAGE_PERCENT,
             ACTION_REPORT,
             ACTION_STOP,
             ACTION_DRILL_FIRST = 100
@@ -68,6 +71,13 @@ namespace BossMechanics
         {
             if (me && player)
                 me->Whisper(text, LANG_UNIVERSAL, player);
+        }
+
+        std::string DescribeDamage(int32 damage, bool percent)
+        {
+            if (percent)
+                return "each mechanic's percent of health";
+            return Acore::StringFormat("{} damage per hit", damage);
         }
     }
 
@@ -173,6 +183,7 @@ namespace BossMechanics
     {
         DrillOptions opt;
         opt.dmg = _damage;
+        opt.percent = _percent;
         opt.includeScopePlayer = true;      // a player alone on the dummy is the group
         opt.loop = true;
         // The reference-health provider reads the owner's level (percent damage); combat plays the dummy at the
@@ -180,6 +191,11 @@ namespace BossMechanics
         me->SetLevel(scope->GetLevel(), false);
         _scopePlayer = scope->GetGUID();
         _lastReport.clear();
+        // A new scope: the last group's players leave the scope set (STAGE-M4-R-REPORT m-5); StartProgram adds the
+        // new scope player and the next check the players fighting.
+        if (Registry* reg = Registry::Get(me->GetMap()))
+            if (Encounter* e = reg->FindEncounterMutable(me->GetGUID()))
+                e->testGms.clear();
         if (!StartProgram(me, scope->GetGUID(), _program, opt, err))
         {
             LOG_WARN(kLog, "Training dummy {}: program '{}' did not start for {}: {}", me->GetGUID().ToString(),
@@ -187,8 +203,8 @@ namespace BossMechanics
             return false;
         }
         _started = true;
-        LOG_DEBUG(kLog, "Training dummy {}: program '{}' for {} ({} damage)", me->GetGUID().ToString(), _program,
-            scope->GetName(), _damage);
+        LOG_DEBUG(kLog, "Training dummy {}: program '{}' for {} ({})", me->GetGUID().ToString(), _program,
+            scope->GetName(), DescribeDamage(_damage, _percent));
         return true;
     }
 
@@ -248,10 +264,17 @@ namespace BossMechanics
             Tell(me, scope, "Mechanics program restarted for your group: " + DescribeProgram(_program) + ".");
         }
 
-        // Every player in the fight joins the scope set (the open-world bot gate reads it).
+        // The scope set is the scope player and every player in the fight (the open-world bot gate and the dummy's
+        // targeting read it); a player who left the fight drops out (STAGE-M4-R-REPORT m-5).
         if (Registry* reg = Registry::Get(me->GetMap()))
-            for (Player const* p : fighting)
-                reg->AddScopePlayer(me->GetGUID(), p->GetGUID());
+            if (reg->FindEncounter(me->GetGUID()))
+            {
+                GuidSet scopeSet;
+                scopeSet.insert(_scopePlayer);
+                for (Player const* p : fighting)
+                    scopeSet.insert(p->GetGUID());
+                reg->SetScopePlayers(me->GetGUID(), std::move(scopeSet));
+            }
         FaceVictim();
     }
 
@@ -270,12 +293,26 @@ namespace BossMechanics
             me->SetFacingToObject(victim);
     }
 
-    bool MechanicDummyAI::Configure(std::string const& program, int32 damage, Player* by, std::string& err)
+    bool MechanicDummyAI::MayChange(Player const* player) const
+    {
+        if (!player)
+            return false;
+        if (!Running() || player->GetSession()->GetSecurity() >= SEC_GAMEMASTER)
+            return true;
+        Player const* scope = ObjectAccessor::GetPlayer(me->GetMap(), _scopePlayer);
+        if (!scope)
+            return true;    // the scope player left the map: the next check rescopes anyway
+        return player == scope || player->IsInSameRaidWith(scope);
+    }
+
+    bool MechanicDummyAI::Configure(std::string const& program, int32 damage, bool percent, Player* by,
+        std::string& err)
     {
         if (!Drill::ParseProgram(program, err))
             return false;
         _program = program.empty() ? std::string(kProgramAll) : program;
         _damage = std::max<int32>(damage, 0);
+        _percent = percent;
         _stopped = false;
         if (!IsEngaged())
             return true;
@@ -360,8 +397,8 @@ namespace BossMechanics
                 mark(Drill::Find(p) != nullptr)), GOSSIP_SENDER_MAIN, ACTION_MENU_DRILLS);
             AddGossipItemFor(player, GOSSIP_ICON_BATTLE, Acore::StringFormat("Program: barrage only{}",
                 mark(p == kProgramBarrage)), GOSSIP_SENDER_MAIN, ACTION_PROGRAM_BARRAGE);
-            AddGossipItemFor(player, GOSSIP_ICON_CHAT, Acore::StringFormat("Damage per hit: {}...", ai.Damage()),
-                GOSSIP_SENDER_MAIN, ACTION_MENU_DAMAGE);
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, Acore::StringFormat("Damage: {}...",
+                DescribeDamage(ai.Damage(), ai.Percent())), GOSSIP_SENDER_MAIN, ACTION_MENU_DAMAGE);
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Whisper me the failure report", GOSSIP_SENDER_MAIN,
                 ACTION_REPORT);
             if (ai.Running())
@@ -385,24 +422,43 @@ namespace BossMechanics
         {
             ClearGossipMenuFor(player);
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, Acore::StringFormat("No damage (failures still count){}",
-                ai.Damage() == 0 ? " (current)" : ""), GOSSIP_SENDER_MAIN, ACTION_DAMAGE_NONE);
+                !ai.Percent() && ai.Damage() == 0 ? " (current)" : ""), GOSSIP_SENDER_MAIN, ACTION_DAMAGE_NONE);
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, Acore::StringFormat("{} damage per hit{}", kDummyDefaultDamage,
-                ai.Damage() == kDummyDefaultDamage ? " (current)" : ""), GOSSIP_SENDER_MAIN, ACTION_DAMAGE_FLAT);
+                !ai.Percent() && ai.Damage() == kDummyDefaultDamage ? " (current)" : ""), GOSSIP_SENDER_MAIN,
+                ACTION_DAMAGE_FLAT);
+            // Real damage: each mechanic's percent of reference health (20% for most, as a dungeon boss would hit).
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, Acore::StringFormat("Percent of health, as a boss hits "
+                "(dangerous){}", ai.Percent() ? " (current)" : ""), GOSSIP_SENDER_MAIN, ACTION_DAMAGE_PERCENT);
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Back", GOSSIP_SENDER_MAIN, ACTION_MAIN);
             SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
         }
 
-        // Applies a choice and tells the player what happens next.
-        void Apply(Player* player, Creature* creature, MechanicDummyAI& ai, std::string const& program, int32 damage)
+        // The answer to a player who may not change a running program (MechanicDummyAI::MayChange).
+        void RefuseChange(Player* player, Creature* creature, MechanicDummyAI const& ai)
         {
+            Player const* scope = ObjectAccessor::GetPlayer(creature->GetMap(), ai.ScopePlayer());
+            std::string const who = scope ? scope->GetName() : std::string("another player");
+            Tell(creature, player, Acore::StringFormat("The program runs for {}'s group: only that group or a GM can "
+                "change or stop it. You can still read the report.", who));
+        }
+
+        // Applies a choice and tells the player what happens next.
+        void Apply(Player* player, Creature* creature, MechanicDummyAI& ai, std::string const& program, int32 damage,
+            bool percent)
+        {
+            if (!ai.MayChange(player))
+            {
+                RefuseChange(player, creature, ai);
+                return;
+            }
             std::string err;
-            if (!ai.Configure(program, damage, player, err))
+            if (!ai.Configure(program, damage, percent, player, err))
             {
                 Tell(creature, player, "That did not work: " + err);
                 return;
             }
-            Tell(creature, player, Acore::StringFormat("Program: {}, {} damage per hit. {}",
-                DescribeProgram(ai.Program()), ai.Damage(), ai.Running() ? "Running now." : "Attack me to start."));
+            Tell(creature, player, Acore::StringFormat("Program: {}, {}. {}", DescribeProgram(ai.Program()),
+                DescribeDamage(ai.Damage(), ai.Percent()), ai.Running() ? "Running now." : "Attack me to start."));
         }
     }
 
@@ -413,7 +469,7 @@ namespace BossMechanics
         MechanicDummyAI* ai = DummyAI(creature);
         if (tokens.empty() || !ai)
         {
-            handler->SendErrorMessage("Usage: .mech dummy <program|stop|report> [dmg=<n>], with a Mechanics "
+            handler->SendErrorMessage("Usage: .mech dummy <program|stop|report> [dmg=<n>|dmg=pct], with a Mechanics "
                 "Training Dummy ({}) selected. Programs: all (default), none, or comma-separated drill names, "
                 "lanes, barrage, minefield and uminefield, each with an optional :<cycles or seconds>.",
                 Ids::NPC_MECHANIC_DUMMY);
@@ -437,25 +493,33 @@ namespace BossMechanics
             return true;
         }
         int32 damage = ai->Damage();
+        bool percent = ai->Percent();
         for (std::size_t i = 1; i < tokens.size(); ++i)
         {
             std::string_view const t = tokens[i];
+            if (t == "dmg=pct")
+            {
+                percent = true;
+                continue;
+            }
             Optional<int32> v = t.substr(0, 4) == "dmg=" ? Acore::StringTo<int32>(t.substr(4)) : std::nullopt;
             if (!v || *v < 0)
             {
-                handler->SendErrorMessage("Bad option '{}' (only dmg=<0 or more>)", t);
+                handler->SendErrorMessage("Bad option '{}' (only dmg=<0 or more> or dmg=pct)", t);
                 return false;
             }
             damage = *v;
+            percent = false;
         }
         std::string err;
-        if (!ai->Configure(what, damage, gm, err))
+        if (!ai->Configure(what, damage, percent, gm, err))
         {
             handler->SendErrorMessage("Training dummy: {}", err);
             return false;
         }
-        handler->PSendSysMessage("Training dummy: program '{}', {} damage per hit; {}.", ai->Program(), ai->Damage(),
-            ai->Running() ? "running now" : "it starts when a player engages it");
+        handler->PSendSysMessage("Training dummy: program '{}', {}; {}.", ai->Program(),
+            DescribeDamage(ai->Damage(), ai->Percent()), ai->Running() ? "running now" : "it starts when a player "
+            "engages it");
         return true;
     }
 }
@@ -497,21 +561,29 @@ public:
                 SendDamageMenu(player, creature, *ai);
                 return true;
             case ACTION_PROGRAM_ALL:
-                Apply(player, creature, *ai, kProgramAll, ai->Damage());
+                Apply(player, creature, *ai, kProgramAll, ai->Damage(), ai->Percent());
                 break;
             case ACTION_PROGRAM_BARRAGE:
-                Apply(player, creature, *ai, kProgramBarrage, ai->Damage());
+                Apply(player, creature, *ai, kProgramBarrage, ai->Damage(), ai->Percent());
                 break;
             case ACTION_DAMAGE_NONE:
-                Apply(player, creature, *ai, ai->Program(), 0);
+                Apply(player, creature, *ai, ai->Program(), 0, false);
                 break;
             case ACTION_DAMAGE_FLAT:
-                Apply(player, creature, *ai, ai->Program(), kDummyDefaultDamage);
+                Apply(player, creature, *ai, ai->Program(), kDummyDefaultDamage, false);
+                break;
+            case ACTION_DAMAGE_PERCENT:
+                Apply(player, creature, *ai, ai->Program(), ai->Damage(), true);
                 break;
             case ACTION_REPORT:
                 SendReport(creature, *ai, player);
                 break;
             case ACTION_STOP:
+                if (!ai->MayChange(player))
+                {
+                    RefuseChange(player, creature, *ai);
+                    break;
+                }
                 ai->Stop();
                 Tell(creature, player, "Program stopped. Attack me again to restart it.");
                 break;
@@ -519,7 +591,8 @@ public:
             {
                 std::vector<Drill::Def> const& drills = Drill::All();
                 if (action >= ACTION_DRILL_FIRST && action - ACTION_DRILL_FIRST < drills.size())
-                    Apply(player, creature, *ai, drills[action - ACTION_DRILL_FIRST].name, ai->Damage());
+                    Apply(player, creature, *ai, drills[action - ACTION_DRILL_FIRST].name, ai->Damage(),
+                        ai->Percent());
                 break;
             }
         }

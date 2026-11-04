@@ -397,8 +397,9 @@ yellow and the cells purple (outline only until they burn) unless `color=` sets 
 
 Common keys: `dmg=` flat (0 = telegraph only), `pct=` (20, percent of reference health), `tankpct=`,
 `school=physical|holy|fire|nature|frost|shadow|arcane` (physical), `weak=0/1` (0), `once=1`, `rider=<spell>` (cast on
-every player hit, a Bait's job hit included; only the module's own spells 205000-205099, so a GM cannot cast arbitrary
-spells through it), `persist=<ms>`, `tick=<ms>` (1000), `anchor=point|me|target|member` (point: the selected unit's
+every player hit, a Bait's job hit included; only the module's own spells 205008-205099, so a GM cannot cast arbitrary
+spells through it, nor Weakened or a resolve spell; a spell of the block with no `spell_dbc` row is refused with its own
+message), `persist=<ms>`, `tick=<ms>` (1000), `anchor=point|me|target|member` (point: the selected unit's
 position, else the GM's; facing = the GM's), `color=red|yellow|blue|purple|orange|green|teal|white|black`, `repeat=` (1,
 max 50), `every=` (1000 ms; repeats are registered from the test owner's scheduler), `scatter=` (0 yd: random offset per
 repeat, point anchors), `tele=0` (no marker), `at=member` and `seed=<n>` (see below). Damage keys do not apply to stack,
@@ -428,7 +429,7 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   projectile): aimed at that unit live, the length stays `size`. `pick=any|nontank|same` (with `at=member`,
   `anchor=member`, `to=member`): `nontank` skips the selected unit's victim, `same` reuses the member the previous pick
   of this command (or drill) landed on (when it is gone: a member other than the victim). Note the two meanings of
-  "tank" in tests: `pick=nontank` (and the drills' `weaken pick=nontank`) skip whoever the selected creature attacks,
+  "tank" in tests: `pick=nontank` (and the drills' `marker pick=nontank`) skip whoever the selected creature attacks,
   while `role=nontank` (and the Bait rule) go by the role provider, which in tests has no boss and falls back to the
   tank spec. Let a tank-spec bot hold the creature, so the two agree.
 - `tag=<n>` (1): the ledger tag; repeats count up from it.
@@ -468,7 +469,10 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
   creature** (the boss stand-in; a bot should tank it for the frontals and the stack on it) and the group, one cycle
   after another. Each step is a `.mech test` line (`src/MechanicDrill.h`, desk-checked by `tests/drill_test.cpp`) run
   from the test owner's scheduler, so `.mech clear` stops it; damage steps get `dmg=` (flat, default 1), `self=1` lets
-  member picks land on the GM, `cycles` 1-10. The training dummy and the dpssim mechanics mode run the same drills
+  member picks land on the GM, `cycles` 1-10. The drill-only step `marker <n> [pick=nontank]` sets exactly n stacks of
+  Marked (drill) (205009, a harmless stand-in for a boss's eligibility or order aura) on one random member below n;
+  `marker 0` takes it off every member. Drill setup never hands out Weakened, and never clears the Weakened members
+  earned from real failures (M4 WP-F). The training dummy and the dpssim mechanics mode run the same drills
   through the runner (`src/MechanicDrillRunner.h`: `RunDrill`, `StartProgram`; the sim seam is
   `src/BossMechanicsSim.h`), with their scope player in place of the GM.
   - `smite` (Deadmines SM2, SM3, SM12; 10 s): frontal cone 90 / 8 yd (2 s), a rear cone registered 1.5 s later
@@ -488,13 +492,14 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     Assembly + Line up; Line up + Keep your distance). Tags: 2 still, 3 assembly, 4 distance, 5 bounds, 6 line up,
     7 desks. One cycle by default (2.6 minutes). The desks keep 8 yd apart for up to 9 members (ring 12).
   - `soaks` (26 s): Payday (1 body, non-tank, 2 yd, 2.5 s, near a random non-tank member); two non-tanks get 2
-    and 1 Weakened stacks, then an ordered soak (Weakened ascending, cap 2) 6 yd ahead of the group (everyone back to
-    0 at 9 s); the fortune (need 0, 10 yd left of the group: nobody steps on it); a
-    lasting 3 yd soak on you for 5 s from 19 s into the cycle (walk). Tags 1-4.
-  - `ras` (RF1, RF2, RF5; 12 s): a random non-tank gets 3 Weakened stacks; a self-keyed RunOut 8 (`self=205000:3`)
-    while a Stack 8 on the creature holds the players at 0-2 stacks; a second non-tank reaches 3 stacks 2 s in and
-    joins the runners; everyone back to 0 at 9 s (the encounter records them, so `.mech clear` also removes them).
-    Tags 2 (stack), 5 (runout).
+    and 1 Marked (drill) stacks, then an ordered soak (Marked ascending, `order=205009:asc:cap=2`) 6 yd ahead of the
+    group (everyone back to 0 at 9 s); the fortune (need 0, 10 yd left of the group: nobody steps on it); a lasting
+    3 yd soak on you for 5 s from 19 s into the cycle (walk). Tags 1-4.
+  - `ras` (RF1, RF2, RF5; 12 s): a random non-tank gets 3 Marked (drill) stacks (standing in for Chill); a self-keyed
+    RunOut 8 (`self=205009:3`) while a Stack 8 on the creature holds the players at 0-2 stacks; a second non-tank
+    reaches 3 stacks 2 s in and joins the runners; everyone back to 0 at 9 s (the encounter records them, so its end
+    and `.mech clear` also remove them). Tags 2 (stack), 5 (runout). Marked, not fenrus's Baited 205008: in one
+    program slice the Baited stacks would decide who runs.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -515,6 +520,41 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
 - `.mech clear all`: ends **every** encounter on the map, real bosses included (the boss's next registration then
   runs as a bare implicit encounter: default palette, no boss state binding, no failure listener).
 - A mine without `life=` never expires, so it keeps the test owner from its idle despawn: `.mech clear` it.
+
+## Training dummy (300402, M4)
+
+The Mechanics Training Dummy (`npc_boss_mechanics_dummy`, `src/MechanicDummyAI.h/.cpp`) runs a drill program on
+itself as the boss stand-in, so players (no GM needed) and their bots can practice. Spawn it with `.npc add 300402`.
+
+- **Engage**: hit it. It begins its own encounter, scoped to the player who engaged it (a pet's owner; a GM's hit
+  picks a fighting non-GM player), and runs the program for that player's group (raid) on a loop. It never dies,
+  moves or attacks: hits leave 1 health, a **40% floor** is put back every second (above every execute range), it
+  turns in place to face the top of its threat list (the tank of the frontal exemption and `pick=nontank`). Its level
+  follows the scope player (percent damage reads it).
+- **Scope**: only the scope player's group and the players fighting it are hit (`Registry::IsInTestScope`), never a
+  bystander. Every second the scope set becomes the scope player plus the players in combat with it (within 60 yd):
+  a player who walks off drops out. When the scope player's group has left the fight while others still fight, the
+  program restarts for one of them (and the last group leaves the scope).
+- **Gossip** (talk to it): the program (every drill then barrage and minefield, one drill, or barrage only), the
+  damage (none: failures still count; 1 flat per hit, the default; or **percent**: each mechanic's own `pct=` of
+  reference health, 20% for most, as a dungeon boss would hit), "whisper me the failure report" (the ledger by player
+  and tag, or the last fight's once it ended), and "stop". A choice made while it is engaged restarts the program at
+  once (the ledger is kept); otherwise the program starts on the next engage. **While a program runs, only the scope
+  player's group (raid) or a GM may change or stop it**; anyone may start one on an idle dummy and read the report.
+- **`.mech dummy <program|stop|report> [dmg=<n>|dmg=pct]`** (GM, the dummy selected): the same, from the command line.
+- **Programs** (`Drill::ParseProgram`): `all` (the default: `smite,cookie,fenrus,soaks,ras,alexei,barrage:30,
+  minefield:30`), `none` (the encounter and scope only), or comma-separated entries `<name>[:<n>]`: a drill name (n =
+  cycles, default the drill's), `lanes` (n = cycles, default 3), `barrage`, `minefield` or `uminefield` (n = seconds,
+  default 30). Entries run one after another, 4 s apart; barrage and minefields use the `.mech barrage` /
+  `.mech minefield` defaults around the scope player.
+- **A failed entry** (a step that no longer parses, for example a spell row missing after a deploy, or nobody alive to
+  land on) is skipped; it is logged at `LOG_ERROR`, whispered to the scope player, and recorded on the encounter (the
+  sim reads it with `Sim::TakeProgramErrors`).
+- **What ends the encounter**: an evade (every player beyond 60 yd or out of combat, checked every second; or 2
+  minutes with no valid player in combat with it, e.g. only pets), the gossip stop or `.mech dummy stop`, death (only
+  by force), despawn, and `.mech clear all` (the dummy then stays quiet, in combat with no program, until the next
+  engage or gossip choice). `.mech clear` leaves it alone. The end drops the pending steps, mechanics, markers,
+  ledger, and the Weakened and Marked (drill) stacks it gave.
 
 ## Bots
 
@@ -553,11 +593,12 @@ while Idle on a map with mechanics) and runs the mode machine:
   stopped 0.6 yd short would still stand in it.) Path or target turned unsafe -> re-solve; a plan from the
   reduced-margin pass is re-checked at the reduced margins. A clear Fallback (its path spends no time inside an exact
   hitbox while hot) never passed the margins, so it walks on while the rest of its way stays clear and its end stays
-  outside every exact hitbox; a hot one is solved again (`Solver::FallbackHolds`, M4: re-solving a clear Fallback on
-  every view rebuild turned bots round in a crowd and cost hits). No progress (0.5 yd) for 500 ms since the escape
-  began or the bot last moved (re-sends do not restart this clock; refused sends count as no progress) -> re-solve;
-  the same target again -> released. Rooted, stunned or polymorphed with no progress -> released until it can move.
-  One escape past 2 x its planned travel + 1.5 s, or an unbroken run of escapes past 10 s -> released.
+  outside every exact hitbox; a hot one, or one that breaks a hard region, is solved again (`Solver::FallbackHolds`, M4:
+  re-solving a clear Fallback on every view rebuild turned bots round in a crowd and cost hits). No progress (0.5 yd)
+  for 500 ms since the escape began or the bot last moved (re-sends do not restart this clock; refused sends count as no
+  progress) -> re-solve; the same target again -> released. Rooted, stunned or polymorphed with no progress ->
+  released until it can move. One escape past 2 x its planned travel + 1.5 s, or an unbroken run of escapes past 10 s
+  -> released.
 - **Released** (Watch for 1.5 s, or until a root ends): the stock AI has the bot back. Nothing is locked, no cast is
   broken and an unsafe spot is not solved, so a stuck or rooted bot heals, casts and follows; then it tries again.
 - **Hold**: at the safe spot until `holdUntil` (latest window end it answers, capped at `HoldCapMs`) -> Watch. Spot
@@ -629,7 +670,12 @@ The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The
   Out of bounds circle) asks for `Solver::RegionRoute` on the next brain step, under the route search's rules
   (`Route.Enable`, `Route.RetryMs`, one budget unit, nothing else that step), while the bot still walks or holds that
   Fallback. A found route is an Escape over its waypoints to a spot that passes the full check (the re-check holds its
-  end to it, not only to the hazards) and goes onto the reservation board; it holds the region's window there.
+  end to it, not only to the hazards) and goes onto the reservation board; it holds the region's window there. One
+  goal per call (one Route search, so one budget unit costs at most one Route: two cost 1.5 ms in the worst host
+  bench, over the 1,000 µs route budget); when that goal's route fails or arrives late, the next goal goes on the next
+  brain step, up to two goals. The request stays pending while the Fallback still breaks its region and only the
+  retry clock or the budget is missing, and a Fallback that breaks a hard region is never kept by the Escape
+  re-check: it is solved again on every view change (STAGE-M4-R-REPORT m-4, m-10).
 
 Role solves, region tracking, tank re-facing searches and routes count in the 8-per-map-update budget.
 
@@ -881,7 +927,12 @@ M4 adds three lines (the same numbers reach the sim through `Sim::ReadBotStats`)
   the map per map update (mean and max). p50 and p95 are log2 bucket bounds (`src/MechanicCost.h`).
 
 A fourth M4 line, `m4 lock`, counts the actions run by name the lock's gate refused, the chat `do` orders it let
-through, casts judged with no spell id, `pull` requests refused while an encounter is live, and forced leak passes.
+through, casts judged with no spell id (only casts that could run: spells the bot never learned reach the lock with id
+0 and are not counted), `pull` requests refused while the bot's own encounter is live (in an instance any encounter
+on the map; in the open world one whose scope holds the bot's group), pulls ended (a pull pending or running when the
+brain left Idle: playerbots' pull would zero every other action for up to 15 s, so the brain runs its `pull end`),
+and forced leak passes. A fifth, `m4 routes and bands`, counts the region routes (and those found) and the out-of-band
+time (ms; and the part of it inside a task window).
 `BossMechanics.Bots.ForceLeaks = N` (debug only, never on a live realm) proves the leak detectors fire: the lock lets
 the blocks they can see through (a foreign mover, a cast-time spell or item in Escape or Hold, a look-away turn) until
 each detector has counted N since the counters' last reset, and every leak is logged as `lock leak in ...`. Passes
@@ -923,7 +974,14 @@ stuck re-solve).
   victim) breaks the cone prediction (boss rule, STAGE-M3-HANDOFF §3.12).
 - Look-away cannot stop a turn by a plain `Action` the audit did not list, or by `DoSpecificAction`; the face action
   turns the bot back on its next tick.
-- Bots never steer their pets; Spread, RunOut and Bait no longer hit pets (decision §7.8), Zones still do.
+- Bots never steer their pets; Spread, RunOut and Bait no longer hit pets (decision §7.8), Zones still do. The lock
+  does not hold pets either: a hunter's pet may teleport into a telegraph on Kill Command (34026) or charge or leap
+  into one on Command I / II (201800 / 201801, its family's commanded spell). Mechanics target players only, so a pet
+  in a hazard costs no failure (STAGE-M4-L-REPORT §8).
+- Plain `Action`s that cast are not judged as casts (the lock sees `CastSpellAction`s): Paladin seals (20164, 20165,
+  20166, 20375, 21084, 31801), auras and the aura swap (465, 7294, 19746, 19876, 32223); Shaman elemental summons
+  (2062, 2894, 202272, 202273), imbues (8017, 8024, 8033, 8232, 51730) and attunements (202207-202210); Rogue poisons
+  (203701-203706). Every one of them is instant today; a future cast-time one shows as `leakCasts` with its spell id.
 - A bot released after a stuck escape stands where it is for up to 1.5 s, inside the hazard if that is where it got
   stuck (no navmesh way out); it heals and casts meanwhile.
 - The barrage donut tests "stay in the hole" only while `SafetyMarginYd` < 1 (`MechanicBarrage.h`).
@@ -965,8 +1023,11 @@ same rule).
 | 205000 | Weakened (`spell_boss_mechanics_weakened`) |
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 205008 | Baited (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' bait rotation aura (`rider=`, `aura=`) |
+| 205009 | Marked (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' selector (`marker` steps) |
+| 205010-205099 | spare (the module's block; `rider=` takes 205008-205099) |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
+| 300402 | Mechanics Training Dummy (`npc_boss_mechanics_dummy`, M4) |
 | 91000-91833 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
 | | offsets: disc 0, ring 1, timer ring 2, donut 3+j, donut outline 10+j, cone 17+j, cone outline 25+j, |
 | | dashed ring 33 (34 per color; +34..+99 spare) |

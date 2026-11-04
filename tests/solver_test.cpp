@@ -1277,6 +1277,48 @@ namespace
     // Cost
     // ----------------------------------------------------------------------------------------------------------
 
+    // STAGE-M4-R-REPORT m-3: the bounded Fallback ranking compares the distance instead of assuming the candidates
+    // come nearest first (they are sorted by 2D distance, ranked by 3D). Ranking: time inside, broken kinds, distance.
+    void TestFallbackWalkCap()
+    {
+        using Solver::Detail::FallbackWalkCap;
+        // Fewer broken kinds: a tie on time inside ranks ahead, whatever the distance.
+        CHECK(FallbackWalkCap(Ms(500), 2, 10.f, 1, 30.f).cap == Ms(500));
+        // As many broken kinds and nearer (a step lower on stairs): a tie ranks ahead too.
+        Solver::Detail::FallbackCap c = FallbackWalkCap(Ms(500), 1, 10.f, 1, 9.f);
+        CHECK(c.walk && c.cap == Ms(500));
+        // The case the review found: the top's worst spends no time inside and a later candidate is nearer in 3D;
+        // it used to be skipped (walk = false). It must be walked, capped at 0.
+        c = FallbackWalkCap(Ms(0), 0, 10.f, 0, 9.f);
+        CHECK(c.walk && c.cap == Ms(0));
+        // As many kinds and farther, or more kinds: only less time inside ranks ahead.
+        CHECK(FallbackWalkCap(Ms(500), 1, 10.f, 1, 11.f).cap == Ms(499));
+        CHECK(FallbackWalkCap(Ms(500), 1, 10.f, 2, 1.f).cap == Ms(499));
+        CHECK(FallbackWalkCap(Ms(500), 1, 10.f, 1, 10.f).cap == Ms(499));    // equal distance: not ahead
+        // ...and when the worst spends none, nothing can: not walked.
+        CHECK(!FallbackWalkCap(Ms(0), 1, 10.f, 1, 11.f).walk);
+        CHECK(!FallbackWalkCap(Ms(0), 0, 10.f, 1, 1.f).walk);
+    }
+
+    // STAGE-M4-R-REPORT m-4: a Fallback that breaks a hard region never holds through the Escape re-check.
+    void TestFallbackHoldsNeverViolating()
+    {
+        Input in;
+        in.bot = { 0.f, 0.f, 0.f };
+        in.now = kNow;
+        Plan plan;
+        plan.outcome = Outcome::Fallback;
+        plan.exposure = Ms(0);
+        plan.target = { 5.f, 0.f, 0.f };
+        plan.path = { in.bot, plan.target };
+        std::vector<Vec3> const rest = plan.path;
+        Ms const horizonEnd = kNow + Ms(5000);
+        CHECK(Solver::FallbackHolds(in, plan, rest, horizonEnd, true));     // clear, no hazard: holds
+        plan.violated = 1;
+        CHECK(!Solver::FallbackHolds(in, plan, rest, horizonEnd, true));
+        CHECK(!Solver::FallbackHolds(in, plan, rest, horizonEnd, false));
+    }
+
     void Benchmark()
     {
         Input const in = Barrage(7, 29);                         // 29 + the one on the bot = 30 hazards
@@ -1418,6 +1460,8 @@ int main()
     TestTiersUnderBarrage();
     TestReducedMarginGap();
     TestTrueEnclosure();
+    TestFallbackWalkCap();
+    TestFallbackHoldsNeverViolating();
     Benchmark();
     return Report("solver_test");
 }

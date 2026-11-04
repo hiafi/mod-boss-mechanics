@@ -7,10 +7,10 @@
  * rows it reproduces (shapes, timings, the separations the pairs need) and the landing geometry below.
  *
  * A drill is a list of steps per cycle. A step is the argument line of one `.mech test` (shape, size, ms, keys), run
- * at `atMs` after the cycle start from the test owner's scheduler, or the drill-only pseudo shape `weaken <stacks>`
- * (sets Weakened on group members, see Step). The command appends `dmg=<n>` to every damage step (DamageShape).
- * Positions are yards in map coordinates; angles in radians; "ahead" is along the GM's facing, "left" 90 degrees
- * counterclockwise from it.
+ * at `atMs` after the cycle start from the test owner's scheduler, or the drill-only pseudo shape `marker <stacks>`
+ * (sets Marked (drill) 205009 on group members, see Step; drill setup never hands out Weakened). The command appends
+ * `dmg=<n>` to every damage step (DamageShape). Positions are yards in map coordinates; angles in radians; "ahead" is
+ * along the GM's facing, "left" 90 degrees counterclockwise from it.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DRILL_H
@@ -80,9 +80,10 @@ namespace BossMechanics::Drill
 
     // ---- drill steps -----------------------------------------------------------------------------------------------
 
-    // One step: a `.mech test` line, or `weaken <stacks> [pick=nontank]` (stacks > 0: one random group member below
-    // that many stacks, never the selected creature's victim with pick=nontank, gets exactly that many; 0: every group
-    // member back to 0).
+    // One step: a `.mech test` line, or `marker <stacks> [pick=nontank]` (Marked (drill) 205009, the drills' stand-in
+    // for an eligibility or order aura; stacks > 0: one random group member below that many stacks, never the selected
+    // creature's victim with pick=nontank, gets exactly that many; 0: Marked off every group member). Weakened is for
+    // failures only: no step sets or clears it (orchestrator ruling on STAGE-M4-R-REPORT M-2).
     struct Step
     {
         std::uint32_t atMs = 0;
@@ -103,7 +104,7 @@ namespace BossMechanics::Drill
     // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage.
     inline bool DamageShape(std::string_view shape)
     {
-        return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "weaken";
+        return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker";
     }
 
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
@@ -175,30 +176,30 @@ namespace BossMechanics::Drill
                     { 12 * kAlexeiSlotMs, "spread 8 10000 tag=4" },
                 }, 1 },     // one cycle is 2.6 minutes
             // Soaks: Payday (Deadmines MJ1: 1 body, non-tank, 2 yd, 2.5 s flight, near a random non-tank member, so
-            // one stands within reach); an ordered soak (fewest Weakened stacks first, players at 2 or more never
-            // claim; two members get 1 and 2 stacks first, so the rule decides, not the guid); the Barov fortune
-            // (Scholomance AB10: count 0, nobody takes it, 10 yd off the group); a lasting soak on the GM (Rattlegore
-            // RG2: 3 yd, 5 s, walk while it lasts).
-            { "soaks", "Payday (1 non-tank, 2 yd), ordered soak (Weakened asc, cap 2), fortune (need 0), lasting soak "
+            // one stands within reach); an ordered soak (fewest Marked (drill) stacks first, standing in for a boss's
+            // soak debuff, players at 2 or more never claim; two members get 1 and 2 stacks first, so the rule
+            // decides, not the guid); the Barov fortune (Scholomance AB10: count 0, nobody takes it, 10 yd off the
+            // group); a lasting soak on the GM (Rattlegore RG2: 3 yd, 5 s, walk while it lasts).
+            { "soaks", "Payday (1 non-tank, 2 yd), ordered soak (Marked asc, cap 2), fortune (need 0), lasting soak "
                 "on you (walk)", 26000, false, {
                     { 0, "soak 2 2500 need=1 role=nontank at=member pick=nontank scatter=5 tag=1" },
-                    { 2500, "weaken 2 pick=nontank" },
-                    { 3000, "weaken 1 pick=nontank" },
-                    { 4000, "soak 3 4000 need=1 order=205000:asc:cap=2 at=group shift=6:0 tag=2" },
-                    { 9000, "weaken 0" },
+                    { 2500, "marker 2 pick=nontank" },
+                    { 3000, "marker 1 pick=nontank" },
+                    { 4000, "soak 3 4000 need=1 order=205009:asc:cap=2 at=group shift=6:0 tag=2" },
+                    { 9000, "marker 0" },
                     { 10000, "soak 2 4000 need=0 at=group shift=0:10 tag=3" },
                     { 16000, "soak 3 3000 need=1 anchor=me persist=5000 tick=1000 tag=4" },
                 } },
-            // Scholomance, Ras Frostwhisper (RF1, RF2, RF5): a member reaches 3 Weakened stacks (standing in for
-            // Chill) and runs out 8 yd (self-keyed RunOut) while the rest (0-2 stacks) hold a Stack 8 yd on Ras; a
+            // Scholomance, Ras Frostwhisper (RF1, RF2, RF5): a member reaches 3 Marked (drill) stacks (standing in
+            // for Chill) and runs out 8 yd (self-keyed RunOut) while the rest (0-2 stacks) hold a Stack 8 yd on Ras; a
             // second member reaches 3 stacks during the warning and joins the runners; everyone thaws (0) after.
-            { "ras", "self-keyed RunOut 8 at Weakened >= 3 while a Stack 8 on the creature holds the rest", 12000,
+            { "ras", "self-keyed RunOut 8 at Marked >= 3 while a Stack 8 on the creature holds the rest", 12000,
                 false, {
-                    { 0, "weaken 3 pick=nontank" },
-                    { 0, "stack 8 6000 anchor=target aura=205000:0:2 tag=2" },
-                    { 0, "runout 8 6000 self=205000:3 tag=5" },
-                    { 2000, "weaken 3 pick=nontank" },
-                    { 9000, "weaken 0" },
+                    { 0, "marker 3 pick=nontank" },
+                    { 0, "stack 8 6000 anchor=target aura=205009:0:2 tag=2" },
+                    { 0, "runout 8 6000 self=205009:3 tag=5" },
+                    { 2000, "marker 3 pick=nontank" },
+                    { 9000, "marker 0" },
                 } },
         };
         return drills;

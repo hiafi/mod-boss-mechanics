@@ -300,12 +300,14 @@ namespace
 
     // ---- G3: Ras, a Stack on the boss while RunOut carriers leave -------------------------------------------------
 
-    // t 0: `weaken 3` on p1, `stack 8 6000 anchor=target aura=205000:0:2` (0-2 stacks stack on the boss),
-    // `runout 8 6000 self=205000:3` (3 stacks: nobody else within 8 yd of you); t 2 s: `weaken 3` on p2. Judged at
+    // t 0: `marker 3` on p1, `stack 8 6000 anchor=target aura=205009:0:2` (0-2 stacks stack on the boss),
+    // `runout 8 6000 self=205009:3` (3 stacks: nobody else within 8 yd of you); t 2 s: `marker 3` on p2. Judged at
     // 6 s: MissedStack for a stacker beyond 8 yd of the boss, a RunOut hit for anyone within 8 yd of a carrier.
-    std::uint32_t RunRas(bool rangedActor, std::size_t p1, std::size_t p2, bool placeRule)
+    // `holdViolating`: the WP-Q build's Escape re-check (before STAGE-M4-R-REPORT m-4).
+    std::uint32_t RunRas(bool rangedActor, std::size_t p1, std::size_t p2, bool placeRule, bool holdViolating)
     {
         Fight f(rangedActor, 9.f);
+        f.w.cfg.holdViolating = holdViolating;
         std::array<int, 5> stacks{};
         std::array<bool, 5> published{};
         bool active = false;
@@ -401,6 +403,7 @@ namespace
         // and it then sees them clear and stays: MissedStack. With the rule its circle waits for its own plan.
         std::uint32_t before = 0;
         std::uint32_t after = 0;
+        std::uint32_t recheckOnly = 0;
         std::uint32_t cases = 0;
         for (bool ranged : { true, false })
             for (std::size_t p1 = 1; p1 < 5; ++p1)
@@ -409,12 +412,15 @@ namespace
                     if (p1 == p2)
                         continue;
                     ++cases;
-                    before += RunRas(ranged, p1, p2, false);
-                    after += RunRas(ranged, p1, p2, true);
+                    before += RunRas(ranged, p1, p2, false, true);
+                    after += RunRas(ranged, p1, p2, true, false);
+                    recheckOnly += RunRas(ranged, p1, p2, false, false);
                 }
-        std::printf("ras, %u pick pairs: %u failures as built, %u with the placement rule\n", cases, before, after);
+        std::printf("ras, %u pick pairs: %u failures as built, %u with the placement rule, %u with the m-4 re-check "
+            "alone\n", cases, before, after, recheckOnly);
         CHECK(before > 0);
         CHECK(after == 0);
+        CHECK(recheckOnly <= before);
     }
 
     // ---- G2: Alexei, Out of bounds with Assembly ----------------------------------------------------------------
@@ -427,6 +433,7 @@ namespace
     {
         Fight f(rangedActor);
         f.w.cfg.regionRoute = regionRoute;
+        f.w.cfg.holdViolating = !regionRoute;   // "as built": the WP-Q build before STAGE-M4-R-REPORT m-4
         for (std::size_t i = 0; i < 5; ++i)
             f.w.bots[i].pos = starts ? (*starts)[i]
                 : At(f.melee[i] ? rng->Range(3.f, 4.5f) : rng->Range(6.f, 18.f), rng->Range(0.f, 360.f));
@@ -570,7 +577,18 @@ namespace
         CHECK(solve.violated == 1);
         Solver::RouteParams rp;
         Solver::RouteStats rs;
-        Solver::Plan const route = Solver::RegionRoute(in, oracle, rp, &rs);
+        // STAGE-M4-R-REPORT m-10: one goal per call; here the first goal's route arrives late, the caller tries the
+        // next one on its next step.
+        Solver::Plan route = Solver::RegionRoute(in, oracle, rp, &rs);
+        std::uint32_t calls = 1;
+        while (route.outcome != Solver::Outcome::Move && rs.moreGoals && calls < Solver::kRegionRouteMaxGoals)
+        {
+            route = Solver::RegionRoute(in, oracle, rp, &rs, rs.nextGoal);
+            ++calls;
+        }
+        CHECK(calls <= Solver::kRegionRouteMaxGoals);
+        CHECK(Solver::RegionRoute(in, oracle, rp, nullptr, Solver::kRegionRouteMaxGoals).outcome
+            == Solver::Outcome::Safe);
         CHECK(route.outcome == Solver::Outcome::Move);
         CHECK(rs.found);
         CHECK(route.waypoints.size() >= 2);

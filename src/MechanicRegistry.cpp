@@ -506,9 +506,25 @@ namespace BossMechanics
         // Weakened: only the players this encounter stacked, and not one another encounter on the map also stacked
         // (an add's or a test owner's end must not reset the boss fight's penalty).
         GuidSet weakened;
+        GuidSet marked;
         if (auto it = _encounters.find(owner); it != _encounters.end())
+        {
             weakened.swap(it->second.weakenedPlayers);
+            marked.swap(it->second.markedPlayers);
+        }
         _encounters.erase(owner);
+        // Marked (drill), the drills' selector aura (M4 WP-F): the same rule as Weakened below.
+        for (ObjectGuid const& g : marked)
+        {
+            bool const heldElsewhere = std::any_of(_encounters.begin(), _encounters.end(), [&g](auto const& kv)
+            {
+                return kv.second.markedPlayers.count(g) != 0;
+            });
+            if (heldElsewhere)
+                continue;
+            if (Player* player = ObjectAccessor::GetPlayer(_map, g))
+                player->RemoveAurasDueToSpell(Ids::SPELL_MARKED_DRILL);
+        }
         if (!bridge)
             return;
         for (ObjectGuid const& g : weakened)
@@ -560,6 +576,24 @@ namespace BossMechanics
             e.testGms.insert(player);
         e.wantsBots = true;
         return e;
+    }
+
+    Encounter& Registry::SetScopePlayers(ObjectGuid owner, GuidSet players)
+    {
+        Encounter& e = BeginEncounter(owner);
+        e.testGms = std::move(players);
+        e.wantsBots = true;
+        return e;
+    }
+
+    void Registry::NoteProgramError(ObjectGuid owner, std::string error)
+    {
+        Encounter* e = FindEncounterMutable(owner);
+        if (!e)
+            return;
+        ++e->programErrorCount;
+        if (e->programErrors.size() < kMaxProgramErrors)
+            e->programErrors.push_back(std::move(error));
     }
 
     void Registry::Schedule(ObjectGuid owner, Milliseconds at, std::function<void(Creature* owner)> fn)

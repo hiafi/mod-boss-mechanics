@@ -1038,6 +1038,41 @@ namespace
                 detail) < 1000);
         }
 
+        // 7. STAGE-M4-R-REPORT m-10: the worst RegionRoute, one budget unit. The snake + pillar box, a hard region
+        // (a 3 yd cluster circle) at the snake's far end, due before the snake route can get there: each goal's
+        // route is found and then refused for its late arrival, so the call runs every Route it may.
+        {
+            Input rr = in;
+            rr.regions.clear();
+            Solver::Region r;
+            r.id = 7;
+            r.shape = Shape::Circle(3.f);
+            r.poses = { Pose{ goal.x, goal.y, 0.f, 0.f } };
+            r.marginYd = 0.5f;
+            // Straight there: about 68 yd, 9.7 s at 7 yd/s; the snake is far longer.
+            r.from = kNow + Ms(12000);
+            r.to = r.from + Ms(500);
+            rr.regions.push_back(r);
+            WallOracle pillar2;
+            pillar2.walls = wall.walls;
+            RouteStats rrs;
+            Plan const rplan = Solver::RegionRoute(rr, pillar2, RouteParams(), &rrs);
+            CHECK(rplan.outcome == Outcome::Safe);          // the route arrives late
+            CHECK(rrs.expansions > 0 && rrs.retries == 1);  // one Route, with its pillar retry
+            CHECK(rrs.moreGoals && rrs.nextGoal == 1);      // the next goal is left for a later call
+            RouteStats more;
+            CHECK(Solver::RegionRoute(rr, pillar2, RouteParams(), &more, rrs.nextGoal).outcome == Outcome::Safe);
+            CHECK(!more.moreGoals);                         // kRegionRouteMaxGoals reached
+            std::snprintf(detail, sizeof(detail), "%u goal(s) per call, %u expansions, %u oracle calls, %u retries",
+                Solver::kRegionRouteGoals, rrs.expansions, rrs.oracleCalls, rrs.retries);
+            CHECK(Bench("region route, snake + pillar, its goal late", [&]
+            {
+                WallOracle o;
+                o.walls = wall.walls;
+                Solver::RegionRoute(rr, o, RouteParams());
+            }, detail) < 1000);
+        }
+
         // 5. 30 Lines (30 x 3 yd) or 30 cones (60°, 25 yd) over the box (STAGE-M3-R-REPORT M-5), hot later than the
         // bot passes: rasterized, then a clean route; and a barrage of 24 projectile lines across the way.
         for (int kind = 0; kind < 3; ++kind)

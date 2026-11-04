@@ -88,6 +88,9 @@ namespace BossMechanics::Leaks
         float targetX = 0.f, targetY = 0.f;
         bool ourSendNow = false;
         bool controlled = false;            // a generator in MOTION_SLOT_CONTROLLED
+        // ...and it is an EffectMovementGenerator: a knockback or a jump (a charge is a point generator). Another
+        // unit's knockback lands there too (STAGE-M4-R-REPORT nit 4).
+        bool effectMotion = false;
         float x = 0.f, y = 0.f, orientation = 0.f;
         float speed = 7.f;                  // run speed, yd/s
         // A cast in PREPARING or a channel.
@@ -112,8 +115,10 @@ namespace BossMechanics::Leaks
         float ownDestX = 0.f, ownDestY = 0.f;
         bool ownFacingValid = false;
         float ownFacing = 0.f;
-        // The bot's last non-triggered cast since the last check (0 = none), set by the cast hook.
+        // The bot's last non-triggered cast since the last check (0 = none), set by the cast hook, and whether that
+        // spell moves its caster (the lock's own movement test, BotLock::MovesCaster).
         std::uint32_t selfCast = 0;
+        bool selfCastMoves = false;
         // The cast seen at the last check.
         std::uintptr_t castKey = 0;
         std::uint32_t castSpell = 0;
@@ -144,10 +149,11 @@ namespace BossMechanics::Leaks
         t.ownFacing = angle;
     }
 
-    // The bot cast `spellId` (not triggered).
-    inline void SelfCast(Tracker& t, std::uint32_t spellId)
+    // The bot cast `spellId` (not triggered); `moves`: the spell moves its caster.
+    inline void SelfCast(Tracker& t, std::uint32_t spellId, bool moves = true)
     {
         t.selfCast = spellId;
+        t.selfCastMoves = moves;
     }
 
     namespace Detail
@@ -183,9 +189,13 @@ namespace BossMechanics::Leaks
         }
         bool const moving = s.spline && s.splineMoves;
 
-        // Moves: a foreign spline started under the lock (once per id), else a jump.
+        // Moves: a foreign spline started under the lock (once per id), else a jump. A controlled spline is the bot's
+        // only with a cast of its own since the last check; a knockback or jump generator only when that cast moves
+        // its caster (Disengage, Heroic Leap): a boss's knockback in the update the bot cast an instant heal is not
+        // the bot's move (STAGE-M4-R-REPORT nit 4).
+        bool const ownControlled = t.selfCast && (t.selfCastMoves || !s.effectMotion);
         if (locked && moving && !ours && s.splineId != t.preLockSpline && s.splineId != t.countedSpline
-            && (!s.controlled || t.selfCast))
+            && (!s.controlled || ownControlled))
         {
             v.move = true;
             v.moveSpell = t.selfCast;
@@ -244,6 +254,7 @@ namespace BossMechanics::Leaks
         t.lastAt = s.now;
         t.valid = true;
         t.selfCast = 0;
+        t.selfCastMoves = false;
         return v;
     }
 

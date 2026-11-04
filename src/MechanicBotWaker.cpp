@@ -33,13 +33,14 @@
  *   orientation, the cast in progress) against the mode, leaveBy and look-away window the lock judged with in the
  *   bot's update just before; leaks go to leakMoves / leakCasts / leakTurns and leakSpells. BotOnSpellCast (the
  *   player cast hook) remembers the bot's own non-triggered casts, so a leaked move names its spell;
- * - after the loop, the brain time of every bot on the map in this update (BotBrain::TakeMapBrainUs) goes to each
- *   bot's CostStats.
+ * - after the loop, the brain time of every bot on the map since the last take (BotBrain::TakeMapBrainUs: this
+ *   update's, plus any step outside a map update) goes to each bot's CostStats.
  *
  * Order (M4-SWEEP G8): the sample is taken after the bot's own AI step of this update. Live, playerbots runs it in
  * OnPlayerAfterUpdate inside Map::Update's player loop, before this hook, so the sample sees what that step did (our
- * own move included: hence the spline and facing tokens). The sim (mod-dpssim SimDaemon) also ticks every bot's AI
- * once more right after Map::Update; what that step does is sampled by the next update, after Unit::Update.
+ * own move included: hence the spline and facing tokens). The mod-dpssim mechanics mode ticks like live since M4
+ * WP-F (STAGE-M4-R-REPORT M-4: it no longer ticks every bot's AI once more after Map::Update); the other sim modes
+ * still do, and what that extra step does is sampled by the next update, after Unit::Update.
  *
  * M4 X6 (STAGE-M4-L-REPORT §2.3, WP-X2): a casting bot keeps the look-away facing. The engine of a bot in a
  * PREPARING cast yields, so the face action cannot turn it, and a ground cast left it turned to its point: under an
@@ -57,6 +58,7 @@
 #include "Map.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
+#include "MechanicBotLock.h"
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
@@ -70,6 +72,7 @@
 #include "StringFormat.h"
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -113,6 +116,13 @@ namespace BossMechanics
         // off) is not counted.
         constexpr Milliseconds kMaxClockStep{ 2000 };
 
+        // Saturating (STAGE-M4-R-REPORT nit 5): the clocks never reset live, and a uint32 of ms wraps after about 49
+        // days of one bot's uptime; stuck at the top, `.mech bots` shows a full clock instead of a small one.
+        void AddMs(uint32& clock, uint32 ms)
+        {
+            clock = ms > std::numeric_limits<uint32>::max() - clock ? std::numeric_limits<uint32>::max() : clock + ms;
+        }
+
         void TickModeClock(MechanicBotState& st, Milliseconds now, bool released)
         {
             Milliseconds const last = st.clockAt;
@@ -123,25 +133,25 @@ namespace BossMechanics
             MechanicBotCounters& c = st.counters;
             if (released)
             {
-                c.msReleased += ms;
+                AddMs(c.msReleased, ms);
                 return;
             }
             switch (st.mode)
             {
                 case MechanicBotMode::Idle:
-                    c.msIdle += ms;
+                    AddMs(c.msIdle, ms);
                     break;
                 case MechanicBotMode::Watch:
-                    c.msWatch += ms;
+                    AddMs(c.msWatch, ms);
                     break;
                 case MechanicBotMode::Escape:
-                    c.msEscape += ms;
+                    AddMs(c.msEscape, ms);
                     break;
                 case MechanicBotMode::Hold:
-                    c.msHold += ms;
+                    AddMs(c.msHold, ms);
                     break;
                 case MechanicBotMode::Freeze:
-                    c.msFreeze += ms;
+                    AddMs(c.msFreeze, ms);
                     break;
             }
         }
@@ -198,7 +208,9 @@ namespace BossMechanics
                 s.targetY = target.y;
             }
             s.ourSendNow = st.escapeSentAt == now;
-            s.controlled = bot->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED) != NULL_MOTION_TYPE;
+            MovementGeneratorType const controlled = bot->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED);
+            s.controlled = controlled != NULL_MOTION_TYPE;
+            s.effectMotion = controlled == EFFECT_MOTION_TYPE;
             s.x = bot->GetPositionX();
             s.y = bot->GetPositionY();
             s.orientation = bot->GetOrientation();
@@ -244,7 +256,7 @@ namespace BossMechanics
         if (!botAI)
             return;
         if (MechanicBotState* st = BotBrain::StateOf(botAI))
-            Leaks::SelfCast(st->leak, spell->GetSpellInfo()->Id);
+            Leaks::SelfCast(st->leak, spell->GetSpellInfo()->Id, BotLock::MovesCaster(spell->GetSpellInfo()));
     }
 
     void BotAfterTick(Map* map, Registry& reg, Milliseconds now)
@@ -325,7 +337,7 @@ namespace BossMechanics
 
         if (!seen.empty())
         {
-            uint32 const us = BotBrain::TakeMapBrainUs(map->GetId(), map->GetInstanceId(), now);
+            uint32 const us = BotBrain::TakeMapBrainUs(map->GetId(), map->GetInstanceId());
             for (MechanicBotState* st : seen)
                 st->cost.AddMapUpdate(us);
         }

@@ -97,8 +97,9 @@ namespace BossMechanics
         // M4 lock (STAGE-M4-HANDOFF §3.5, WP-X; MechanicBotLock.cpp).
         uint32 specificBlocks = 0;  // actions run by name (DoSpecificAction) the gate refused (also in lockBlocks)
         uint32 doBypasses = 0;      // chat `do` orders the lock would have refused, let through (a human's order)
-        uint32 unknownCasts = 0;    // casts judged with no known spell id (no cast-time or movement test ran)
+        uint32 unknownCasts = 0;    // possible casts judged with no known spell id (no cast-time or movement test)
         uint32 pullBlocks = 0;      // X8: `pull` requests refused while an encounter is live (also in lockBlocks)
+        uint32 pullsEnded = 0;      // M-3: a pull pending or running when the brain left Idle, ended (`pull end`)
         // BossMechanics.Bots.ForceLeaks: blocked judgements let through (per candidate judged), by the detector each
         // feeds. Many passes of a kind and no leak of that kind over a run point at a blind detector.
         uint32 forcedMoves = 0;

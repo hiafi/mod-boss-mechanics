@@ -9,9 +9,13 @@
  * Scope: `scopePlayer` is added to the owner encounter's scope set (Encounter::testGms), which also marks the
  * encounter as one that wants bots (the open-world bot gate, MechanicBotGate.cpp). Member picks land on the scope
  * player's group (raid) on the owner's map, in guid order; the scope player itself only with
- * DrillOptions::includeScopePlayer. Registry targeting is unchanged: only the Mechanic Test Owner's (300401)
- * mechanics are limited to the scope set and its groups; any other owner reaches every candidate (instance: the map,
- * open world: BossMechanics.OpenWorld.CandidateRadius).
+ * DrillOptions::includeScopePlayer. Registry targeting: the Mechanic Test Owner's (300401) and the training dummy's
+ * (300402) mechanics are limited to the scope set and its groups (Registry::IsInTestScope); any other owner (the
+ * sim's boss stand-in) reaches every candidate (instance: the map, open world:
+ * BossMechanics.OpenWorld.CandidateRadius).
+ *
+ * Programs (StartProgram): an entry that fails at its start is skipped and reported (LOG_ERROR, a whisper to the
+ * training dummy's scope player, and Encounter::programErrors, which the sim takes with Sim::TakeProgramErrors).
  *
  * Scheduler: an owner with a MarkerAI (the Mechanic Test Owner) schedules on its own TaskScheduler, exactly as
  * `.mech drill` always did (its idle clock and `.mech clear` despawn end it). Any other owner schedules on its

@@ -65,6 +65,9 @@ namespace BrainModel
         // margins (M3), 1 = keep a clear one (exposure 0) whose rest stays clear (the brain, M4), 2 = keep any one
         // no worse than planned.
         int fallbackKeep = 1;
+        // The M4 WP-Q build, before STAGE-M4-R-REPORT m-4: a Fallback that breaks a hard region holds as well (the
+        // "as built" arms of fight_test reproduce the sweep's failures with it).
+        bool holdViolating = false;
         // M4 WP-Q (G2): a Fallback or NoPath that breaks a hard region asks for Solver::RegionRoute on a later step
         // (Route.RetryMs apart, one budget unit), as the brain does.
         bool regionRoute = true;
@@ -137,6 +140,7 @@ namespace BrainModel
         bool regionRoutePending = false;        // a Fallback broke a hard region: RegionRoute on a later step
         bool regionRoute = false;               // the escape walks a RegionRoute (its end must pass TargetOk)
         Ms regionRouteAskedAt{ 0 }, lastRegionRouteAt{ -100000 };
+        std::uint32_t regionRouteGoal = 0;      // the next goal of the last RegionRoute (m-10: one goal per step)
         Counters c;
     };
 
@@ -277,6 +281,7 @@ namespace BrainModel
             {
                 b.regionRoutePending = true;
                 b.regionRouteAskedAt = now;
+                b.regionRouteGoal = 0;
             }
             if (onSolve)
                 onSolve(b, in, plan, at);
@@ -470,7 +475,10 @@ namespace BrainModel
                 : Solver::PointSafe(in, b.plan.target, pc.arriveAt, hEnd);
             if (pc.ok && endOk)
                 return;
-            if (cfg.fallbackKeep && Solver::FallbackHolds(in, b.plan, rest, horizonEnd, cfg.fallbackKeep == 1))
+            Solver::Plan held = b.plan;
+            if (cfg.holdViolating)
+                held.violated = 0;
+            if (cfg.fallbackKeep && Solver::FallbackHolds(in, held, rest, horizonEnd, cfg.fallbackKeep == 1))
             {
                 ++b.c.fallbackKept;
                 return;
@@ -525,22 +533,40 @@ namespace BrainModel
             }
             if (b.regionRoutePending && now > b.regionRouteAskedAt)
             {
-                b.regionRoutePending = false;
-                bool const due = cfg.regionRoute && (b.mode == Mode::Escape || b.mode == Mode::Hold)
+                // As the brain (STAGE-M4-R-REPORT m-4): pending while the Fallback still breaks its region, until the
+                // retry clock and the budget allow it.
+                bool const wanted = cfg.regionRoute && (b.mode == Mode::Escape || b.mode == Mode::Hold)
                     && (b.plan.outcome == Solver::Outcome::Fallback || b.plan.outcome == Solver::Outcome::NoPath)
-                    && now - b.lastRegionRouteAt >= cfg.routeRetry && now >= b.releaseUntil;
-                if (due && budget > 0)
+                    && b.plan.violated > 0 && now >= b.releaseUntil;
+                bool const due = b.regionRouteGoal > 0 || now - b.lastRegionRouteAt >= cfg.routeRetry;
+                if (!wanted)
                 {
+                    b.regionRoutePending = false;
+                    b.regionRouteGoal = 0;
+                }
+                else if (due && budget > 0)
+                {
+                    b.regionRoutePending = false;
                     --budget;
                     b.lastRegionRouteAt = now;
                     ++b.c.regionRoutes;
                     Straight oracle;
-                    Solver::Plan plan = Solver::RegionRoute(in, oracle, cfg.route);
+                    Solver::RouteStats rs;
+                    std::uint32_t const goal = b.regionRouteGoal;
+                    b.regionRouteGoal = 0;
+                    Solver::Plan plan = Solver::RegionRoute(in, oracle, cfg.route, &rs, goal);
                     if (plan.outcome == Solver::Outcome::Move)
                     {
                         ++b.c.regionRoutesFound;
                         BeginEscape(b, std::move(plan), now);
                         b.regionRoute = true;
+                    }
+                    else if (rs.moreGoals)
+                    {
+                        // The next goal on the next step (the brain's continuation).
+                        b.regionRoutePending = true;
+                        b.regionRouteAskedAt = now;
+                        b.regionRouteGoal = rs.nextGoal;
                     }
                     return;
                 }

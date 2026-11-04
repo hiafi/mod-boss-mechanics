@@ -17,7 +17,8 @@
  *      opt.includeScopePlayer = true (the actor is a member like the others) and opt.seed = the iteration seed;
  *   4. Sim::ReconcileBot(bot) for every bot of the group (installs the strategy: the scope exists now);
  *   5. tick; the sink receives every FailureEvent;
- *   6. Sim::ReadBotStats(bot, stats) per bot, then Sim::StopProgram(boss) and Sim::ResetBotStats(bot).
+ *   6. Sim::ReadBotStats(bot, stats) per bot and Sim::TakeProgramErrors(boss), then Sim::StopProgram(boss) and
+ *      Sim::ResetBotStats(bot).
  */
 
 #ifndef MOD_BOSS_MECHANICS_BOSS_MECHANICS_SIM_H
@@ -69,6 +70,16 @@ namespace BossMechanics::Sim
     // Ends the owner's encounter: pending steps, mechanics, markers, ledger, Weakened (the sink already has the
     // failures).
     void StopProgram(Creature* owner);
+    // M4 WP-F (STAGE-M4-R-REPORT M-1): the program entries that failed on the owner's encounter since the last take
+    // (each also went to the server log at LOG_ERROR): at most kMaxProgramErrors messages, oldest first, and the
+    // count of every one. Take them before StopProgram (it ends the encounter). A failed entry is a sim problem: the
+    // slice it belongs to did not run.
+    struct ProgramErrors
+    {
+        uint32 count = 0;
+        std::vector<std::string> messages;
+    };
+    ProgramErrors TakeProgramErrors(Creature const* owner);
 
     // Per-bot counters snapshot (zeros without playerbots), for the report. Reset between iterations.
     // Units and meaning: STAGE-M4-C-REPORT §2. The mode and leak fields are copies of the same-named

@@ -26,6 +26,7 @@
 #include <list>
 #include <map>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -404,6 +405,9 @@ namespace BossMechanics
         Color cells = Color::Purple;
     };
 
+    // Program entry errors kept per encounter (Encounter::programErrors); the count goes on past it.
+    constexpr std::size_t kMaxProgramErrors = 16;
+
     struct Encounter
     {
         ObjectGuid owner;
@@ -421,10 +425,18 @@ namespace BossMechanics
         // Players this encounter stacked Weakened on. Its end removes Weakened from them only, and not from a player
         // another encounter still on the map has also stacked.
         GuidSet weakenedPlayers;
+        // Players a drill `marker` step put Marked (drill) on (M4 WP-F, 205009); the end removes it the same way.
+        GuidSet markedPlayers;
+        // M4 WP-F (STAGE-M4-R-REPORT M-1): program entries that failed (RunProgramEntry), oldest first, capped at
+        // kMaxProgramErrors; programErrorCount counts every one. The sim takes them per iteration
+        // (Sim::TakeProgramErrors) into its report; the dummy whispers each to its scope player.
+        std::vector<std::string> programErrors;
+        uint32 programErrorCount = 0;
         // The encounter's scope players (M4: the field keeps its M1 name). `.mech test` (owner = Mechanic Test
         // Owner): the GMs who ran it; only they and their group (raid) members are eligible for the test owner's
-        // mechanics, and empty on a test owner = nobody (IsInTestScope). The training dummy and the sim add the
-        // players they run for; those owners' targeting is not limited by it (normal candidates).
+        // mechanics, and empty on a test owner = nobody (IsInTestScope). The training dummy (300402) is limited the
+        // same way: its scope set is the player it runs for plus the players fighting it (MechanicDummyAI::Check
+        // replaces it every second). The sim adds its actor; any other owner reaches every candidate.
         GuidSet testGms;
         // M4: the scope players' groups want the boss-mechanics bot strategy in the open world (the bot gate reads
         // it; set with AddScopePlayer by `.mech test`, the drill runner, the training dummy and the sim).
@@ -491,6 +503,11 @@ namespace BossMechanics
         void ClearAll();                // every encounter (`.mech clear all`)
         // M4: begins the owner's encounter (when needed), adds `player` to its scope set and marks it as wanting bots.
         Encounter& AddScopePlayer(ObjectGuid owner, ObjectGuid player);
+        // M4 WP-F (STAGE-M4-R-REPORT m-5): replaces the owner's scope set (begins the encounter when needed, marks it
+        // as wanting bots). The training dummy prunes the players who left its fight this way.
+        Encounter& SetScopePlayers(ObjectGuid owner, GuidSet players);
+        // M4 WP-F (M-1): records a failed program entry on the owner's encounter (no-op without one).
+        void NoteProgramError(ObjectGuid owner, std::string error);
         // M4: runs `fn(owner)` at the first Tick at or after `at` (GameTime ms), while the owner's encounter lives and
         // the owner is an alive creature on this map (else the task is dropped). Begins the encounter when needed.
         // Tasks run before the mechanics step, outside the tick's iteration: they may Add, Schedule and end

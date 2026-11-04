@@ -245,6 +245,25 @@ namespace
             CHECK(c.Add(Leaks::Observe(t, SampleOf(b, now, escape))).move);
             CHECK(c.lastMoveSpell == 11578);
         }
+        // STAGE-M4-R-REPORT nit 4: a boss's knockback (an EffectMovementGenerator in MOTION_SLOT_CONTROLLED) in the
+        // update the bot cast an instant heal is not the bot's move; the bot's own Disengage (a mover) still is.
+        for (bool ownMover : { false, true })
+        {
+            Bot b;
+            Tracker t;
+            Counts c;
+            Ms now = kT0;
+            LockState const escape{ Lock::Escape };
+            c.Add(Leaks::Observe(t, SampleOf(b, now, escape)));
+            now += kStep;
+            b.UnitUpdate(kStep);
+            Leaks::SelfCast(t, ownMover ? 781u : 2061u, ownMover);     // Disengage, or Flash Heal
+            b.LaunchSpline(505, -8.f, 0.f, true);                       // MoveKnockbackFrom / MoveJump
+            Sample s = SampleOf(b, now, escape);
+            s.effectMotion = true;
+            CHECK(c.Add(Leaks::Observe(t, s)).move == ownMover);
+            CHECK(c.moves == (ownMover ? 1u : 0u));
+        }
         // Blink in the sim order: cast in the extra AI step, sampled the next update. No spline, a jump far beyond a
         // run step, a cast of the bot's since the last check.
         {

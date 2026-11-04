@@ -8,7 +8,9 @@
 
 #include "BossMechanicsSim.h"
 #include "MechanicBotGuard.h"
+#include "Creature.h"
 #include "MechanicDrillRunner.h"
+#include "MechanicRegistry.h"
 
 #if BOSS_MECHANICS_WITH_BOTS
 #include "MechanicBotBrain.h"
@@ -35,6 +37,21 @@ namespace BossMechanics::Sim
     void StopProgram(Creature* owner)
     {
         BossMechanics::StopProgram(owner);
+    }
+
+    ProgramErrors TakeProgramErrors(Creature const* owner)
+    {
+        ProgramErrors out;
+        if (!owner || !owner->IsInWorld())
+            return out;
+        Registry* reg = Registry::Get(owner->GetMap());
+        Encounter* e = reg ? reg->FindEncounterMutable(owner->GetGUID()) : nullptr;
+        if (!e)
+            return out;
+        out.count = e->programErrorCount;
+        out.messages.swap(e->programErrors);
+        e->programErrorCount = 0;
+        return out;
     }
 
 #if BOSS_MECHANICS_WITH_BOTS

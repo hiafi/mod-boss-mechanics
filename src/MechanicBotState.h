@@ -143,7 +143,11 @@ namespace BossMechanics
         bool regionRoutePending = false;
         Milliseconds regionRouteAskedAt{ 0 };
         Milliseconds lastRegionRouteAt{ 0 };
+        uint32 regionRouteGoal = 0;                         // the RegionRoute goal to try next (m-10: one per step)
         bool regionRoute = false;                           // the escape walks a RegionRoute (its end: TargetOk)
+        // STAGE-M4-R-REPORT M-3: the brain left Idle and checked for a pending pull (BotBrain::EndPullOnWake); cleared
+        // when it goes back to Idle.
+        bool pullEndChecked = false;
         Milliseconds bandClockAt{ 0 };                      // G5: the out-of-band clock's last sample (0 = none)
 
         // ---- gate ----

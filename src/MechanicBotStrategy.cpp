@@ -40,7 +40,10 @@ namespace
     {
         MechanicBotState* st = ref.Get(botAI);
         if (st)
+        {
             BotBrain::Update(botAI, *st, Now());
+            BotBrain::EndPullOnWake(botAI, *st);
+        }
         return st;
     }
 

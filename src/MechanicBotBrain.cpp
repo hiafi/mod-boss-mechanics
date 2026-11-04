@@ -30,6 +30,7 @@
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
+#include "PullStrategy.h"
 #include "SpellAuras.h"
 #include <algorithm>
 #include <chrono>
@@ -37,6 +38,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace BossMechanics
@@ -150,29 +152,16 @@ namespace BossMechanics
                 cost.AddMechanicPathCalls(id, calls);
         }
 
-        // Brain time of every bot on the map in one map update (§3.6): bots run their brain on their map's update
-        // thread, so (map id, instance id, now) identifies the update, as for the solve budget. The waker takes the
-        // sum after the bots' updates (BotBrain::TakeMapBrainUs).
-        struct MapBrainTime
-        {
-            uint32 mapId = 0;
-            uint32 instanceId = 0;
-            Milliseconds at{ -1 };
-            uint64 us = 0;
-        };
-        thread_local MapBrainTime tMapBrainTime;
+        // Brain time of the bots on each map since the waker last took it (§3.6): bots run their brain on their map's
+        // update thread, and the waker takes the sum right after the bots' updates (BotBrain::TakeMapBrainUs). Keyed
+        // by (map id, instance id) only (STAGE-M4-R-REPORT m-2): a brain step that ran after the take, outside the
+        // map update (a command, a sim step), goes to the next take instead of being reset by the next update's
+        // first step. Per thread: a step on another thread is taken when that thread next updates the map.
+        thread_local std::unordered_map<uint64, uint64> tMapBrainUs;
 
-        MapBrainTime& MapBrainTimeOf(uint32 mapId, uint32 instanceId, Milliseconds now)
+        uint64 MapBrainKey(uint32 mapId, uint32 instanceId)
         {
-            MapBrainTime& t = tMapBrainTime;
-            if (t.mapId != mapId || t.instanceId != instanceId || t.at != now)
-            {
-                t.mapId = mapId;
-                t.instanceId = instanceId;
-                t.at = now;
-                t.us = 0;
-            }
-            return t;
+            return (static_cast<uint64>(mapId) << 32) | instanceId;
         }
 
         // Times one brain step (Update past its once-per-ms check, CastLeaveBy) into the bot's and its map's brain
@@ -180,15 +169,15 @@ namespace BossMechanics
         class BrainTimer
         {
         public:
-            BrainTimer(MechanicBotState& st, Player const* bot, Milliseconds now)
-                : _st(st), _bot(bot), _now(now), _t0(CostClock::now()) { }
+            BrainTimer(MechanicBotState& st, Player const* bot)
+                : _st(st), _bot(bot), _t0(CostClock::now()) { }
 
             ~BrainTimer()
             {
                 uint32 const us = UsSince(_t0);
                 _st.cost.brainUs.Add(us);
                 if (_bot)
-                    MapBrainTimeOf(_bot->GetMapId(), _bot->GetInstanceId(), _now).us += us;
+                    tMapBrainUs[MapBrainKey(_bot->GetMapId(), _bot->GetInstanceId())] += us;
             }
 
             BrainTimer(BrainTimer const&) = delete;
@@ -197,7 +186,6 @@ namespace BossMechanics
         private:
             MechanicBotState& _st;
             Player const* _bot;
-            Milliseconds _now;
             CostClock::time_point _t0;
         };
 
@@ -714,6 +702,7 @@ namespace BossMechanics
         void ToIdle(MechanicBotState& st)
         {
             st.mode = MechanicBotMode::Idle;
+            st.pullEndChecked = false;
             st.plan = Solver::Plan();
             st.planFor.clear();
             st.leaveBy = Solver::kForever;
@@ -731,6 +720,7 @@ namespace BossMechanics
             st.tankWarning = false;
             st.refacing = false;
             st.regionRoutePending = false;
+            st.regionRouteGoal = 0;
             st.regionRoute = false;
         }
 
@@ -750,6 +740,7 @@ namespace BossMechanics
             st.waypointIdx = 0;
             st.refacing = false;
             st.regionRoutePending = false;
+            st.regionRouteGoal = 0;
             st.regionRoute = false;
             st.releaseUntil = now + kReleaseFor;
             st.releaseForRoot = forRoot;
@@ -869,6 +860,7 @@ namespace BossMechanics
             {
                 st.regionRoutePending = true;
                 st.regionRouteAskedAt = now;
+                st.regionRouteGoal = 0;
             }
 
             Geo::Vec3 const from = in.bot;
@@ -1089,7 +1081,9 @@ namespace BossMechanics
             TimedOracle oracle(navOracle, st.cost);
             Solver::RouteStats rs;
             auto const t0 = std::chrono::steady_clock::now();
-            Solver::Plan plan = Solver::RegionRoute(in, oracle, rp, &rs);
+            uint32 const goal = st.regionRouteGoal;
+            st.regionRouteGoal = 0;
+            Solver::Plan plan = Solver::RegionRoute(in, oracle, rp, &rs, goal);
             auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count());
             st.cost.routeUs.Add(us);
@@ -1105,7 +1099,17 @@ namespace BossMechanics
                     rs.grown ? ", box grown" : "", rs.expansions, rs.legs, rs.oracleCalls, us);
             }
             if (plan.outcome != Solver::Outcome::Move)
+            {
+                // STAGE-M4-R-REPORT m-10: one goal per budget unit; the next goal goes on the next step (no retry
+                // wait: it continues this search).
+                if (rs.moreGoals)
+                {
+                    st.regionRoutePending = true;
+                    st.regionRouteAskedAt = now;
+                    st.regionRouteGoal = rs.nextGoal;
+                }
                 return false;
+            }
             ++c.regionRoutesFound;
             if (st.reserved || !st.viewInfo.tasks.empty())
             {
@@ -1672,7 +1676,7 @@ namespace BossMechanics
             ToIdle(st);
             return;
         }
-        BrainTimer const timer(st, bot, now);
+        BrainTimer const timer(st, bot);
         // No negative cache (STAGE-M2-REVIEW m4): Get is one DataMap look-up, and a cached "no registry" delayed
         // the first mechanic of every map by up to its lifetime.
         Registry* reg = Registry::Get(bot->GetMap());
@@ -1757,17 +1761,25 @@ namespace BossMechanics
 
         // M4 WP-Q (G2): the region route a Fallback asked for, on a later step, Route.RetryMs apart, one budget unit,
         // while the bot still walks or holds that Fallback; like the route search, never with a solve in one step.
+        // The request stays pending while the Fallback still breaks its region and only the retry clock or the
+        // budget is not there yet (STAGE-M4-R-REPORT m-4: it used to be dropped then, with no retry).
         if (st.regionRoutePending && now > st.regionRouteAskedAt)
         {
-            st.regionRoutePending = false;
             bool const fallback = st.plan.outcome == Solver::Outcome::Fallback
                 || st.plan.outcome == Solver::Outcome::NoPath;
-            bool const due = cfg.routeEnable && fallback
+            bool const wanted = cfg.routeEnable && fallback && st.plan.violated > 0
                 && (st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold)
-                && now - st.lastRegionRouteAt >= Milliseconds(cfg.routeRetryMs)
                 && !BotBrain::Released(botAI, st, now);
-            if (due && TakeBudget(bot, now))
+            // A continuation (the next goal of the last search) waits for no retry clock.
+            bool const due = st.regionRouteGoal > 0 || now - st.lastRegionRouteAt >= Milliseconds(cfg.routeRetryMs);
+            if (!wanted)
             {
+                st.regionRoutePending = false;
+                st.regionRouteGoal = 0;
+            }
+            else if (due && TakeBudget(bot, now))
+            {
+                st.regionRoutePending = false;
                 RunRegionRoute(*reg, bot, st, now, cfg);
                 BotFacing::UpdateLookAway(bot, st, now);
                 PublishLookAway(*reg, bot, st, now);
@@ -1793,6 +1805,25 @@ namespace BossMechanics
         PublishLookAway(*reg, bot, st, now);
     }
 
+    bool BotBrain::EndPullOnWake(PlayerbotAI* botAI, MechanicBotState& st)
+    {
+        if (st.mode == MechanicBotMode::Idle || st.pullEndChecked || !botAI)
+            return false;
+        st.pullEndChecked = true;
+        // PullMultiplier's own test: it zeroes our actions only while the pull has a target and is pending or begun.
+        PullStrategy const* pull = PullStrategy::Get(botAI);
+        if (!pull || !pull->HasTarget() || (!pull->IsPullPendingToStart() && !pull->HasPullStarted()))
+            return false;
+        // `pull end` is on PullMultiplier's allow list, restores the pet's react state and clears the pull position.
+        if (!botAI->DoSpecificAction("pull end", Event(), true))
+            return false;
+        ++st.counters.pullsEnded;
+        if (GetConfig().bots.debug)
+            if (Player const* bot = botAI->GetBot())
+                LOG_INFO(kLog, "Bot {}: a mechanic began during its pull; the pull ended", bot->GetName());
+        return true;
+    }
+
     Milliseconds BotBrain::CastLeaveBy(PlayerbotAI* botAI, MechanicBotState& st, Registry const& reg,
         Milliseconds now)
     {
@@ -1806,7 +1837,7 @@ namespace BossMechanics
         if (idleUnchanged)
             return Solver::kForever;
 
-        BrainTimer const timer(st, bot, now);
+        BrainTimer const timer(st, bot);
         BotConfig const& cfg = GetConfig().bots;
         ViewCtx ctx(bot, st, reg, now, cfg);
         RefreshView(bot, st, reg, now, cfg, ctx);
@@ -1837,13 +1868,13 @@ namespace BossMechanics
         return true;
     }
 
-    uint32 BotBrain::TakeMapBrainUs(uint32 mapId, uint32 instanceId, Milliseconds now)
+    uint32 BotBrain::TakeMapBrainUs(uint32 mapId, uint32 instanceId)
     {
-        MapBrainTime& t = tMapBrainTime;
-        if (t.mapId != mapId || t.instanceId != instanceId || t.at != now)
+        auto it = tMapBrainUs.find(MapBrainKey(mapId, instanceId));
+        if (it == tMapBrainUs.end())
             return 0;
-        uint64 const us = t.us;
-        t.us = 0;
+        uint64 const us = it->second;
+        tMapBrainUs.erase(it);
         return static_cast<uint32>(std::min<uint64>(us, std::numeric_limits<uint32>::max()));
     }
 

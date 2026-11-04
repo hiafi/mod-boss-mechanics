@@ -18,9 +18,11 @@
 #include "Engine.h"
 #include "GameTime.h"
 #include "GenericSpellActions.h"
+#include "Group.h"
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Log.h"
+#include "Map.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
 #include "MechanicBotState.h"
@@ -140,15 +142,31 @@ namespace
         return busy;
     }
 
-    // X8: an encounter is live on the bot's map (begun, not ending): a boss fight, a drill, the training dummy, the
-    // sim. A bot carries the strategy only in an instance or in an open-world encounter's scope (MechanicBotGate.cpp).
+    // X8: the bot's own encounter is live (begun, not ending). In an instance that is any encounter on the map (a boss
+    // fight, a drill there). In the open world (STAGE-M4-R-REPORT m-7) only an encounter whose scope holds the bot or
+    // a member of its group (raid): a drill, the training dummy, the sim; another player's dummy or a GM's `.mech
+    // test` far away does not block this bot's pull.
     bool EncounterLive(Player* bot)
     {
         Registry const* reg = Registry::Get(bot->GetMap());
         if (!reg)
             return false;
+        bool const instance = bot->GetMap()->IsDungeon();
+        Group const* group = bot->GetGroup();
+        ObjectGuid const self = bot->GetGUID();
         bool live = false;
-        reg->ForEachEncounter([&](Encounter const& e) { live = live || !e.ending; });
+        reg->ForEachEncounter([&](Encounter const& e)
+        {
+            if (live || e.ending)
+                return;
+            if (instance)
+            {
+                live = true;
+                return;
+            }
+            for (ObjectGuid const& g : e.testGms)
+                live = live || g == self || (group && group->IsMember(g));
+        });
         return live;
     }
 
@@ -338,8 +356,11 @@ namespace
             if (LockRules::LookAwayBlocksCast(c))
                 return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
         }
+        // Unknown spell: allowed (no cast-time or movement test can run). Counted only when the cast could run
+        // (STAGE-M4-R-REPORT m-1): the engine applies multipliers before isPossible, so spells the bot never learned
+        // (another race's racials, untaken talents) reach here with id 0 and would inflate the count.
         if (!info)
-            return Allow(true);     // unknown spell: allowed (no cast-time or movement test can run)
+            return Allow(cast->isPossible());
         Milliseconds const busy = BusyTime(info, bot);
         if (busy <= Milliseconds(0))
             return Allow();     // instant
@@ -470,6 +491,11 @@ float BotLock::Verdict(PlayerbotAI* botAI, MechanicBotState& st, Action* action)
     if (Player* bot = botAI->GetBot())
         ForceLeak(bot, st, j);
     return CountJudgement(st, j);
+}
+
+bool BotLock::MovesCaster(SpellInfo const* info)
+{
+    return info && (IsMovementSpell(info) || LockRules::FindScriptedMover(info->Id) != nullptr);
 }
 
 void BotLock::InstallSpecificActionGate()

@@ -7,6 +7,7 @@
 #include "MechanicDrill.h"
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -175,11 +176,20 @@ namespace
                 last = step.atMs;
                 CHECK(step.atMs < d.cycleMs);
                 Parsed const p = Parse(step.line);
-                if (p.shape == "weaken")
+                if (p.shape == "marker")
                 {
-                    CHECK(p.size >= 0.f && p.size <= 7.f);
+                    CHECK(p.size >= 0.f && p.size <= static_cast<float>(Ids::MARKED_DRILL_MAX_STACKS));
                     continue;
                 }
+                // Drill setup never hands out Weakened (STAGE-M4-R-REPORT M-2): no step names it as a selector.
+                CHECK(std::string_view(step.line).find("205000") == std::string_view::npos);
+                CHECK(p.shape != "weaken");
+                // The selectors read Marked (drill), never the fenrus rider's Baited: its stacks would leak into the
+                // eligibility within one program slice.
+                for (char const* key : { "aura", "self", "order" })
+                    if (std::optional<std::string_view> v = Drill::Value(step.line, key))
+                        if (p.shape != "bait")
+                            CHECK(v->substr(0, 6) == "205009");
                 CHECK(kTestShapes.count(p.shape) == 1);
                 CHECK(p.size > 0.f);
                 CHECK(p.ms >= 0.f);
@@ -295,6 +305,12 @@ namespace
         CHECK(Ids::InSpellBlock(Ids::SPELL_BAITED_DRILL));
         CHECK(Ids::InSpellBlock(205000) && Ids::InSpellBlock(205099));
         CHECK(!Ids::InSpellBlock(204999) && !Ids::InSpellBlock(205100) && !Ids::InSpellBlock(0));
+        // STAGE-M4-R-REPORT nit 2: rider= refuses Weakened and the resolve spells.
+        CHECK(Ids::RiderAllowed(Ids::SPELL_BAITED_DRILL) && Ids::RiderAllowed(Ids::SPELL_MARKED_DRILL));
+        CHECK(Ids::RiderAllowed(205099) && !Ids::RiderAllowed(205100));
+        for (std::uint32_t id = Ids::SPELL_WEAKENED; id <= Ids::SPELL_RESOLVE_LAST; ++id)
+            CHECK(!Ids::RiderAllowed(id));
+        CHECK(Ids::SPELL_MARKED_DRILL != Ids::SPELL_BAITED_DRILL && Ids::InSpellBlock(Ids::SPELL_MARKED_DRILL));
     }
 
     // Scholomance AB2-AB8: each rule alone, then each heroic pair; never Assembly with Keep your distance or desks;
@@ -420,9 +436,9 @@ namespace
     {
         Drill::Def const& d = *Drill::Find("soaks");
         std::vector<Drill::Step> soaks;
-        std::vector<Drill::Step> weakens;
+        std::vector<Drill::Step> markers;
         for (Drill::Step const& s : d.steps)
-            (Parse(s.line).shape == "weaken" ? weakens : soaks).push_back(s);
+            (Parse(s.line).shape == "marker" ? markers : soaks).push_back(s);
         CHECK(soaks.size() == 4);
         Parsed const payday = Parse(soaks[0].line);
         CHECK(payday.shape == "soak" && payday.size == 2.f && payday.ms == 2500.f);
@@ -433,15 +449,15 @@ namespace
         CHECK(Key(payday.line, "scatter", 0.f) <= (payday.ms / 1000.f - 0.5f) * 7.f);
         Parsed const ordered = Parse(soaks[1].line);
         CHECK(ordered.shape == "soak" && Key(ordered.line, "need", 0.f) == 1.f);
-        CHECK(Is(ordered.line, "order", "205000:asc:cap=2"));
+        CHECK(Is(ordered.line, "order", "205009:asc:cap=2"));
         // STAGE-M3-R-REPORT n-7: before it, two non-tanks get 2 and 1 stacks (the rule and the cap decide, not only
         // the guid), after Payday resolved; everyone is back to 0 once it resolved, before the next soak.
-        CHECK(weakens.size() == 3);
-        CHECK(Parse(weakens[0].line).size == 2.f && Is(weakens[0].line, "pick", "nontank"));
-        CHECK(Parse(weakens[1].line).size == 1.f && Is(weakens[1].line, "pick", "nontank"));
-        CHECK(weakens[0].atMs >= soaks[0].atMs + 2500 && weakens[1].atMs <= soaks[1].atMs);
-        CHECK(Parse(weakens[2].line).size == 0.f);
-        CHECK(weakens[2].atMs >= soaks[1].atMs + 4000 && weakens[2].atMs <= soaks[2].atMs);
+        CHECK(markers.size() == 3);
+        CHECK(Parse(markers[0].line).size == 2.f && Is(markers[0].line, "pick", "nontank"));
+        CHECK(Parse(markers[1].line).size == 1.f && Is(markers[1].line, "pick", "nontank"));
+        CHECK(markers[0].atMs >= soaks[0].atMs + 2500 && markers[1].atMs <= soaks[1].atMs);
+        CHECK(Parse(markers[2].line).size == 0.f);
+        CHECK(markers[2].atMs >= soaks[1].atMs + 4000 && markers[2].atMs <= soaks[2].atMs);
         Parsed const fortune = Parse(soaks[2].line);
         CHECK(fortune.shape == "soak" && Key(fortune.line, "need", -1.f) == 0.f);
         std::string_view const shift = *Drill::Value(fortune.line, "shift");
@@ -463,8 +479,8 @@ namespace
         }
     }
 
-    // Scholomance RF1/RF2/RF5: the runners (Weakened >= 3, self-keyed RunOut 8) and the stackers (0-2 stacks, Stack 8
-    // on Ras) split every player; a second runner appears during the warning; everyone thaws after the resolve.
+    // Scholomance RF1/RF2/RF5: the runners (Marked (drill) >= 3, self-keyed RunOut 8) and the stackers (0-2 stacks,
+    // Stack 8 on Ras) split every player; a second runner appears during the warning; everyone thaws after the resolve.
     void TestRas()
     {
         Drill::Def const& d = *Drill::Find("ras");
@@ -480,7 +496,7 @@ namespace
             {
                 CHECK(p.size == 8.f && Is(s.line, "anchor", "target"));
                 std::string_view const band = *Drill::Value(s.line, "aura");
-                CHECK(band.substr(0, 7) == "205000:");
+                CHECK(band.substr(0, 7) == "205009:");
                 stackMax = Drill::Number(band.substr(band.rfind(':') + 1)).value_or(-1.f);
                 resolve = s.atMs + p.ms;
             }
@@ -488,17 +504,17 @@ namespace
             {
                 CHECK(p.size == 8.f);
                 std::string_view const self = *Drill::Value(s.line, "self");
-                CHECK(self.substr(0, 7) == "205000:");
+                CHECK(self.substr(0, 7) == "205009:");
                 runMin = Drill::Number(self.substr(7)).value_or(-1.f);
                 CHECK_NEAR(s.atMs + p.ms, resolve, kEps);
             }
-            if (p.shape == "weaken" && p.size > 0.f)
+            if (p.shape == "marker" && p.size > 0.f)
             {
                 chills.push_back(s.atMs);
                 CHECK(p.size == runMin || runMin < 0.f);
                 CHECK(Is(s.line, "pick", "nontank"));
             }
-            if (p.shape == "weaken" && p.size == 0.f)
+            if (p.shape == "marker" && p.size == 0.f)
                 thaw = s.atMs;
         }
         CHECK(stackMax + 1.f == runMin);        // every player is a stacker or a runner, never both

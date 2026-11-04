@@ -131,8 +131,11 @@ namespace BossMechanics
             // M4: the lock's by-name gate and id-less casts (STAGE-M4-HANDOFF §3.5, WP-X); X8 pulls refused and the
             // BossMechanics.Bots.ForceLeaks debug passes (WP-X2).
             handler->PSendSysMessage("  m4 lock: by-name blocks {}, chat do let through {}, casts with no spell id {}, "
-                "pulls refused {}, forced leak passes (moves/casts/turns) {}/{}/{}", c.specificBlocks, c.doBypasses,
-                c.unknownCasts, c.pullBlocks, c.forcedMoves, c.forcedCasts, c.forcedTurns);
+                "pulls refused {}, pulls ended {}, forced leak passes (moves/casts/turns) {}/{}/{}", c.specificBlocks,
+                c.doBypasses, c.unknownCasts, c.pullBlocks, c.pullsEnded, c.forcedMoves, c.forcedCasts, c.forcedTurns);
+            // M4 WP-Q's counters (STAGE-M4-R-REPORT nit 7): region routes and the out-of-band clocks.
+            handler->PSendSysMessage("  m4 routes and bands: region routes {} ({} found), out of band {} ms ({} ms "
+                "with a task)", c.regionRoutes, c.regionRoutesFound, c.msOutOfBand, c.msOutOfBandTask);
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

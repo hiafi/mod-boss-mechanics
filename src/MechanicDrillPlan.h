@@ -30,6 +30,9 @@ namespace BossMechanics
     {
         std::optional<std::uint32_t> seed;      // every pick the run makes (empty: a fresh random seed)
         std::int32_t dmg = 1;                   // flat damage of every damage step (`dmg=`; < 0 is read as 0)
+        bool percent = false;                   // M4 WP-F: no flat damage; every damage step deals its own `pct=`
+                                                // of reference health (20% when the line has none), barrage shots
+                                                // and mines too (the training dummy's "percent" choice)
         std::uint32_t cycles = 0;               // RunDrill: cycles of the drill (0: its default cycles)
         bool includeScopePlayer = false;        // member picks may land on the scope player (`self=1`); the dummy
                                                 // and the sim pass true, `.mech drill` only with self=1
