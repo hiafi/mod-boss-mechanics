@@ -95,6 +95,28 @@ namespace BossMechanics::LockRules
         return mover && ScriptedMoverMoves(mover->rule, stealthed, hasTarget, inMeleeRange);
     }
 
+    // WP-Q3 (m4-q3/q4 Hit Spread/3): the scripted movers whose aura keeps moving the bot after the cast. Killing Spree
+    // teleports the rogue next to a target on every hit, for up to 2.5 s (500 ms per combo point;
+    // spell_rogue_combat.cpp, spell_rog_killing_spree_rework_aura). The lock judges the cast, not what comes after it:
+    // a Spread warned while the aura ran had the rogue teleported back next to the boss, into the other melee's
+    // circle, on every hit of its escape. tests/lock_rules_test.cpp pins this list.
+    inline constexpr std::array<uint32_t, 1> kMoverAuras = { { 51690 } };
+
+    inline bool IsMoverAura(uint32_t spellId)
+    {
+        for (uint32_t id : kMoverAuras)
+            if (id == spellId)
+                return true;
+        return false;
+    }
+
+    // A mover aura is cancelled while the brain owns where the bot stands: an escape walk, a hold, a freeze (Hold
+    // still). In Idle and Watch the spell the stock AI chose runs on.
+    inline bool MoverAuraBreaks(bool escape, bool hold, bool freeze)
+    {
+        return escape || hold || freeze;
+    }
+
     // Movers that are not MovementActions, found by the lock audits (STAGE-M2-C-REPORT "Lock audit",
     // STAGE-M4-L-REPORT §3), by the name the action reports (getName(), not always its creator key, so both are
     // listed where they differ). Gap-closers, leaps and blinks in the class rotations; a CastSpellAction is also caught

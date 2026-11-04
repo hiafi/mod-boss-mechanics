@@ -137,10 +137,12 @@ namespace BossMechanics
             handler->PSendSysMessage("  m4 routes and bands: region routes {} ({} found), out of band {} ms ({} ms "
                 "with a task)", c.regionRoutes, c.regionRoutesFound, c.msOutOfBand, c.msOutOfBandTask);
             // WP-Q2: unsafe landings refused (gap closers, the melee chase) and Watch motions stopped for their end;
-            // WP-F2: the time out of reach with the chase refused, the safety valve and the recovery solves.
+            // WP-F2: the time out of reach with the chase refused, the safety valve and the recovery solves; WP-Q3:
+            // the mover auras cancelled.
             handler->PSendSysMessage("  m4 landings: gap closers and chases refused {}, motions stopped for their end "
-                "{}, out of reach with the chase refused {} ms, chases released {}, recovery solves {}",
-                c.landingBlocks, c.motionEndStops, c.msChaseRefused, c.chaseReleases, c.chaseSolves);
+                "{}, out of reach with the chase refused {} ms, chases released {}, recovery solves {}, mover auras "
+                "cancelled {}", c.landingBlocks, c.motionEndStops, c.msChaseRefused, c.chaseReleases, c.chaseSolves,
+                c.moverBreaks);
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

@@ -112,6 +112,9 @@ namespace BossMechanics
         uint32 msChaseRefused = 0;
         uint32 chaseReleases = 0;
         uint32 chaseSolves = 0;
+        // M4 WP-Q3: mover auras (LockRules::kMoverAuras, Killing Spree) cancelled because the brain walked, held or
+        // froze the bot while one ran.
+        uint32 moverBreaks = 0;
         // BossMechanics.Bots.ForceLeaks: blocked judgements let through (per candidate judged), by the detector each
         // feeds. Many passes of a kind and no leak of that kind over a run point at a blind detector.
         uint32 forcedMoves = 0;

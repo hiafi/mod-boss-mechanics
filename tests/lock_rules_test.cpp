@@ -2,7 +2,7 @@
 // WP-X; STAGE-M4-L-REPORT §6.3, §10 X1-X3): the scripted-mover table and its conditions, the named movers and the
 // turning self casts, and the look-away cast rule; WP-X2: the waker's cast facing step (X6), the pull requests (X8) and
 // the forced-leak passes (BossMechanics.Bots.ForceLeaks); WP-Q2: the gap closers' landings and the waker's fast tick;
-// WP-F2: where each closer stops, the chase clock and its valve, and the measured wake lead.
+// WP-F2: where each closer stops, the chase clock and its valve, and the measured wake lead; WP-Q3: the mover auras.
 // Build: tests/run.sh.
 
 #include "check.h"
@@ -64,6 +64,21 @@ namespace
         CHECK(IsScriptedMoverCast(204148, false, true, true));
         CHECK(!IsScriptedMoverCast(0, true, true, false));
         CHECK(!IsScriptedMoverCast(8724, true, true, false));
+    }
+
+    // WP-Q3: the mover auras (pinned: Killing Spree only, a scripted mover too) and when the brain cancels one.
+    void TestMoverAuras()
+    {
+        CHECK(kMoverAuras.size() == 1);
+        CHECK(IsMoverAura(51690));
+        CHECK(FindScriptedMover(51690) != nullptr);
+        for (uint32_t id : { 0u, 57840u, 204148u, 8676u, 203963u, 204400u, 48020u, 13877u })
+            CHECK(!IsMoverAura(id));
+        // Escape, Hold, Freeze: yes; Idle and Watch (no mode flag): no.
+        CHECK(MoverAuraBreaks(true, false, false));
+        CHECK(MoverAuraBreaks(false, true, false));
+        CHECK(MoverAuraBreaks(false, false, true));
+        CHECK(!MoverAuraBreaks(false, false, false));
     }
 
     void TestNamedMovers()
@@ -441,6 +456,7 @@ int main()
 {
     TestScriptedMoverTable();
     TestScriptedMoverConditions();
+    TestMoverAuras();
     TestNamedMovers();
     TestTurningSelfCasts();
     TestLookAwayRule();

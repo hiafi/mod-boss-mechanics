@@ -26,6 +26,9 @@
 // hazards, carried shapes, allies) and the bot's tasks; a bot with a live holding task holds its spot (TaskHoldUntil,
 // HoldForTasks) once the spot passes TargetOk, and a bot with a task or a player kind is relevant without a hazard.
 // The test judges the player kinds itself (tests/fight_test.cpp).
+// WP-Q3 (optional, World::moverHop): a mover aura on a bot (Killing Spree, Bot::moverAuraUntil) puts it at the hop
+// point every Config::moverHop before its move; Config::moverAuraBreak cancels it once the brain step leaves the bot
+// in Escape or Hold (the brain's BreakMoverAuras).
 #ifndef MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 #define MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 
@@ -109,6 +112,10 @@ namespace BrainModel
         // was added (the waker's two rules). 0 = every update. The M4 build ran mechanics bots every 200 ms on a
         // 100 ms map update; LockRules::FastTickDue makes it 100 (WP-Q2).
         Ms brainCadence{ 0 };
+        // WP-Q3: a mover aura's hop interval (Killing Spree: one teleport per 500 ms hit), and whether the brain
+        // cancels a running one in Escape or Hold (LockRules::MoverAuraBreaks; false = the WP-F2 build).
+        Ms moverHop{ 500 };
+        bool moverAuraBreak = true;
     };
 
     enum class Mode { Watch, Escape, Hold };
@@ -121,6 +128,7 @@ namespace BrainModel
         std::uint32_t hits = 0, deniedSolves = 0, fallbackKept = 0, regionRoutes = 0, regionRoutesFound = 0;
         std::uint32_t motionEndStops = 0, roleReleases = 0;
         std::uint32_t msChaseRefused = 0, chaseReleases = 0, chaseSolves = 0, landingBlocks = 0;
+        std::uint32_t moverBreaks = 0, moverHops = 0;
         std::array<std::uint32_t, 5> outcomes{};
         std::int64_t solveUsMax = 0, solveUsTotal = 0, routeUsMax = 0;
         // Per Fallback: pass 1 spent its whole MaxPathChecks budget (a budget stop) or not.
@@ -153,6 +161,8 @@ namespace BrainModel
             chaseReleases += o.chaseReleases;
             chaseSolves += o.chaseSolves;
             landingBlocks += o.landingBlocks;
+            moverBreaks += o.moverBreaks;
+            moverHops += o.moverHops;
             for (std::size_t i = 0; i < outcomes.size(); ++i)
                 outcomes[i] += o.outcomes[i];
             solveUsMax = std::max(solveUsMax, o.solveUsMax);
@@ -196,6 +206,8 @@ namespace BrainModel
         std::uint32_t bandBlockedBy = 0;
         bool releaseForChase = false;
         bool followMoved = false;               // stock follow moved the bot in the last step (a spline in flight)
+        // WP-Q3: a mover aura runs until moverAuraUntil; its next hop is due at nextMoverHopAt.
+        Ms moverAuraUntil{ 0 }, nextMoverHopAt{ 0 };
         Counters c;
     };
 
@@ -220,6 +232,8 @@ namespace BrainModel
         // WP-F2: bots that are healers (TryReroute's patient anchor) and tanks (the valve at half the time).
         std::function<bool(std::size_t)> isHealer;
         std::function<bool(std::size_t)> isTank;
+        // WP-Q3: where bot i's mover aura puts it on each hop (false: no hop).
+        std::function<bool(std::size_t, Vec3&)> moverHop;
         // Diagnostics: every solve with its input, its plan and where it ran (the bot's mode before it, and whether
         // it is the Escape re-check's re-solve).
         enum class SolveAt { Spot, ReCheck, Reroute };
@@ -258,6 +272,7 @@ namespace BrainModel
                 b.lastBrainAt = now;
                 b.brainRevision = revision;
                 Brain(i, now, budget);
+                BreakMoverAura(b, now);
             }
             for (std::size_t i = 0; i < bots.size(); ++i)
                 Move(i, now);
@@ -818,9 +833,27 @@ namespace BrainModel
             }
         }
 
+        // The brain's BreakMoverAuras: a running mover aura goes once the bot escapes or holds.
+        void BreakMoverAura(Bot& b, Ms now)
+        {
+            if (!cfg.moverAuraBreak || now >= b.moverAuraUntil
+                || !LockRules::MoverAuraBreaks(b.mode == Mode::Escape, b.mode == Mode::Hold, false))
+                return;
+            b.moverAuraUntil = Ms(0);
+            ++b.c.moverBreaks;
+        }
+
         void Move(std::size_t i, Ms now)
         {
             Bot& b = bots[i];
+            // A mover aura's hop (a teleport) before the step's movement.
+            Vec3 hop;
+            if (now < b.moverAuraUntil && now >= b.nextMoverHopAt && moverHop && moverHop(i, hop))
+            {
+                b.pos = hop;
+                b.nextMoverHopAt = now + cfg.moverHop;
+                ++b.c.moverHops;
+            }
             Ms const end = now + cfg.step;
             Vec3 to = b.pos;
             Ms from = now;

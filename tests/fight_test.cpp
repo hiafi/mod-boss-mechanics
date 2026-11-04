@@ -1130,6 +1130,117 @@ namespace
         CHECK(after.hits == 0);
     }
 
+    // ---- WP-Q3: m4-q3/q4 Hit Spread/3, Killing Spree through smite's Harpoon Volley -----------------------------
+
+    struct SpreeRun
+    {
+        std::uint32_t hits = 0;     // Spread hits (both members of a pair within 6 yd count)
+        BrainModel::Counters c;
+    };
+
+    // `spread 6 2500 role=nontank` with the two reference melee (bots 2 and 4) 2.4 yd apart by the boss. As in
+    // m4-q3diag-s3: the lock refused Combat's Killing Spree while smite's cones were warned and let it through in the
+    // gap after the rear cone, one AI tick before the Spread's warning; its hits (one teleport each next to the boss
+    // every 500 ms, 2.5 s for 5 combo points) put the rogue back beside Arms through its escape, and both took the
+    // Spread. `spree`: the rogue casts it; `breakAura`: the brain cancels it once it escapes or holds
+    // (LockRules::MoverAuraBreaks).
+    SpreeRun RunSpreeSpread(bool spree, bool breakAura)
+    {
+        Fight f(false);
+        f.w.cfg.moverAuraBreak = breakAura;
+        Ms const resolve = kStart + Ms(2500);
+        Ms const to = resolve + Ms(500);
+        Solver::Timing const timing = Solver::MakeInstant(resolve, to - resolve);
+        std::array<bool, 5> published{};
+        bool active = false;
+        auto eligible = [](std::size_t j) { return j != 0; };
+        f.w.kinds = [&](std::size_t i, Solver::Input& in, Ms now, std::vector<Task>& tasks)
+        {
+            f.Band(i, in);
+            if (!active || to + in.params.marginMs < now || !eligible(i))
+                return;
+            // My circle: no other non-tank inside (the carrier's side)...
+            std::vector<std::uint32_t> allies;
+            for (std::size_t j = 0; j < 5; ++j)
+                if (j != i && eligible(j))
+                {
+                    float slack = 0.f;
+                    Vec3 const p = f.w.SpotOf(j, slack);
+                    in.allies.push_back({ static_cast<std::uint32_t>(j + 1), p, slack });
+                    allies.push_back(static_cast<std::uint32_t>(in.allies.size() - 1));
+                }
+            in.carried.push_back(VR::CarriedCircle(3, 6.f, 10.f, kMargin, timing, std::move(allies)));
+            // ...and every other carrier's circle at its published spot (the avoider's side).
+            for (std::size_t j = 0; j < 5; ++j)
+            {
+                VR::Spot s;
+                if (j != i && eligible(j) && f.OtherSpot(j, published[j], true, s))
+                    in.hazards.push_back(VR::CarrierHazard(3, 6.f, 10.f, s, kMargin, timing));
+            }
+            tasks.push_back({ 3, to, true });
+        };
+        f.w.onSolve = [&](BrainModel::Bot const& b, Solver::Input const&, Solver::Plan const&,
+            BrainModel::World::SolveAt)
+        {
+            published[static_cast<std::size_t>(&b - f.w.bots.data())] = true;
+        };
+        // Killing Spree's teleport: next to the boss on the rogue's side, inside Arms' circle.
+        f.w.moverHop = [&](std::size_t i, Vec3& p)
+        {
+            if (i != 4)
+                return false;
+            p = At(1.5f, 200.f);
+            return true;
+        };
+        if (spree)
+        {
+            // Cast at -0.1 s: its 5 hits teleport at +0.4, 0.9, 1.4, 1.9 and 2.4 s, the last one 0.1 s before the
+            // Spread resolves.
+            f.w.bots[4].moverAuraUntil = kStart + Ms(2401);
+            f.w.bots[4].nextMoverHopAt = kStart + Ms(400);
+        }
+        SpreeRun r;
+        auto before = [&](Ms now)
+        {
+            if (now == kStart)
+            {
+                active = true;
+                ++f.w.revision;
+            }
+        };
+        auto after = [&](Ms now)
+        {
+            if (resolve <= now || resolve > now + f.w.cfg.step)
+                return;
+            for (std::size_t j = 1; j < 5; ++j)
+                for (std::size_t k = 1; k < 5; ++k)
+                    if (k != j && Dist(f.w.bots[k].pos, f.w.bots[j].pos) <= 6.f)
+                    {
+                        ++r.hits;
+                        break;
+                    }
+        };
+        f.Run(kStart - Ms(1000), kStart + Ms(4000), before, after);
+        r.c = f.w.Total();
+        return r;
+    }
+
+    void TestKillingSpreeSpread()
+    {
+        SpreeRun const none = RunSpreeSpread(false, true);
+        SpreeRun const asBuilt = RunSpreeSpread(true, false);
+        SpreeRun const fixed = RunSpreeSpread(true, true);
+        std::printf("spread 6 on the non-tanks, Killing Spree cast 0.1 s before the warning: no spree %u hits; "
+            "WP-F2 %u hits (%u hops); WP-Q3 %u hits (%u hops, %u cancelled)\n", none.hits, asBuilt.hits,
+            asBuilt.c.moverHops, fixed.hits, fixed.c.moverHops, fixed.c.moverBreaks);
+        CHECK(none.hits == 0);
+        CHECK(asBuilt.hits >= 2);       // the rogue and Arms, as in the sweep
+        CHECK(asBuilt.c.moverHops >= 4);
+        CHECK(fixed.hits == 0);
+        CHECK(fixed.c.moverBreaks == 1);
+        CHECK(fixed.c.moverHops == 0);  // cancelled on the brain step that saw the warning
+    }
+
     // ---- G7: solve cost --------------------------------------------------------------------------------------
 
     void AddLaneSet(Solver::Input& in, Lcg& rng, Ms reg, std::uint32_t& id)
@@ -1460,6 +1571,7 @@ int main(int argc, char** argv)
     TestHunterFlee();
     TestHealerToPatient();
     TestRingHazardCreep();
+    TestKillingSpreeSpread();
     TestG7Exact();
     Bench(true);
     return Report("fight_test");

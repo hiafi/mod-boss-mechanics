@@ -1319,6 +1319,26 @@ namespace BossMechanics
             return true;
         }
 
+        // M4 WP-Q3 (m4-q3/q4 Hit Spread/3): once the brain walks, holds or freezes the bot, a mover aura still running
+        // (LockRules::kMoverAuras: Killing Spree, cast in Watch before the mechanic was warned) is cancelled. Each of
+        // its hits teleported the rogue back next to the boss, into the other melee's Spread circle, so the escape
+        // never got anywhere. Run at the end of every brain step that reached the mode logic.
+        void BreakMoverAuras(Player* bot, MechanicBotState& st, BotConfig const& cfg)
+        {
+            if (!LockRules::MoverAuraBreaks(st.mode == MechanicBotMode::Escape, st.mode == MechanicBotMode::Hold,
+                st.mode == MechanicBotMode::Freeze))
+                return;
+            for (uint32 const id : LockRules::kMoverAuras)
+            {
+                if (!bot->HasAura(id))
+                    continue;
+                bot->RemoveAurasDueToSpell(id);
+                ++st.counters.moverBreaks;
+                if (cfg.debug)
+                    LOG_INFO(kLog, "Bot {}: mover aura {} cancelled ({})", bot->GetName(), id, ModeName(st.mode));
+            }
+        }
+
         // Idle/Watch (§3.4 step 4): solve when the spot fails TargetOk; hold for live tasks; re-route or hold when
         // only the current motion is unsafe; then the tank and healer tasks.
         void StepWatch(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
@@ -1887,6 +1907,7 @@ namespace BossMechanics
             st.leaveBy = Solver::kForever;     // frozen: nothing to leave for (decision §7.4)
             BotFacing::UpdateLookAway(bot, st, now);
             PublishLookAway(*reg, bot, st, now);
+            BreakMoverAuras(bot, st, cfg);
             return;
         }
         st.leaveBy = LeaveByAll(in);
@@ -1905,6 +1926,7 @@ namespace BossMechanics
                 LOG_INFO(kLog, "Bot {}: a Frontal warning started, the re-facing walk stops here", bot->GetName());
             BotFacing::UpdateLookAway(bot, st, now);
             PublishLookAway(*reg, bot, st, now);
+            BreakMoverAuras(bot, st, cfg);
             return;
         }
 
@@ -1923,6 +1945,7 @@ namespace BossMechanics
                 RunRoute(bot, st, now, cfg);
                 BotFacing::UpdateLookAway(bot, st, now);
                 PublishLookAway(*reg, bot, st, now);
+                BreakMoverAuras(bot, st, cfg);
                 return;
             }
         }
@@ -1951,6 +1974,7 @@ namespace BossMechanics
                 RunRegionRoute(*reg, bot, st, now, cfg);
                 BotFacing::UpdateLookAway(bot, st, now);
                 PublishLookAway(*reg, bot, st, now);
+                BreakMoverAuras(bot, st, cfg);
                 return;
             }
         }
@@ -1971,6 +1995,7 @@ namespace BossMechanics
         }
         BotFacing::UpdateLookAway(bot, st, now);
         PublishLookAway(*reg, bot, st, now);
+        BreakMoverAuras(bot, st, cfg);
     }
 
     bool BotBrain::EndPullOnWake(PlayerbotAI* botAI, MechanicBotState& st)
