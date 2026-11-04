@@ -18,6 +18,18 @@
  *   SPELL_FACING_FLAG_INFRONT on a target outside CAST_ANGLE_IN_FRONT of the chosen facing, and attack-only actions
  *   (auto-attack, target picks) on a target outside it are blocked.
  *
+ * M4 (STAGE-M4-HANDOFF §3.5, WP-X, from the STAGE-M4-L-REPORT audit):
+ * - look-away also blocks an offensive cast on a target outside the arc when the spell id is unknown, every ground
+ *   cast (CastAtPositionAction turns the bot to the point), and the self casts that turn the bot to its current target
+ *   first (Frozen Orb, Breath of Sindragosa, Glacial Advance); the pure rules are MechanicLockRules.h;
+ * - movers: spells that move the caster from a script (MechanicLockRules.h kScriptedMovers: Death from Above, Killing
+ *   Spree, Ambush from stealth out of melee, ...), and the interim names `arms intervene`, `subt death from above`;
+ * - the spell id: CastSpellAction::GetCastSpellId() when the fork has it (PLAYERBOTS_HAS_CAST_SPELL_ID), which
+ *   knows the ids the rework actions cast by id; else the name lookup, 0 for them;
+ * - actions run by name (PlayerbotAI::DoSpecificAction skips the multipliers): when the fork has
+ *   Engine::SetExecuteActionGate (PLAYERBOTS_HAS_EXECUTE_ACTION_GATE), InstallSpecificActionGate puts the same verdict
+ *   there. Chat `do` (event source "do") is a human order and is let through, counted when the lock would refuse it.
+ *
  * Multipliers are per engine, so the strategy registers this in the combat and the non-combat engine alike.
  */
 
@@ -30,6 +42,25 @@
 
 #include "MechanicBotStrategy.h"
 #include "Multiplier.h"
+
+class Action;
+class PlayerbotAI;
+
+namespace BossMechanics
+{
+    struct MechanicBotState;
+
+    namespace BotLock
+    {
+        // The lock's verdict on one action for this bot: 1 to allow, 0 to drop it (and the block counted). The
+        // multiplier's value, and the by-name gate's test.
+        float Verdict(PlayerbotAI* botAI, MechanicBotState& st, Action* action);
+
+        // Puts the verdict into playerbots' by-name gate (Engine::SetExecuteActionGate) when the fork has it; a no-op
+        // otherwise. Idempotent; world thread, once the glue registers (MechanicBotGate.cpp, LatchBotGlue).
+        void InstallSpecificActionGate();
+    }
+}
 
 class MechanicBotLockMultiplier : public Multiplier
 {

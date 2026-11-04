@@ -2,6 +2,10 @@
  * mod-boss-mechanics: registration, the strategy gate and AddSC_boss_mechanics_bots (STAGE-M2-HANDOFF §3.3, WP-C).
  *
  * Pattern adapted from mod-dungeon-clear (Jared Wright, AGPL-3.0-or-later), DcStrategyGate and DungeonClearModule.
+ *
+ * M4 (STAGE-M4-HANDOFF §3.2, §3.3): the open-world scope is any live encounter that wants bots (Encounter::wantsBots:
+ * `.mech test`, the training dummy, the sim), and the sim seam's RegisterBotGlue / ReconcileBot (BossMechanicsSim.h)
+ * are defined here because the latch is file-local.
  */
 
 #include "MechanicBotGuard.h"
@@ -10,11 +14,13 @@
 
 #include "MechanicBotGate.h"
 #include "BossMechanicsConfig.h"
+#include "BossMechanicsSim.h"
 #include "Group.h"
 #include "Log.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotContexts.h"
+#include "MechanicBotLock.h"
 #include "MechanicBotReportHook.h"
 #include "MechanicBotView.h"
 #include "MechanicRegistry.h"
@@ -72,23 +78,62 @@ namespace
         RegisterClassContexts<WarlockAiObjectContext>();
     }
 
-    // Open-world test scope: the bot's group (raid) holds a GM who ran `.mech test` on this map.
+    // Open-world scope (M4): the bot is, or its group (raid) holds, a scope player of a live encounter on this map
+    // that wants bots: a GM who ran `.mech test`, a player the training dummy runs for, the sim's actor.
     bool InTestScope(Player* bot)
     {
-        Group* group = bot->GetGroup();
-        if (!group)
-            return false;
         Registry const* reg = Registry::Get(bot->GetMap());
         if (!reg)
             return false;
+        Group const* group = bot->GetGroup();
+        ObjectGuid const self = bot->GetGUID();
         bool found = false;
         reg->ForEachEncounter([&](Encounter const& e)
         {
-            for (ObjectGuid const& gm : e.testGms)
-                found = found || group->IsMember(gm);
+            if (found || e.ending || !e.wantsBots)
+                return;
+            for (ObjectGuid const& g : e.testGms)
+                found = found || g == self || (group && group->IsMember(g));
         });
         return found;
     }
+
+    // The first-world-tick registration, also reachable early (Sim::RegisterBotGlue). Idempotent: once latched it
+    // only returns the latched switch.
+    bool LatchBotGlue()
+    {
+        if (sLatched)
+            return sEnabled;
+        // Playerbots built its shared contexts in OnBeforeWorldInitialized. The master switch is latched here (a
+        // reload cannot add or remove contexts).
+        sLatched = true;
+        sEnabled = GetConfig().bots.enable;
+        if (!sEnabled)
+        {
+            LOG_INFO(kLog, "mod-boss-mechanics: bot glue disabled (BossMechanics.Bots.Enable = 0)");
+            return false;
+        }
+        RegisterAll();
+        BotLock::InstallSpecificActionGate();
+        SetBotAfterTick(&BotAfterTick);
+        LOG_INFO(kLog, "mod-boss-mechanics: registered the boss-mechanics strategy, triggers, actions and value "
+            "into all ten playerbots class contexts");
+        return true;
+    }
+}
+
+bool Sim::RegisterBotGlue()
+{
+    return LatchBotGlue();
+}
+
+bool Sim::ReconcileBot(Player* bot)
+{
+    if (!LatchBotGlue() || !bot || !bot->IsInWorld())
+        return false;
+    BotGate::Reconcile(bot);
+    PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+    return botAI && botAI->HasStrategy("boss mechanics", BOT_STATE_COMBAT);
 }
 
 bool BotGate::IsEnabled()
@@ -180,19 +225,8 @@ public:
     {
         if (!sLatched)
         {
-            // First world tick: playerbots built its shared contexts in OnBeforeWorldInitialized, and no bot exists
-            // yet. The master switch is latched here (a reload cannot add or remove contexts).
-            sLatched = true;
-            sEnabled = GetConfig().bots.enable;
-            if (!sEnabled)
-            {
-                LOG_INFO(kLog, "mod-boss-mechanics: bot glue disabled (BossMechanics.Bots.Enable = 0)");
-                return;
-            }
-            RegisterAll();
-            SetBotAfterTick(&BotAfterTick);
-            LOG_INFO(kLog, "mod-boss-mechanics: registered the boss-mechanics strategy, triggers, actions and value "
-                "into all ten playerbots class contexts");
+            // First world tick (no bot exists yet), unless the sim latched it earlier (Sim::RegisterBotGlue).
+            LatchBotGlue();
             return;
         }
         if (!sEnabled)
@@ -219,7 +253,13 @@ class BossMechanicsBotPlayerScript : public PlayerScript
 {
 public:
     BossMechanicsBotPlayerScript() : PlayerScript("BossMechanicsBotPlayerScript",
-        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_BEFORE_LOGOUT }) { }
+        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_BEFORE_LOGOUT, PLAYERHOOK_ON_SPELL_CAST }) { }
+
+    // M4 leak detectors (MechanicBotWaker.cpp): the bot's own casts name the spell of a leaked move.
+    void OnPlayerSpellCast(Player* player, Spell* spell, bool /*skipCheck*/) override
+    {
+        BotOnSpellCast(player, spell);
+    }
 
     void OnPlayerLogin(Player* player) override
     {
@@ -251,9 +291,21 @@ void AddSC_boss_mechanics_bots()
 
 #else
 
+#include "BossMechanicsSim.h"
+
 // Built without mod-playerbots: no bot glue (`.mech bots` says so).
 void AddSC_boss_mechanics_bots()
 {
+}
+
+bool BossMechanics::Sim::RegisterBotGlue()
+{
+    return false;
+}
+
+bool BossMechanics::Sim::ReconcileBot(Player* /*bot*/)
+{
+    return false;
 }
 
 #endif

@@ -9,6 +9,7 @@
  * | 205001-205007 | Resolve damage, one per school: 205001 + SpellSchools value       |
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
+ * | 300402        | Mechanics Training Dummy: runs the drill program on itself (M4)   |
  *
  * Display ids (CreatureDisplayInfo id = CreatureModelData id), one block of 100 ids per color in each range:
  *
@@ -67,6 +68,7 @@ namespace BossMechanics::Ids
     // Creatures
     constexpr std::uint32_t NPC_MECHANIC_MARKER = 300400;
     constexpr std::uint32_t NPC_MECHANIC_TEST_OWNER = 300401;
+    constexpr std::uint32_t NPC_MECHANIC_DUMMY = 300402;          // npc_boss_mechanics_dummy (MechanicDummyAI.cpp)
 
     // Displays: a table of shape ladders inside one 100-id block per color (see the table above); the two line
     // ladders have their own ranges.

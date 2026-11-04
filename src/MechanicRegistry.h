@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <vector>
 
+class Creature;
 class Map;
 class Player;
 class Unit;
@@ -419,9 +420,23 @@ namespace BossMechanics
         // Players this encounter stacked Weakened on. Its end removes Weakened from them only, and not from a player
         // another encounter still on the map has also stacked.
         GuidSet weakenedPlayers;
-        // `.mech test` (owner = Mechanic Test Owner): the GMs who ran it. Only they and their group (raid) members
-        // are eligible for the encounter's mechanics; empty on a test owner = nobody.
+        // The encounter's scope players (M4: the field keeps its M1 name). `.mech test` (owner = Mechanic Test
+        // Owner): the GMs who ran it; only they and their group (raid) members are eligible for the test owner's
+        // mechanics, and empty on a test owner = nobody (IsInTestScope). The training dummy and the sim add the
+        // players they run for; those owners' targeting is not limited by it (normal candidates).
         GuidSet testGms;
+        // M4: the scope players' groups want the boss-mechanics bot strategy in the open world (the bot gate reads
+        // it; set with AddScopePlayer by `.mech test`, the drill runner, the training dummy and the sim).
+        bool wantsBots = false;
+        // M4: steps scheduled on the encounter (Registry::Schedule), run at the start of a Tick at or after `at`,
+        // in (at, seq) order. They go with the encounter.
+        struct Task
+        {
+            Milliseconds at{ 0 };
+            uint64 seq = 0;
+            std::function<void(Creature* owner)> fn;
+        };
+        std::vector<Task> tasks;
     };
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -473,6 +488,15 @@ namespace BossMechanics
         // for removal mid-unload (Map::UnloadGrid asserts the remove list is empty). No-op without an encounter.
         void DeferEndEncounter(ObjectGuid owner);
         void ClearAll();                // every encounter (`.mech clear all`)
+        // M4: begins the owner's encounter (when needed), adds `player` to its scope set and marks it as wanting bots.
+        Encounter& AddScopePlayer(ObjectGuid owner, ObjectGuid player);
+        // M4: runs `fn(owner)` at the first Tick at or after `at` (GameTime ms), while the owner's encounter lives and
+        // the owner is an alive creature on this map (else the task is dropped). Begins the encounter when needed.
+        // Tasks run before the mechanics step, outside the tick's iteration: they may Add, Schedule and end
+        // encounters. The closure must capture guids, never unit pointers.
+        void Schedule(ObjectGuid owner, Milliseconds at, std::function<void(Creature* owner)> fn);
+        void CancelScheduled(ObjectGuid owner);     // drops the owner's pending tasks
+        std::size_t ScheduledCount(ObjectGuid owner) const;
         void Tick(Milliseconds now);    // from AllMapScript::OnMapUpdate (C2), full map updates only
         void PostFailure(FailureEvent const& e);
         // Replaces the bot's earlier reservation on that mechanic (keeping its `since`; a new one with since 0 starts
@@ -594,6 +618,7 @@ namespace BossMechanics
         void PickTargets(ActiveMechanic& m);
         void Remove(ActiveMechanic& m);     // despawn markers + fizzle callback; caller erases
         void FinishEncounter(ObjectGuid owner);
+        void RunTasks(Milliseconds now);    // M4: the due Schedule tasks (start of Tick)
         void BumpRevision()
         {
             if (++_revision == 0)
@@ -611,6 +636,7 @@ namespace BossMechanics
         uint32 _nextLaneSetId = 1;
         uint32 _revision = 1;
         uint32 _reservationRevision = 1;
+        uint64 _nextTaskSeq = 1;
         bool _ticking = false;
         std::map<uint32, ActiveMechanic> _mechanics;
         std::map<uint32, LaneSet> _laneSets;
@@ -624,6 +650,12 @@ namespace BossMechanics
     // every map with a registry. The playerbots glue installs it at startup; nullptr (the default) = no call.
     using BotAfterTickFn = void (*)(Map* map, Registry& reg, Milliseconds now);
     void SetBotAfterTick(BotAfterTickFn fn);
+
+    // M4 global failure sink (STAGE-M4-HANDOFF §3.3; Sim::SetFailureSink): every FailureEvent of every encounter on
+    // every map, after the encounter's own onFailure callback. One sink; nullptr (the default) = none. Called on the
+    // map's update thread: the sink must be safe there (the sim runs MapUpdate.Threads 0).
+    using FailureSinkFn = void (*)(Map const* map, FailureEvent const& e);
+    void SetFailureSink(FailureSinkFn fn);
 }
 
 #endif

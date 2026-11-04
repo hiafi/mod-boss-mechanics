@@ -101,6 +101,35 @@ namespace BossMechanics
                 c.facingsApplied, c.facingBlocks, c.facingBreaks, c.tankRefacings, c.refacingStops, c.parks,
                 c.routesFound + c.routesFailed, c.routesFound, c.routesFailed, c.routeUsLast, c.routeUsMax,
                 c.sightRays);
+            // M4 (STAGE-M4-HANDOFF §3.5-§3.7, WP-C): mode time, lock leaks (spell x count), the Fallback split by
+            // exposure, route loops; then the cost counters (us; p50 and p95 are log2 bucket upper bounds).
+            auto secs = [](uint32 ms) { return ms / 1000.0; };
+            std::string leakSpells;
+            for (auto const& [spell, n] : c.leakSpells)
+                leakSpells += Acore::StringFormat("{}{} x{}", leakSpells.empty() ? "" : ", ", spell, n);
+            handler->PSendSysMessage("  m4: time (s) idle {:.1f} watch {:.1f} escape {:.1f} hold {:.1f} freeze {:.1f} "
+                "released {:.1f} | leaks: moves {}, casts {}, turns {} (spells {}) | fallback clear {} hot {} | route "
+                "loops {}", secs(c.msIdle), secs(c.msWatch), secs(c.msEscape), secs(c.msHold), secs(c.msFreeze),
+                secs(c.msReleased), c.leakMoves, c.leakCasts, c.leakTurns, leakSpells.empty() ? "-" : leakSpells,
+                c.fallbackClear, c.fallbackHot, c.routeLoops);
+            CostStats const& k = st->cost;
+            uint32 mechanics = 0;
+            uint32 mechanicMax = 0;
+            double mechanicMean = 0.0;
+            k.PerMechanic(mechanics, mechanicMax, mechanicMean);
+            handler->PSendSysMessage("  cost: path calls {} (us mean {} p95 {} max {}), probes {} (us max {}), sight "
+                "rays {} (us max {}), lanes: {} candidates, {} path calls in {} solves, path calls per mechanic max {} "
+                "mean {:.1f} over {} (+{} unattributed)", k.pathUs.count, k.pathUs.Mean(), k.pathUs.Quantile(0.95),
+                k.pathUs.max, k.probeUs.count, k.probeUs.max, k.sightUs.count, k.sightUs.max, k.laneCandidates,
+                k.lanePathCalls, k.laneSolves, mechanicMax, mechanicMean, mechanics, k.pathCallsUnattributed);
+            handler->PSendSysMessage("  cost us: solve p50 {} p95 {} max {} | route p50 {} p95 {} max {} | brain mean "
+                "{} max {} | map update (all bots) mean {} max {} over {}", k.solveUs.Quantile(0.5),
+                k.solveUs.Quantile(0.95), k.solveUs.max, k.routeUs.Quantile(0.5), k.routeUs.Quantile(0.95),
+                k.routeUs.max, k.brainUs.Mean(), k.brainUs.max,
+                k.mapUpdates ? k.mapBrainUsTotal / k.mapUpdates : 0, k.mapBrainUsMax, k.mapUpdates);
+            // M4: the lock's by-name gate and id-less casts (STAGE-M4-HANDOFF §3.5, WP-X).
+            handler->PSendSysMessage("  m4 lock: by-name blocks {}, chat do let through {}, casts with no spell id {}",
+                c.specificBlocks, c.doBypasses, c.unknownCasts);
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

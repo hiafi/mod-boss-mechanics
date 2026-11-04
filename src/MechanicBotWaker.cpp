@@ -25,6 +25,16 @@
  * endless channel.
  *
  * The playerbots reaction engine is not used: it runs on the same dynamic delay and needs its own install.
+ *
+ * M4 (STAGE-M4-HANDOFF §3.5, §3.6, WP-C), per bot and map update, before the waker acts:
+ * - the mode clocks (MechanicBotCounters::msIdle .. msReleased): the time since the last sample goes to the mode the
+ *   bot is in now (released first);
+ * - the leak detectors (MechanicLeaks.h): a Sample of the bot's live state (spline, motion slots, position,
+ *   orientation, the cast in progress) against the mode, leaveBy and look-away window the lock judged with in the
+ *   bot's update just before; leaks go to leakMoves / leakCasts / leakTurns and leakSpells. BotOnSpellCast (the
+ *   player cast hook) remembers the bot's own non-triggered casts, so a leaked move names its spell;
+ * - after the loop, the brain time of every bot on the map in this update (BotBrain::TakeMapBrainUs) goes to each
+ *   bot's CostStats.
  */
 
 #include "MechanicBotGuard.h"
@@ -33,15 +43,24 @@
 
 #include "MechanicBotGate.h"
 #include "BossMechanicsConfig.h"
+#include "Log.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
+#include "MechanicLeaks.h"
 #include "MechanicRegistry.h"
+#include "MotionMaster.h"
+#include "MoveSpline.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "Playerbots.h"
 #include "Spell.h"
+#include "SpellInfo.h"
+#include "StringFormat.h"
 #include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace BossMechanics
 {
@@ -77,6 +96,143 @@ namespace BossMechanics
             botAI->SetNextCheckDelay(0);
             ++st.counters.wakes;
         }
+
+        constexpr char const* kLog = "module.bossmechanics.bots";
+        // Mode clocks: a gap longer than this between two samples (the bot was dead, out of the map, the strategy
+        // off) is not counted.
+        constexpr Milliseconds kMaxClockStep{ 2000 };
+
+        void TickModeClock(MechanicBotState& st, Milliseconds now, bool released)
+        {
+            Milliseconds const last = st.clockAt;
+            st.clockAt = now;
+            if (last <= Milliseconds(0) || now <= last || now - last > kMaxClockStep)
+                return;
+            uint32 const ms = static_cast<uint32>((now - last).count());
+            MechanicBotCounters& c = st.counters;
+            if (released)
+            {
+                c.msReleased += ms;
+                return;
+            }
+            switch (st.mode)
+            {
+                case MechanicBotMode::Idle:
+                    c.msIdle += ms;
+                    break;
+                case MechanicBotMode::Watch:
+                    c.msWatch += ms;
+                    break;
+                case MechanicBotMode::Escape:
+                    c.msEscape += ms;
+                    break;
+                case MechanicBotMode::Hold:
+                    c.msHold += ms;
+                    break;
+                case MechanicBotMode::Freeze:
+                    c.msFreeze += ms;
+                    break;
+            }
+        }
+
+        // The mode the lock judges with (MechanicBotLock.cpp): a deferred escape locks as Escape, a released bot not
+        // at all.
+        Leaks::Lock LockOf(MechanicBotState const& st, bool released)
+        {
+            if (released)
+                return Leaks::Lock::None;
+            switch (st.mode)
+            {
+                case MechanicBotMode::Escape:
+                    return Leaks::Lock::Escape;
+                case MechanicBotMode::Hold:
+                    return Leaks::Lock::Hold;
+                case MechanicBotMode::Freeze:
+                    return Leaks::Lock::Freeze;
+                case MechanicBotMode::Watch:
+                    return st.pendingEscape ? Leaks::Lock::Escape : Leaks::Lock::None;
+                case MechanicBotMode::Idle:
+                    break;
+            }
+            return Leaks::Lock::None;
+        }
+
+        // §3.5 leak detectors: the bot's live state as left by its update, judged against the state the lock used.
+        void ObserveLeaks(Player* bot, MechanicBotState& st, Milliseconds now, bool released, Spell const* spell,
+            Milliseconds remaining, Milliseconds margin, bool debug)
+        {
+            Leaks::Sample s;
+            s.now = now;
+            s.lock = LockOf(st, released);
+            s.lookAway = !released && BotFacing::LookAwayActive(st, now);
+            s.leaveBy = st.leaveBy;
+            s.marginMs = margin;
+            Movement::MoveSpline const* ms = bot->movespline;
+            if (ms && ms->Initialized() && !ms->Finalized())
+            {
+                auto const& spline = ms->_Spline();
+                G3D::Vector3 const& from = spline.getPoint(spline.first());
+                G3D::Vector3 const& to = spline.getPoint(spline.last());
+                s.spline = true;
+                s.splineId = ms->GetId();
+                s.splineMoves = Geo::Dist2d(from.x, from.y, to.x, to.y) >= Leaks::kFacingSplineYd;
+                s.destX = to.x;
+                s.destY = to.y;
+            }
+            if (st.mode == MechanicBotMode::Escape)
+            {
+                Geo::Vec3 const target = BotBrain::MoveTarget(st);
+                s.targetValid = true;
+                s.targetX = target.x;
+                s.targetY = target.y;
+            }
+            s.ourSendNow = st.escapeSentAt == now;
+            s.controlled = bot->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED) != NULL_MOTION_TYPE;
+            s.x = bot->GetPositionX();
+            s.y = bot->GetPositionY();
+            s.orientation = bot->GetOrientation();
+            s.speed = bot->GetSpeed(MOVE_RUN);
+            if (spell && spell->GetSpellInfo())
+            {
+                s.casting = true;
+                s.castKey = reinterpret_cast<std::uintptr_t>(spell);
+                s.castSpell = spell->GetSpellInfo()->Id;
+                s.castRemaining = remaining;
+            }
+
+            Leaks::Verdict const v = Leaks::Observe(st.leak, s);
+            if (!v.move && !v.cast && !v.turn)
+                return;
+            MechanicBotCounters& c = st.counters;
+            if (v.move)
+            {
+                ++c.leakMoves;
+                Leaks::AddSpell(c.leakSpells, v.moveSpell);
+            }
+            if (v.cast)
+            {
+                ++c.leakCasts;
+                Leaks::AddSpell(c.leakSpells, v.castSpell);
+            }
+            if (v.turn)
+                ++c.leakTurns;
+            if (debug)
+                LOG_INFO(kLog, "Bot {}: lock leak in {}{}: {}{}{}", bot->GetName(), ModeName(st.mode),
+                    s.lookAway ? " (look-away)" : "",
+                    v.move ? Acore::StringFormat("move (spell {}) ", v.moveSpell) : std::string(),
+                    v.cast ? Acore::StringFormat("cast {} ", v.castSpell) : std::string(), v.turn ? "turn" : "");
+        }
+    }
+
+    void BotOnSpellCast(Player* player, Spell const* spell)
+    {
+        if (!player || !spell || spell->IsTriggered() || !spell->GetSpellInfo() || !BotGate::IsEnabled())
+            return;
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
+        if (!botAI)
+            return;
+        if (MechanicBotState* st = BotBrain::StateOf(botAI))
+            Leaks::SelfCast(st->leak, spell->GetSpellInfo()->Id);
     }
 
     void BotAfterTick(Map* map, Registry& reg, Milliseconds now)
@@ -87,6 +243,9 @@ namespace BossMechanics
         Milliseconds const fastTick(cfg.fastTickMs);
         Milliseconds const margin(cfg.safetyMarginMs);
         uint32 const revision = reg.Revision();
+        // The bots seen in this update, for the map's brain time (M4 §3.6); reused across updates on this thread.
+        thread_local std::vector<MechanicBotState*> seen;
+        seen.clear();
 
         for (MapReference const& ref : map->GetPlayers())
         {
@@ -102,9 +261,16 @@ namespace BossMechanics
             MechanicBotState* st = BotBrain::StateOf(botAI);
             if (!st)
                 continue;
+            seen.push_back(st);
 
+            // M4: mode clocks and leak detectors, from the state the bot's update left (before the waker acts).
+            bool const released = BotBrain::Released(botAI, *st, now);
+            TickModeClock(*st, now, released);
             Milliseconds remaining{ 0 };
-            if (Spell const* spell = CurrentCast(bot, remaining))
+            Spell const* spell = CurrentCast(bot, remaining);
+            ObserveLeaks(bot, *st, now, released, spell, remaining, margin, cfg.debug);
+
+            if (spell)
             {
                 Milliseconds const leaveBy = BotBrain::CastLeaveBy(botAI, *st, reg, now);
                 if (BotBrain::Released(botAI, *st, now))
@@ -131,6 +297,14 @@ namespace BossMechanics
             else if (st->mode != MechanicBotMode::Idle && now - st->lastBrainAt >= fastTick)
                 Wake(botAI, *st);
         }
+
+        if (!seen.empty())
+        {
+            uint32 const us = BotBrain::TakeMapBrainUs(map->GetId(), map->GetInstanceId(), now);
+            for (MechanicBotState* st : seen)
+                st->cost.AddMapUpdate(us);
+        }
+        seen.clear();
     }
 }
 

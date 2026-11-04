@@ -57,6 +57,10 @@ namespace BossMechanics
 
         // Where the move action goes: the current waypoint of a route, else the plan's target.
         Geo::Vec3 MoveTarget(MechanicBotState const& st);
+
+        // M4 cost (§3.6): the brain time of every bot on the map (mapId, instanceId) in the map update at `now`,
+        // summed, then cleared (0 when no brain ran there in that update). The waker calls it once per map update.
+        uint32 TakeMapBrainUs(uint32 mapId, uint32 instanceId, Milliseconds now);
     }
 }
 

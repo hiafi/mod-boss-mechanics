@@ -248,6 +248,9 @@ namespace BossMechanics::Solver
         std::uint32_t crossStart = 0;       // a path was found, it fails inside a hazard that holds the bot
         std::uint32_t crossOther = 0;       // ...inside another hazard
         std::uint32_t budgetStops = 0;      // validation passes cut short by maxPathChecks
+        // M4 cost (D9): lane-frame candidates in the candidate list, and the oracle path calls spent on them.
+        std::uint32_t laneCandidates = 0;
+        std::uint32_t lanePathChecks = 0;
         std::uint8_t pass = 0;              // what found the plan: 1 clean, 2 clean at the reduced margin, 3 grace
 
         void Add(SolveStats const& o)       // sums the counters (not `pass`)
@@ -261,6 +264,8 @@ namespace BossMechanics::Solver
             crossStart += o.crossStart;
             crossOther += o.crossOther;
             budgetStops += o.budgetStops;
+            laneCandidates += o.laneCandidates;
+            lanePathChecks += o.lanePathChecks;
         }
     };
 
@@ -281,6 +286,9 @@ namespace BossMechanics::Solver
         std::vector<Geo::Vec3> waypoints;   // Route only (MechanicRoute.h)
         std::uint32_t violated = 0;         // hard regions + carried shapes the plan breaks (Fallback only)
         std::uint32_t sightChecks = 0;      // InSight rays spent
+        // Fallback and NoPath only (M4 §3.7): time the path spends inside an exact hitbox (drift kept, no yard or time
+        // margin) while one of its windows is open, from now. 0 = a "clear" fallback.
+        Ms exposure{ 0 };
     };
 
     struct PathCheck
@@ -1815,7 +1823,8 @@ namespace BossMechanics::Solver
     // at most maxCandidates, returned nearest first (ties on x, y) with the bot's spot at [0]. The cap keeps the
     // targeted points (exits, role ring, analytic lane cells, free-lane centrelines) before the blanket ones (rings,
     // frame grid), each nearest first: a large frame grid must not crowd out a free lane 25 yd away.
-    inline std::vector<Geo::Vec3> Candidates(Input const& in)
+    // fromLanes (M4 cost, optional): (*fromLanes)[i] = 1 when candidate i came from a lane frame.
+    inline std::vector<Geo::Vec3> Candidates(Input const& in, std::vector<std::uint8_t>* fromLanes = nullptr)
     {
         std::vector<Geo::Vec3> raw;
         std::vector<Geo::Vec3> bulk;
@@ -1849,16 +1858,22 @@ namespace BossMechanics::Solver
 
         // Lane frames (D9).
         float const m = Detail::MaxMargin(in) + Detail::kExitPushYd;
+        std::size_t const rawLane0 = raw.size();
+        std::size_t const bulkLane0 = bulk.size();
         for (LaneFrame const& lf : in.lanes)
             Detail::FrameCandidates(in, lf, reach, m, raw, bulk);
+        std::size_t const rawLane1 = raw.size();
+        std::size_t const bulkLane1 = bulk.size();
 
         // Player kinds (M3): regions, carried shapes, the slot ring, FarFrom, parking.
         Detail::PlayerKindCandidates(in, reach, raw);
 
+        // `lane` (M4 cost) rides along and never takes part in the order: the result is the same with or without it.
         struct Item
         {
             float d;
             Geo::Vec3 p;
+            bool lane = false;
         };
         auto nearer = [](Item const& a, Item const& b)
         {
@@ -1868,23 +1883,23 @@ namespace BossMechanics::Solver
                 return a.p.x < b.p.x;
             return a.p.y < b.p.y;
         };
-        auto items = [&bot, &nearer](std::vector<Geo::Vec3> const& pts)
+        auto items = [&bot, &nearer](std::vector<Geo::Vec3> const& pts, std::size_t lane0, std::size_t lane1)
         {
             std::vector<Item> v;
             v.reserve(pts.size());
-            for (Geo::Vec3 const& p : pts)
-                v.push_back({ Detail::Dist2(bot, p), p });
+            for (std::size_t i = 0; i < pts.size(); ++i)
+                v.push_back({ Detail::Dist2(bot, pts[i]), pts[i], i >= lane0 && i < lane1 });
             std::sort(v.begin(), v.end(), nearer);
             return v;
         };
-        std::vector<Item> ordered = items(raw);
-        std::vector<Item> const blanket = items(bulk);
+        std::vector<Item> ordered = items(raw, rawLane0, rawLane1);
+        std::vector<Item> const blanket = items(bulk, bulkLane0, bulkLane1);
         ordered.insert(ordered.end(), blanket.begin(), blanket.end());
 
         std::vector<Item> out;
         std::uint32_t const cap = std::max<std::uint32_t>(1, in.params.maxCandidates);
         out.reserve(std::min<std::size_t>(cap, ordered.size() + 1));
-        out.push_back({ 0.f, bot });
+        out.push_back({ 0.f, bot, false });
 
         // Dedup with a 0.5 yd hash grid (3x3 neighbourhood).
         std::unordered_map<std::int64_t, std::vector<std::uint32_t>> cells;
@@ -1922,6 +1937,12 @@ namespace BossMechanics::Solver
         pts.reserve(out.size());
         for (Item const& item : out)
             pts.push_back(item.p);
+        if (fromLanes)
+        {
+            fromLanes->assign(out.size(), 0);
+            for (std::size_t i = 0; i < out.size(); ++i)
+                (*fromLanes)[i] = out[i].lane ? 1 : 0;
+        }
         return pts;
     }
 
@@ -2288,8 +2309,13 @@ namespace BossMechanics::Solver
         if (spotOk && !in.roleSolve)
             return safeHere(plan);
 
-        std::vector<Geo::Vec3> const cands = Candidates(in);
+        // M4 cost (D9): which candidates the lane frames made (only asked when there is a lane frame).
+        std::vector<std::uint8_t> fromLanes;
+        std::vector<Geo::Vec3> const cands = Candidates(in, in.lanes.empty() ? nullptr : &fromLanes);
         plan.candidates = static_cast<std::uint32_t>(cands.size());
+        for (std::uint8_t f : fromLanes)
+            plan.stats.laneCandidates += f;
+        auto fromLane = [&fromLanes](std::uint32_t i) { return i < fromLanes.size() && fromLanes[i]; };
         float const speed = Detail::Speed(in);
         Ms const deadline = Detail::Deadline(in);
         Ms const moveStart = in.now + in.params.startDelay;
@@ -2424,6 +2450,8 @@ namespace BossMechanics::Solver
                         }
                         ++checks;
                         ++out.pathChecks;
+                        if (fromLane(i))
+                            ++out.stats.lanePathChecks;
                         std::vector<Geo::Vec3> path;
                         if (!oracle.Find(in.bot, point[i], path) || path.empty())
                         {
@@ -2579,6 +2607,7 @@ namespace BossMechanics::Solver
 
             // Default: the top of the ranking (as before the probes), also when every probe down it fails.
             Geo::Vec3 target = !ranked.empty() ? point[ranked.front().index] : (cands.empty() ? in.bot : cands[0]);
+            std::uint32_t targetIdx = !ranked.empty() ? ranked.front().index : 0;
             std::vector<Geo::Vec3> path;
             bool havePath = false;
             std::uint32_t tries = 0;
@@ -2607,11 +2636,14 @@ namespace BossMechanics::Solver
                         ++work.stats.snapped;
                 }
                 target = q;
+                targetIdx = i;
                 break;
             }
             if (!havePath)
             {
                 ++work.pathChecks;
+                if (fromLane(targetIdx))
+                    ++work.stats.lanePathChecks;
                 havePath = oracle.Find(in.bot, target, path) && !path.empty();
                 if (!havePath)
                     ++work.stats.noPath;
@@ -2647,6 +2679,8 @@ namespace BossMechanics::Solver
             work.target = path.back();
             work.arriveAt = moveStart + Detail::TravelMs(Detail::PathLength(path), speed);
             work.score = 0.f;
+            // M4 §3.7: the exposure of the path taken, at the exact hitboxes (a clear or a hot fallback).
+            work.exposure = Detail::WalkPath(exact, path, in.now, true, true).timeInsideHot;
             if (kinds)
                 work.violated = Detail::Violations(in, work.target, work.arriveAt);
         }

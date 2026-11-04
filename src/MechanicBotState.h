@@ -18,9 +18,12 @@
 
 #include "Define.h"
 #include "Duration.h"
+#include "MechanicBotCounters.h"
 #include "MechanicBotView.h"
+#include "MechanicCost.h"
 #include "MechanicFallibility.h"
 #include "MechanicGeometry.h"
+#include "MechanicLeaks.h"
 #include "MechanicSolver.h"
 #include "ObjectGuid.h"
 #include "Value.h"
@@ -43,52 +46,6 @@ namespace BossMechanics
     };
 
     char const* ModeName(MechanicBotMode mode);
-
-    // Telemetry (§3.10), printed by `.mech bots`.
-    struct MechanicBotCounters
-    {
-        static constexpr std::size_t kOutcomes = 5;     // Solver::Outcome values
-
-        uint32 solves = 0;
-        uint32 pathChecks = 0;
-        std::array<uint32, kOutcomes> outcomes{};       // indexed by Solver::Outcome
-        uint32 tightMoves = 0;      // Move outcomes found only at the reduced margin (Solver::Params::tightMarginYd)
-        uint32 lateArrivals = 0;    // escapes still inside a hazard's hitbox once its window there had started
-        uint32 lateFallbacks = 0;   // ...of which the plan was a Fallback or NoPath (late by construction)
-        uint32 stuckResolves = 0;   // re-solved because the bot did not move for 500 ms during an escape
-        uint32 releases = 0;        // escapes given up (stuck on the same target, rooted, or past the hard ceiling)
-        uint32 motionStops = 0;     // foreign motion (follow, chase, ...) stopped because its path was unsafe
-        uint32 reroutes = 0;        // ...of which re-routed around the hazard instead of held
-        uint32 lockBlocks = 0;      // actions the lock multiplier dropped...
-        uint32 lockMoves = 0;       // ...of which movement actions and movement spells
-        uint32 lockCasts = 0;       // ...of which cast-time or channelled spells
-        uint32 castBreaks = 0;      // casts and channels the waker interrupted
-        uint32 wakes = 0;           // AI ticks the waker pulled forward
-        uint32 solveUsLast = 0;
-        uint32 solveUsMax = 0;
-        uint64 solveUsTotal = 0;
-        // M3 (STAGE-M3-HANDOFF §3.8 telemetry).
-        uint32 carrierSolves = 0;   // solves while the bot carries a shape (Spread/RunOut, a Zone on or aimed at it)
-        uint32 claimSolves = 0;     // ...while it claims a Soak
-        uint32 pickSolves = 0;      // ...while it is the Bait picker
-        uint32 roleSolves = 0;      // role re-positions (healer sight) and region tracking (Input::roleSolve)
-        uint32 violatedPlans = 0;   // plans that knowingly break a player kind for a Zone (Plan::violated > 0)
-        uint32 freezes = 0;         // HoldStill windows entered
-        uint32 facingsApplied = 0;  // look-away / tank facings set by the face action
-        uint32 facingBlocks = 0;    // actions the lock dropped because they would turn the bot (look-away)
-        uint32 facingBreaks = 0;    // casts the waker broke because they would turn the bot (look-away)
-        uint32 tankRefacings = 0;   // tank moves that turn a remembered Frontal source away from the group
-        uint32 refacingStops = 0;   // ...stopped on the spot because a Frontal warning started (decision §7.5)
-        uint32 parks = 0;           // parking / drag-out moves
-        uint32 routesFound = 0;
-        uint32 routesFailed = 0;
-        uint32 routeUsLast = 0;
-        uint32 routeUsMax = 0;
-        uint32 sightRays = 0;       // line-of-sight rays spent by healer solves
-        // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
-        Solver::SolveStats debugSolve;
-        NavOracleStats debugNav;
-    };
 
     struct MechanicBotState
     {
@@ -175,10 +132,18 @@ namespace BossMechanics
         Milliseconds lastSightAt{ 0 };                      // healer line-of-sight checks
         Milliseconds nextSightAt{ 0 };                      // ...none before this (a role solve that stayed backs off)
 
+        // ---- M4 (STAGE-M4-HANDOFF §3.5-§3.7, WP-C) ----
+        Leaks::Tracker leak;                                // leak detectors: references and our own tokens
+        CostStats cost;                                     // cost counters (zeroed with the counters)
+        uint64 costRegistryKey = 0;                         // (map id << 32 | instance id) cost.livePathCalls is for
+        Milliseconds clockAt{ 0 };                          // the mode clocks' last sample (0 = none yet)
+        Milliseconds routeHandoffAt{ 0 };                   // a route's escape arrived: stock follow took over
+        Geo::Vec3 routeHandoffGoal;                         // ...towards this goal
+
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)
 
-        // Back to Idle; keeps the counters and the gate flag.
+        // Back to Idle; keeps the counters, the cost counters and the gate flag.
         void Reset();
     };
 

@@ -1,6 +1,10 @@
 /*
  * mod-boss-mechanics: the per-bot brain of the boss-mechanics strategy (STAGE-M2-HANDOFF §3.4, WP-C;
  * STAGE-M3-HANDOFF §3.7, §3.8, WP-C).
+ *
+ * M4 (STAGE-M4-HANDOFF §3.6, §3.7, WP-C): the cost counters (MechanicCost.h: every oracle call timed through
+ * TimedOracle, solve, route and brain time, lane-frame candidates, path calls per mechanic, brain time per map
+ * update), the Fallback split by exposure and the route-loop counter.
  */
 
 #include "MechanicBotGuard.h"
@@ -33,6 +37,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace BossMechanics
 {
@@ -85,6 +90,116 @@ namespace BossMechanics
         constexpr Milliseconds kParkHold{ 500 };
         // Look-away: a new facing goes onto the reservation board when it moved more than this.
         constexpr float kRepublishFacingDeg = 5.f;
+
+        using CostClock = std::chrono::steady_clock;
+
+        uint32 UsSince(CostClock::time_point t0)
+        {
+            return static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(CostClock::now() - t0)
+                .count());
+        }
+
+        // M4 cost (§3.6): times every oracle call into the bot's CostStats and counts the path calls (for the
+        // per-mechanic attribution). Wraps the NavOracle of one solve, route or re-facing search.
+        class TimedOracle : public Solver::PathOracle
+        {
+        public:
+            TimedOracle(Solver::PathOracle& inner, CostStats& cost) : _inner(inner), _cost(cost) { }
+
+            bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const found = _inner.Find(from, to, out);
+                _cost.pathUs.Add(UsSince(t0));
+                ++_calls;
+                return found;
+            }
+
+            bool Walkable(Geo::Vec3& p) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const walkable = _inner.Walkable(p);
+                _cost.probeUs.Add(UsSince(t0));
+                return walkable;
+            }
+
+            bool InSight(Geo::Vec3 const& from, Geo::Vec3 const& to) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const clear = _inner.InSight(from, to);
+                _cost.sightUs.Add(UsSince(t0));
+                return clear;
+            }
+
+            uint32 Calls() const { return _calls; }
+
+        private:
+            Solver::PathOracle& _inner;
+            CostStats& _cost;
+            uint32 _calls = 0;
+        };
+
+        // The path calls of one solve or route go to every mechanic its plan answers (none: unattributed).
+        void AttributePathCalls(CostStats& cost, std::vector<uint32> const& answers, uint32 calls)
+        {
+            if (!calls)
+                return;
+            if (answers.empty())
+                cost.pathCallsUnattributed += calls;
+            for (uint32 id : answers)
+                cost.AddMechanicPathCalls(id, calls);
+        }
+
+        // Brain time of every bot on the map in one map update (§3.6): bots run their brain on their map's update
+        // thread, so (map id, instance id, now) identifies the update, as for the solve budget. The waker takes the
+        // sum after the bots' updates (BotBrain::TakeMapBrainUs).
+        struct MapBrainTime
+        {
+            uint32 mapId = 0;
+            uint32 instanceId = 0;
+            Milliseconds at{ -1 };
+            uint64 us = 0;
+        };
+        thread_local MapBrainTime tMapBrainTime;
+
+        MapBrainTime& MapBrainTimeOf(uint32 mapId, uint32 instanceId, Milliseconds now)
+        {
+            MapBrainTime& t = tMapBrainTime;
+            if (t.mapId != mapId || t.instanceId != instanceId || t.at != now)
+            {
+                t.mapId = mapId;
+                t.instanceId = instanceId;
+                t.at = now;
+                t.us = 0;
+            }
+            return t;
+        }
+
+        // Times one brain step (Update past its once-per-ms check, CastLeaveBy) into the bot's and its map's brain
+        // time.
+        class BrainTimer
+        {
+        public:
+            BrainTimer(MechanicBotState& st, Player const* bot, Milliseconds now)
+                : _st(st), _bot(bot), _now(now), _t0(CostClock::now()) { }
+
+            ~BrainTimer()
+            {
+                uint32 const us = UsSince(_t0);
+                _st.cost.brainUs.Add(us);
+                if (_bot)
+                    MapBrainTimeOf(_bot->GetMapId(), _bot->GetInstanceId(), _now).us += us;
+            }
+
+            BrainTimer(BrainTimer const&) = delete;
+            BrainTimer& operator=(BrainTimer const&) = delete;
+
+        private:
+            MechanicBotState& _st;
+            Player const* _bot;
+            Milliseconds _now;
+            CostClock::time_point _t0;
+        };
 
         Geo::Vec3 PosOf(WorldObject const* o)
         {
@@ -254,6 +369,13 @@ namespace BossMechanics
         // Rebuilds the view (§3.5) with the fallibility filter (§3.8) when it is enabled.
         void RebuildView(Player* bot, MechanicBotState& st, Registry const& reg, Milliseconds now, ViewCtx& ctx)
         {
+            // M4 cost: mechanic ids are per registry, so another map's live mechanics are over for this bot.
+            uint64 const registryKey = (static_cast<uint64>(bot->GetMapId()) << 32) | bot->GetInstanceId();
+            if (registryKey != st.costRegistryKey)
+            {
+                st.cost.FoldGone([](uint32) { return true; });
+                st.costRegistryKey = registryKey;
+            }
             uint32 const revision = reg.Revision();
             if (revision != st.seenRevision || !st.viewValid)
             {
@@ -261,6 +383,7 @@ namespace BossMechanics
                 // limit (§3.4 step 5).
                 std::erase_if(st.perception, [&reg](auto const& kv) { return reg.Find(kv.first) == nullptr; });
                 std::erase_if(st.loggedFallback, [&reg](uint32 id) { return reg.Find(id) == nullptr; });
+                st.cost.FoldGone([&reg](uint32 id) { return reg.Find(id) == nullptr; });
                 st.solveBypass = true;
             }
             if (now >= st.nextPerceptionAt)
@@ -692,13 +815,27 @@ namespace BossMechanics
 
             // Debug = 1 only: the oracle counts why its probes and path calls failed (nothing is counted otherwise).
             NavOracleStats nav;
-            NavOracle oracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
+            NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
+            TimedOracle oracle(navOracle, st.cost);
             Solver::Plan plan = Solver::Solve(in, oracle);
             auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count());
             in.roleSolve = false;
 
+            // M4 cost (§3.6) and the Fallback split (§3.7).
+            CostStats& cost = st.cost;
+            cost.solveUs.Add(us);
+            if (!in.lanes.empty())
+            {
+                ++cost.laneSolves;
+                cost.laneCandidates += plan.stats.laneCandidates;
+                cost.lanePathCalls += plan.stats.lanePathChecks;
+            }
+            AttributePathCalls(cost, plan.answers, oracle.Calls());
+
             MechanicBotCounters& c = st.counters;
+            if (plan.outcome == Solver::Outcome::Fallback)
+                ++(plan.exposure > Milliseconds(0) ? c.fallbackHot : c.fallbackClear);
             ++c.solves;
             c.pathChecks += plan.pathChecks;
             ++c.outcomes[static_cast<std::size_t>(plan.outcome)];
@@ -883,6 +1020,14 @@ namespace BossMechanics
             Solver::Input& in = st.input;
             Geo::Vec3 const goal = st.routeGoal;
             st.lastRouteAt = now;
+            // §3.7: routed again for the goal a route just handed off to stock follow (the follow re-crossed).
+            if (Solver::IsRouteLoop(st.routeHandoffAt, st.routeHandoffGoal, now, goal))
+            {
+                ++st.counters.routeLoops;
+                if (cfg.debug)
+                    LOG_INFO(kLog, "Bot {}: route loop, routed again {} ms after a handoff for ({:.1f}, {:.1f})",
+                        bot->GetName(), (now - st.routeHandoffAt).count(), goal.x, goal.y);
+            }
             Solver::RouteParams rp;
             rp.padYd = cfg.routePadYd;
             rp.cellYd = cfg.routeCellYd;
@@ -890,12 +1035,15 @@ namespace BossMechanics
             rp.maxExpansions = cfg.routeMaxExpansions;
             rp.maxLegs = cfg.routeMaxLegs;
             NavOracleStats nav;
-            NavOracle oracle(bot, cfg.debug ? &nav : nullptr, 0);
+            NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, 0);
+            TimedOracle oracle(navOracle, st.cost);
             Solver::RouteStats rs;
             auto const t0 = std::chrono::steady_clock::now();
             Solver::Plan plan = Solver::Route(in, goal, oracle, rp, &rs);
             auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count());
+            st.cost.routeUs.Add(us);
+            AttributePathCalls(st.cost, plan.answers, oracle.Calls());
             MechanicBotCounters& c = st.counters;
             c.routeUsLast = us;
             c.routeUsMax = std::max(c.routeUsMax, us);
@@ -934,9 +1082,12 @@ namespace BossMechanics
                     continue;
                 if (!TakeBudget(bot, now))
                     return false;
-                NavOracle oracle(bot, nullptr, 0);
+                NavOracle navOracle(bot, nullptr, 0);
+                TimedOracle oracle(navOracle, st.cost);
                 Solver::Plan plan;
-                if (!BotRole::TankRefacePlan(bot, source, f, st.input, cfg.facingSlackDeg, oracle, plan))
+                bool const found = BotRole::TankRefacePlan(bot, source, f, st.input, cfg.facingSlackDeg, oracle, plan);
+                st.cost.pathCallsUnattributed += oracle.Calls();
+                if (!found)
                 {
                     if (cfg.debug)
                         LOG_INFO(kLog, "Bot {}: no clear ring point to turn {} away from the group", bot->GetName(),
@@ -1133,6 +1284,12 @@ namespace BossMechanics
             }
             if (arrived)
             {
+                // A route's escape ends where stock follow takes over (§3.8): the route-loop counter's handoff (§3.7).
+                if (!st.plan.waypoints.empty())
+                {
+                    st.routeHandoffAt = now;
+                    st.routeHandoffGoal = st.routeGoal;
+                }
                 st.mode = MechanicBotMode::Hold;
                 st.outOfRoleSince = Milliseconds(0);
                 return;
@@ -1400,10 +1557,12 @@ namespace BossMechanics
 
     void MechanicBotState::Reset()
     {
-        MechanicBotCounters const keptCounters = counters;
+        MechanicBotCounters keptCounters = std::move(counters);
+        CostStats keptCost = std::move(cost);
         bool const keptAvoidAoe = avoidAoeByGate;
         *this = MechanicBotState();
-        counters = keptCounters;
+        counters = std::move(keptCounters);
+        cost = std::move(keptCost);
         avoidAoeByGate = keptAvoidAoe;
     }
 
@@ -1431,6 +1590,7 @@ namespace BossMechanics
             ToIdle(st);
             return;
         }
+        BrainTimer const timer(st, bot, now);
         // No negative cache (STAGE-M2-REVIEW m4): Get is one DataMap look-up, and a cached "no registry" delayed
         // the first mechanic of every map by up to its lifetime.
         Registry* reg = Registry::Get(bot->GetMap());
@@ -1543,6 +1703,7 @@ namespace BossMechanics
         if (idleUnchanged)
             return Solver::kForever;
 
+        BrainTimer const timer(st, bot, now);
         BotConfig const& cfg = GetConfig().bots;
         ViewCtx ctx(bot, st, reg, now, cfg);
         RefreshView(bot, st, reg, now, cfg, ctx);
@@ -1571,6 +1732,16 @@ namespace BossMechanics
             return false;
         }
         return true;
+    }
+
+    uint32 BotBrain::TakeMapBrainUs(uint32 mapId, uint32 instanceId, Milliseconds now)
+    {
+        MapBrainTime& t = tMapBrainTime;
+        if (t.mapId != mapId || t.instanceId != instanceId || t.at != now)
+            return 0;
+        uint64 const us = t.us;
+        t.us = 0;
+        return static_cast<uint32>(std::min<uint64>(us, std::numeric_limits<uint32>::max()));
     }
 
     bool BotBrain::TankOwned(MechanicBotState const& st)

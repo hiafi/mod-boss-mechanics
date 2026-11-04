@@ -924,6 +924,20 @@ namespace BossMechanics::Solver
             return false;
         return CheckPath(check, { pos, next }, at - check.params.startDelay, false).ok;
     }
+
+    // Route-loop counter (M4 §3.7, the U minefield): a route search within kRouteLoopWindow of a route's handoff to
+    // stock follow, for a goal within kRouteLoopGoalYd of that route's goal (the goal is the end of the follow motion,
+    // so it moves with the leader), is a loop: found, handed off, re-crossed by the follow, routed again.
+    constexpr Ms kRouteLoopWindow{ 5000 };
+    constexpr float kRouteLoopGoalYd = 10.f;
+
+    // handoffAt 0 = no handoff yet.
+    inline bool IsRouteLoop(Ms handoffAt, Geo::Vec3 const& handoffGoal, Ms now, Geo::Vec3 const& goal)
+    {
+        if (handoffAt <= Ms(0) || now < handoffAt || now - handoffAt > kRouteLoopWindow)
+            return false;
+        return Geo::Dist2d(handoffGoal.x, handoffGoal.y, goal.x, goal.y) <= kRouteLoopGoalYd;
+    }
 }
 
 #endif

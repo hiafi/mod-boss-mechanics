@@ -200,8 +200,9 @@ BossMechanics.Bots.AvoidAoeInInstances = 1
 
 #
 #    BossMechanics.Bots.OpenWorldTestScope
-#        Description: Outside instances, give the boss mechanics strategy to bots grouped with a GM who ran
-#                     `.mech test` on their map (for playtests in the open world).
+#        Description: Outside instances, give the boss mechanics strategy to bots grouped with a scope player
+#                     of a live encounter on their map: a GM who ran `.mech test`, a player the mechanics
+#                     training dummy runs for, the dpssim mechanics mode's actor (playtests in the open world).
 #        Default:     1 - Enabled
 #                     0 - Disabled (instances only)
 #

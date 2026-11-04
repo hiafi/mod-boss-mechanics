@@ -43,7 +43,9 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicBotLock.h/.cpp` | Lock multiplier: what may run while a bot escapes, holds or freezes (one block list) |
 | `src/MechanicBotContexts.h` | The four playerbots named-object contexts |
 | `src/MechanicBotGate.h/.cpp` | Context registration, strategy gate, `AddSC_boss_mechanics_bots` |
-| `src/MechanicBotWaker.cpp` | After-tick waker and cast break |
+| `src/MechanicBotWaker.cpp` | After-tick waker and cast break; mode clocks and lock leak detectors (M4) |
+| `src/MechanicLeaks.h` | Pure lock leak detectors: what counts as a leaked move, cast or turn, and our own tokens |
+| `src/MechanicCost.h` | Pure cost counters: microsecond histograms, per-mechanic path calls (`CostStats`) |
 | `src/MechanicBotReport.cpp` | `.mech bots` body |
 | `src/BossMechanicsConfig.h/.cpp` | Cached config |
 | `src/BossMechanicsIds.h` | Pinned spell, creature and display ids |
@@ -350,6 +352,7 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech palette <out color> <in color> [cross-lane color] [cell color]
 .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
+.mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
@@ -450,11 +453,18 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
   `radius` at random points within `spread` yd of the selected unit (else the GM), snapped to the floor, arming after
   `arm` ms with `grace` ms of grace, all in one cap group with cap = count (they never fizzle each other; a second
   minefield gets its own group), `life` 120 s. Mines are tagged 1..count in the ledger. `.mech clear` removes them.
+- `.mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]` (M4): a fixed U of
+  overlapping mines (neighbors at most `radius` apart) opening toward the GM along their facing: two arms whose inner
+  edges are `gap` yd apart, `depth` yd long, joined by a wall at the far end (`src/MechanicDrillPlan.h`, desk-checked
+  by `tests/drill_plan_test.cpp`). No dice. Lead the bots into the pocket, then walk round the closed end: a bot must
+  leave by the mouth (the M3 playtest's "bot left behind" repro). Same cap group, life and tags as above.
 - `.mech drill <name> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]`: a boss doc's mechanics scripted on the **selected
   creature** (the boss stand-in; a bot should tank it for the frontals and the stack on it) and the group, one cycle
   after another. Each step is a `.mech test` line (`src/MechanicDrill.h`, desk-checked by `tests/drill_test.cpp`) run
   from the test owner's scheduler, so `.mech clear` stops it; damage steps get `dmg=` (flat, default 1), `self=1` lets
-  member picks land on the GM, `cycles` 1-10.
+  member picks land on the GM, `cycles` 1-10. The training dummy and the dpssim mechanics mode run the same drills
+  through the runner (`src/MechanicDrillRunner.h`: `RunDrill`, `StartProgram`; the sim seam is
+  `src/BossMechanicsSim.h`), with their scope player in place of the GM.
   - `smite` (Deadmines SM2, SM3, SM12; 10 s): frontal cone 90 / 8 yd (2 s), a rear cone registered 1.5 s later
     (resolves 1.5 s after the first), Spread 6 on every non-tank (2.5 s). Tags 1, 2, 3.
   - `cookie` (CK4-CK6; 31 s): chowder cone 60 / 8 yd on a random non-tank (follows its facing, 3 breaths 2 s apart
@@ -811,6 +821,19 @@ Bait picker, role solves, plans that knowingly break a player kind for a Zone ("
 facing blocks and breaks, tank re-facings (and those a warning stopped), parks, routes found and failed with their
 time, and sight rays; and a line with the bot's tasks, its live reservations, its look-away facing and its remembered
 Frontal sources. The solve time includes the allies' refresh right before each solve.
+
+M4 adds three lines (the same numbers reach the sim through `Sim::ReadBotStats`):
+
+- `m4`: seconds in each mode (idle, watch, escape, hold, freeze, released; a released bot counts as released only),
+  the lock leaks (moves, casts and turns the lock should have stopped, seen from the outcome, with the spell id x
+  count of each leaked cast or movement spell; rules in `src/MechanicLeaks.h`), Fallback outcomes split by exposure
+  (clear: the path spends no time inside an exact hitbox while it is hot; hot: it does), and route loops (a route
+  search for about the same goal within 5 s of a route's handoff to stock follow);
+- `cost`: navmesh path calls with their mean, p95 and max microseconds, probes and sight rays with their max, the
+  lane-frame candidates and the path calls spent on them, path calls per mechanic (max and mean, plus those of plans
+  that answer no mechanic);
+- `cost us`: solve and route p50 / p95 / max, the bot's brain step mean and max, and the brain time of every bot on
+  the map per map update (mean and max). p50 and p95 are log2 bucket bounds (`src/MechanicCost.h`).
 
 With `Debug = 1`, each solve logs the pass that found the plan and why the rest failed: candidates kept, probes (off
 the navmesh, snapped), path calls without a path, ends unsafe at arrival, paths crossing a hazard that holds the bot
