@@ -1,6 +1,7 @@
 /*
  * mod-boss-mechanics: the lock multiplier of the "boss mechanics" strategy (STAGE-M2-HANDOFF §3.7, WP-C) and the
- * by-name gate that shares its verdict (STAGE-M4-HANDOFF §3.5, WP-X).
+ * by-name gate that shares its verdict (STAGE-M4-HANDOFF §3.5, WP-X). WP-X2: item cast length in Escape and Hold
+ * (X7), `pull` refused during an encounter (X8), and the BossMechanics.Bots.ForceLeaks debug passes (M4-SWEEP G8).
  */
 
 #include "MechanicBotGuard.h"
@@ -19,10 +20,12 @@
 #include "GenericSpellActions.h"
 #include "Item.h"
 #include "ItemTemplate.h"
+#include "Log.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
 #include "MechanicBotState.h"
 #include "MechanicLockRules.h"
+#include "MechanicRegistry.h"
 #include "MovementActions.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
@@ -31,6 +34,7 @@
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "UseItemAction.h"
+#include <algorithm>
 #include <string>
 #include <typeinfo>
 #include <vector>
@@ -117,6 +121,37 @@ namespace
         return false;
     }
 
+    // X7 (STAGE-M4-L-REPORT H3): how long using the item keeps the bot casting: the longest of its on-use spells
+    // (BusyTime), for the item the action would use, by its name, as ItemMoves. The warlock stones are 3 s casts.
+    Milliseconds ItemBusyTime(PlayerbotAI* botAI, Action* action, Player* bot)
+    {
+        std::vector<Item*> items = botAI->GetAiObjectContext()->GetValue<std::vector<Item*>>("inventory items",
+            action->getName())->Get();
+        if (items.empty() || !items.front())
+            return Milliseconds(0);
+        ItemTemplate const* proto = items.front()->GetTemplate();
+        if (!proto)
+            return Milliseconds(0);
+        Milliseconds busy(0);
+        for (auto const& spell : proto->Spells)
+            if (spell.SpellId > 0 && spell.SpellTrigger == ITEM_SPELLTRIGGER_ON_USE)
+                if (SpellInfo const* info = sSpellMgr->GetSpellInfo(spell.SpellId))
+                    busy = std::max(busy, BusyTime(info, bot));
+        return busy;
+    }
+
+    // X8: an encounter is live on the bot's map (begun, not ending): a boss fight, a drill, the training dummy, the
+    // sim. A bot carries the strategy only in an instance or in an open-world encounter's scope (MechanicBotGate.cpp).
+    bool EncounterLive(Player* bot)
+    {
+        Registry const* reg = Registry::Get(bot->GetMap());
+        if (!reg)
+            return false;
+        bool live = false;
+        reg->ForEachEncounter([&](Encounter const& e) { live = live || !e.ending; });
+        return live;
+    }
+
     // A spell that moves its caster from a script (MechanicLockRules.h kScriptedMovers); Ambush only from stealth on a
     // target out of melee range, the script's own test. `castTarget` reads the cast's target, only for such a rule.
     template <class TargetFn>
@@ -153,20 +188,31 @@ namespace
         BlockFacing,    // look-away: the action would turn the bot
     };
 
+    using LockRules::LeakKind;
+
     struct Judgement
     {
         LockVerdict verdict = LockVerdict::Allow;
         bool unknownCast = false;   // a cast judged with no spell id
+        // The leak detector this block would feed if the action ran (BossMechanics.Bots.ForceLeaks); None for the
+        // blocks no detector sees.
+        LeakKind leak = LeakKind::None;
+        bool pull = false;          // X8: a pull request refused
     };
 
     Judgement Allow(bool unknownCast = false)
     {
-        return { LockVerdict::Allow, unknownCast };
+        Judgement j;
+        j.unknownCast = unknownCast;
+        return j;
     }
 
-    Judgement Blocked(LockVerdict verdict)
+    Judgement Blocked(LockVerdict verdict, LeakKind leak = LeakKind::None)
     {
-        return { verdict, false };
+        Judgement j;
+        j.verdict = verdict;
+        j.leak = leak;
+        return j;
     }
 
     // The verdict, with no counter touched: the multiplier and the gate count it (CountJudgement), a chat `do` only
@@ -189,6 +235,16 @@ namespace
         if (dynamic_cast<MechanicBotHoldAction*>(action) || dynamic_cast<MechanicBotFaceAction*>(action))
             return Allow();
 
+        // X8, in every mode: a human's `pull` mid-encounter would start playerbots' pull, whose PullMultiplier zeroes
+        // every other action (ours included) until the pull ends, up to 15 s (STAGE-M4-L-REPORT §2.4). Refused
+        // silently (a multiplier cannot tell the human); `.mech bots` counts it.
+        if (LockRules::IsPullRequestName(action->getName()) && EncounterLive(bot))
+        {
+            Judgement j = Blocked(LockVerdict::BlockMove);
+            j.pull = true;
+            return j;
+        }
+
         // M3, in every mode: tank facing owns the tank (one owner; decision §7.5), and the look-away facing (decision
         // §7.6) is not undone by a facing action, a facing cast or a swing at a target outside the arc.
         if (BotBrain::TankOwned(st) && (typeid(*action) == typeid(TankFaceAction) || action->getName() == "tank face"))
@@ -197,9 +253,9 @@ namespace
         if (lookAway)
         {
             if (dynamic_cast<SetFacingTargetAction*>(action) || dynamic_cast<CastFacingUnitAction*>(action))
-                return Blocked(LockVerdict::BlockFacing);
+                return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
             if (IsAttackOnly(action) && BotFacing::WouldTurnAway(bot, st, now, action->GetTarget()))
-                return Blocked(LockVerdict::BlockFacing);
+                return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
         }
 
         // Watch with an unsafe spot whose solve was deferred (rate limit, per-map budget) locks as Escape
@@ -216,7 +272,7 @@ namespace
         if (afterBreak && dynamic_cast<UseItemAction*>(action))
             return Blocked(LockVerdict::BlockCast);
         if (frozen && dynamic_cast<UseItemAction*>(action) && ItemMoves(botAI, action))
-            return Blocked(LockVerdict::BlockMove);
+            return Blocked(LockVerdict::BlockMove, LeakKind::Move);
 
         // Idle or Watch after a break or under look-away: only casts are judged (cast-time after a break, facing casts
         // under look-away).
@@ -226,7 +282,21 @@ namespace
         if (IsAttackOnly(action))
             return Allow();
         if (!castsOnly && (dynamic_cast<MovementAction*>(action) || IsNamedMover(action)))
-            return Blocked(LockVerdict::BlockMove);
+            return Blocked(LockVerdict::BlockMove, LeakKind::Move);
+
+        // X7: an item use is a cast of its on-use spell, judged by that spell's length as a spell is below (Escape:
+        // none with a cast time; Hold: one that ends in time). Freeze allows casts, items included (decision §7.4).
+        if (!castsOnly && !frozen && dynamic_cast<UseItemAction*>(action))
+        {
+            Milliseconds const busy = ItemBusyTime(botAI, action, bot);
+            if (busy <= Milliseconds(0))
+                return Allow();
+            if (mode == MechanicBotMode::Escape)
+                return Blocked(LockVerdict::BlockCast, bot->isMoving() ? LeakKind::None : LeakKind::Cast);
+            if (!Solver::CastAllowed(now, busy, st.leaveBy, Milliseconds(GetConfig().bots.safetyMarginMs)))
+                return Blocked(LockVerdict::BlockCast, LeakKind::Cast);
+            return Allow();
+        }
 
         // Spells.
         CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action);
@@ -247,7 +317,7 @@ namespace
             return target;
         };
         if (!castsOnly && info && (IsMovementSpell(info) || IsScriptedMover(info, bot, castTarget)))
-            return Blocked(LockVerdict::BlockMove);
+            return Blocked(LockVerdict::BlockMove, LeakKind::Move);
         // Look-away: a cast that turns its caster to a target outside the arc (PlayerbotAI::CastSpell, and the mid-cast
         // re-facing in UpdateAI, for SPELL_FACING_FLAG_INFRONT) would sweep the carried cone over the group. Offensive
         // casts on a target outside the arc are blocked whatever their flags and with no spell id (rework actions turn
@@ -266,7 +336,7 @@ namespace
             c.offensiveTarget = victim && victim != bot && bot->IsValidAttackTarget(victim);
             c.targetOutside = BotFacing::WouldTurnAway(bot, st, now, victim);
             if (LockRules::LookAwayBlocksCast(c))
-                return Blocked(LockVerdict::BlockFacing);
+                return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
         }
         if (!info)
             return Allow(true);     // unknown spell: allowed (no cast-time or movement test can run)
@@ -278,16 +348,59 @@ namespace
             return Allow();
         if (castsOnly)
             return afterBreak ? Blocked(LockVerdict::BlockCast) : Allow();
+        // Escape: it would fail while moving (PlayerbotAI::CastSpell refuses it and delays the AI), so only a standing
+        // bot's block feeds the forced-leak check.
         if (mode == MechanicBotMode::Escape)
-            return Blocked(LockVerdict::BlockCast);     // it would fail while moving (PlayerbotAI::CastSpell)
+            return Blocked(LockVerdict::BlockCast, bot->isMoving() ? LeakKind::None : LeakKind::Cast);
         // Hold: a cast that ends before the bot must leave. leaveBy already holds SafetyMarginMs once
         // (Solver::LeaveBy); the second margin here is deliberate (STAGE-M2-REVIEW n3): it covers the AI tick between
         // the cast's end and the escape's first step, which the solver's StartDelayMs does not see for a bot that was
         // casting.
         Milliseconds const margin(GetConfig().bots.safetyMarginMs);
         if (!Solver::CastAllowed(now, busy, st.leaveBy, margin))
-            return Blocked(LockVerdict::BlockCast);
+            return Blocked(LockVerdict::BlockCast, LeakKind::Cast);
         return Allow();
+    }
+
+    // BossMechanics.Bots.ForceLeaks (M4-SWEEP G8, debug): a block the leak detectors can see is let through while that
+    // detector has counted fewer leaks than the key since the counters' last reset. A run with working detectors then
+    // reports leaks; one with blind detectors keeps leaking and reports none. Logged once per reset.
+    void ForceLeak(Player* bot, MechanicBotState& st, Judgement& j)
+    {
+        uint32 const budget = GetConfig().bots.forceLeaks;
+        if (!budget || j.verdict == LockVerdict::Allow)
+            return;
+        MechanicBotCounters& c = st.counters;
+        uint32 counted = 0;
+        uint32* passes = nullptr;
+        char const* kind = "";
+        switch (j.leak)
+        {
+            case LeakKind::Move:
+                counted = c.leakMoves;
+                passes = &c.forcedMoves;
+                kind = "moves";
+                break;
+            case LeakKind::Cast:
+                counted = c.leakCasts;
+                passes = &c.forcedCasts;
+                kind = "casts";
+                break;
+            case LeakKind::Turn:
+                counted = c.leakTurns;
+                passes = &c.forcedTurns;
+                kind = "turns";
+                break;
+            case LeakKind::None:
+                return;
+        }
+        if (!LockRules::ForceLeakPasses(j.leak, counted, budget))
+            return;
+        if (!*passes)
+            LOG_INFO("module.bossmechanics.bots", "Bot {}: BossMechanics.Bots.ForceLeaks: the lock lets blocked {} "
+                "through in {} until the detector counts {}", bot->GetName(), kind, ModeName(st.mode), budget);
+        ++*passes;
+        j.verdict = LockVerdict::Allow;
     }
 
     // Counts a judgement: 1 to allow, 0 to drop.
@@ -295,6 +408,8 @@ namespace
     {
         if (j.unknownCast)
             ++st.counters.unknownCasts;
+        if (j.pull && j.verdict != LockVerdict::Allow)
+            ++st.counters.pullBlocks;
         switch (j.verdict)
         {
             case LockVerdict::Allow:
@@ -331,13 +446,14 @@ namespace
         MechanicBotState* st = BotBrain::StateOf(botAI);
         if (!st)
             return true;
-        Judgement const j = JudgeAction(botAI, *st, action);
+        Judgement j = JudgeAction(botAI, *st, action);
         if (event.GetSource() == "do")
         {
             if (j.verdict != LockVerdict::Allow)
                 ++st->counters.doBypasses;
             return true;
         }
+        ForceLeak(botAI->GetBot(), *st, j);
         if (CountJudgement(*st, j) > 0.f)
             return true;
         ++st->counters.specificBlocks;
@@ -350,7 +466,10 @@ float BotLock::Verdict(PlayerbotAI* botAI, MechanicBotState& st, Action* action)
 {
     if (!botAI || !action)
         return 1.f;
-    return CountJudgement(st, JudgeAction(botAI, st, action));
+    Judgement j = JudgeAction(botAI, st, action);
+    if (Player* bot = botAI->GetBot())
+        ForceLeak(bot, st, j);
+    return CountJudgement(st, j);
 }
 
 void BotLock::InstallSpecificActionGate()

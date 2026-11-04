@@ -730,6 +730,8 @@ namespace BossMechanics
             st.parking = false;
             st.tankWarning = false;
             st.refacing = false;
+            st.regionRoutePending = false;
+            st.regionRoute = false;
         }
 
         // Gives the bot back to the stock AI for `duration` (STAGE-M2-REVIEW M1): mode Watch, no plan, nothing
@@ -747,6 +749,8 @@ namespace BossMechanics
             st.routePending = false;
             st.waypointIdx = 0;
             st.refacing = false;
+            st.regionRoutePending = false;
+            st.regionRoute = false;
             st.releaseUntil = now + kReleaseFor;
             st.releaseForRoot = forRoot;
             ++st.counters.releases;
@@ -858,6 +862,14 @@ namespace BossMechanics
             }
             st.lastSolveAt = now;
             st.solveBypass = false;
+            // M4 WP-Q (G2): a Fallback that breaks a hard region asks for a route round the hazards into it
+            // (StepRegionRoute, on a later brain step).
+            if (!in.reroute && !roleSolve && cfg.routeEnable && plan.violated > 0
+                && (plan.outcome == Solver::Outcome::Fallback || plan.outcome == Solver::Outcome::NoPath))
+            {
+                st.regionRoutePending = true;
+                st.regionRouteAskedAt = now;
+            }
 
             Geo::Vec3 const from = in.bot;
             if (cfg.debug)
@@ -936,6 +948,7 @@ namespace BossMechanics
             st.pendingEscape = false;
             st.routePending = false;
             st.refacing = false;
+            st.regionRoute = false;
         }
 
         // Solve and take the plan: Move/GraceMove/Fallback/NoPath -> Escape; Safe -> Watch.
@@ -1053,6 +1066,54 @@ namespace BossMechanics
             ++c.routesFound;
             TrimRoute(in, plan, goal);
             BeginEscape(st, std::move(plan), now);
+            return true;
+        }
+
+        // M4 WP-Q (G2): Solver::RegionRoute after a Fallback that broke a hard region (the Alexei Assembly member whose
+        // way to the cluster crosses the Out of bounds circle). A found route becomes an Escape that walks its
+        // waypoints to a spot passing TargetOk (st.regionRoute: the re-check holds its end to TargetOk) and goes onto
+        // the reservation board like a solve's plan. false = none (the Fallback stands).
+        bool RunRegionRoute(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
+        {
+            Solver::Input& in = st.input;
+            st.lastRegionRouteAt = now;
+            ++st.counters.regionRoutes;
+            Solver::RouteParams rp;
+            rp.padYd = cfg.routePadYd;
+            rp.cellYd = cfg.routeCellYd;
+            rp.maxCells = cfg.routeMaxCells;
+            rp.maxExpansions = cfg.routeMaxExpansions;
+            rp.maxLegs = cfg.routeMaxLegs;
+            NavOracleStats nav;
+            NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, 0);
+            TimedOracle oracle(navOracle, st.cost);
+            Solver::RouteStats rs;
+            auto const t0 = std::chrono::steady_clock::now();
+            Solver::Plan plan = Solver::RegionRoute(in, oracle, rp, &rs);
+            auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count());
+            st.cost.routeUs.Add(us);
+            AttributePathCalls(st.cost, plan.answers, oracle.Calls());
+            MechanicBotCounters& c = st.counters;
+            c.routeUsLast = us;
+            c.routeUsMax = std::max(c.routeUsMax, us);
+            if (cfg.debug)
+            {
+                c.debugNav.Add(nav);
+                LOG_INFO(kLog, "Bot {}: region route {}: {} cells ({:.2f} yd{}), {} expansions, {} legs, {} oracle "
+                    "calls, {} us", bot->GetName(), rs.found ? "found" : "none", rs.cells, rs.cellYd,
+                    rs.grown ? ", box grown" : "", rs.expansions, rs.legs, rs.oracleCalls, us);
+            }
+            if (plan.outcome != Solver::Outcome::Move)
+                return false;
+            ++c.regionRoutesFound;
+            if (st.reserved || !st.viewInfo.tasks.empty())
+            {
+                PublishReservations(reg, bot, st.viewInfo, plan, now);
+                st.reserved = !st.viewInfo.tasks.empty();
+            }
+            BeginEscape(st, std::move(plan), now);
+            st.regionRoute = true;
             return true;
         }
 
@@ -1275,7 +1336,7 @@ namespace BossMechanics
             if (arrived)
             {
                 // A route's escape ends where stock follow takes over (§3.8): the route-loop counter's handoff (§3.7).
-                if (!st.plan.waypoints.empty())
+                if (!st.plan.waypoints.empty() && !st.regionRoute)
                 {
                     st.routeHandoffAt = now;
                     st.routeHandoffGoal = st.routeGoal;
@@ -1302,9 +1363,9 @@ namespace BossMechanics
                     reduced = Solver::ReducedMargins(in);
                 std::vector<Geo::Vec3> const rest = RemainingPath(st.plan.path, pos);
                 Solver::PathCheck const pc = CheckMotion(st.planReduced ? reduced : in, rest);
-                // A route's end only has to be hazard-safe (stock follow takes over there); a solve's target must
-                // pass TargetOk.
-                bool const endOk = st.plan.waypoints.empty()
+                // A route's end only has to be hazard-safe (stock follow takes over there); a solve's target, and a
+                // region route's end, must pass TargetOk.
+                bool const endOk = st.plan.waypoints.empty() || st.regionRoute
                     ? Solver::TargetOk(in, st.plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd))
                     : Solver::PointSafe(in, st.plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd));
                 resolve = !pc.ok || !endOk;
@@ -1387,6 +1448,28 @@ namespace BossMechanics
                     return true;
             }
             return false;
+        }
+
+        // M4 WP-Q (G5): the out-of-band clock, sampled once per brain step with the mode the bot is in now (the
+        // waker's mode clocks' rule; a gap over 2 s is not counted).
+        void TickBandClock(MechanicBotState& st, Milliseconds now)
+        {
+            Milliseconds const last = st.bandClockAt;
+            st.bandClockAt = now;
+            if (last == Milliseconds(0) || now <= last || now - last > Milliseconds(2000))
+                return;
+            bool const locked = st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold
+                || st.mode == MechanicBotMode::Freeze;
+            Solver::RoleBand const& role = st.input.role;
+            if (!locked || !role.present)
+                return;
+            float const d = Dist2d(st.input.bot, role.anchor);
+            if (d >= role.minYd && d <= role.maxYd)
+                return;
+            uint32 const ms = static_cast<uint32>((now - last).count());
+            st.counters.msOutOfBand += ms;
+            if (TaskHoldUntil(st, now) > now)
+                st.counters.msOutOfBandTask += ms;
         }
 
         void StepHold(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
@@ -1623,6 +1706,7 @@ namespace BossMechanics
             return;
         }
         in.role = BotRole::RoleBandOf(botAI, bot, cfg);
+        TickBandClock(st, now);
         BotRole::FillSightReach(bot, cfg, in);
         BotRole::FillPark(bot, *reg, st, cfg, now, in);
         st.tankWarning = HasRole(st, BotTaskRole::Tank, now);
@@ -1665,6 +1749,26 @@ namespace BossMechanics
             if (due && TakeBudget(bot, now))
             {
                 RunRoute(bot, st, now, cfg);
+                BotFacing::UpdateLookAway(bot, st, now);
+                PublishLookAway(*reg, bot, st, now);
+                return;
+            }
+        }
+
+        // M4 WP-Q (G2): the region route a Fallback asked for, on a later step, Route.RetryMs apart, one budget unit,
+        // while the bot still walks or holds that Fallback; like the route search, never with a solve in one step.
+        if (st.regionRoutePending && now > st.regionRouteAskedAt)
+        {
+            st.regionRoutePending = false;
+            bool const fallback = st.plan.outcome == Solver::Outcome::Fallback
+                || st.plan.outcome == Solver::Outcome::NoPath;
+            bool const due = cfg.routeEnable && fallback
+                && (st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold)
+                && now - st.lastRegionRouteAt >= Milliseconds(cfg.routeRetryMs)
+                && !BotBrain::Released(botAI, st, now);
+            if (due && TakeBudget(bot, now))
+            {
+                RunRegionRoute(*reg, bot, st, now, cfg);
                 BotFacing::UpdateLookAway(bot, st, now);
                 PublishLookAway(*reg, bot, st, now);
                 return;

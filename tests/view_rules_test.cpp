@@ -129,6 +129,15 @@ namespace
         CHECK_NEAR(r.p.x, 9.f, 1e-6);
         CHECK_NEAR(r.facing, 2.f, 1e-6);
         CHECK_NEAR(r.slackYd, 0.f, 1e-6);
+
+        // M4 WP-Q (G3): another player's Spread/RunOut circle or Bait landing goes into the view at its reservation
+        // or at a human's spot; a group bot that has not planned for the mechanic yet (its plan is for something
+        // else, or it has none) is left to move for it itself (tests/fight_test.cpp TestRas, TestFenrus).
+        CHECK(VR::PlaceOtherCircle(r));
+        CHECK(VR::PlaceOtherCircle(h));
+        CHECK(!VR::PlaceOtherCircle(p));
+        CHECK(!VR::PlaceOtherCircle(still));
+        CHECK(!VR::PlaceOtherCircle(walking));
     }
 
     void TestBuilders()

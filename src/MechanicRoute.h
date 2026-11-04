@@ -1061,6 +1061,68 @@ namespace BossMechanics::Solver
         return plan;
     }
 
+    // Goals RegionRoute tries per call (each one Route search).
+    constexpr std::uint32_t kRegionRouteGoals = 2;
+
+    // M4 WP-Q (G2, the Alexei Assembly): a way round the hazards into a hard region the bot cannot reach straight.
+    // Solve validates only the oracle's path, which knows walls, not hazards, so a member whose cluster lies past a
+    // lasting Zone (the Out of bounds circle on the group) that is hot by the time the straight line crosses it gets
+    // a Fallback and stands where it is until the judge. RegionRoute runs Route towards a spot that passes TargetOk:
+    // the candidates (Candidates, nearest first) that pass TargetOk at their straight arrival, at most
+    // kRegionRouteGoals of them, and keeps the first route whose end passes TargetOk at the route's own arrival (the
+    // late rule of the regions included). Outcome Move with the route (`waypoints`, `path`, `target`; answers and
+    // holdUntil as Solve gives them, so the bot holds the region for its window); Safe (the bot stays) when the bot
+    // already passes TargetOk, no live hard region is unmet, or no route works. Hazards only steer the route (Route
+    // ignores regions); the goal's checks bring the regions in. Deterministic for a given input and oracle.
+    inline Plan RegionRoute(Input const& in, PathOracle& oracle, RouteParams const& rp, RouteStats* stats = nullptr)
+    {
+        RouteStats local;
+        RouteStats& st = stats ? *stats : local;
+        st = RouteStats();
+        Plan none;
+        none.target = in.bot;
+        none.arriveAt = in.now;
+        none.holdUntil = in.now;
+        Ms const horizonEnd = in.now + in.params.horizon;
+        if (Detail::Frozen(in) || TargetOk(in, in.bot, in.now, horizonEnd))
+            return none;
+        bool unmet = false;
+        for (Region const& r : in.regions)
+            unmet = unmet || (r.hard && Detail::RegionLive(in, r) && !Detail::InsideRegion(r, in.bot));
+        if (!unmet)
+            return none;
+        float const speed = Detail::Speed(in);
+        Ms const moveStart = in.now + in.params.startDelay;
+        std::uint32_t tried = 0;
+        std::vector<Geo::Vec3> const cands = Candidates(in);
+        for (std::size_t i = 1; i < cands.size() && tried < kRegionRouteGoals; ++i)
+        {
+            Geo::Vec3 const& goal = cands[i];
+            if (!TargetOk(in, goal, moveStart + Detail::TravelMs(Detail::Dist3(in.bot, goal), speed), horizonEnd))
+                continue;
+            ++tried;
+            RouteStats rs;
+            Plan plan = Route(in, goal, oracle, rp, &rs);
+            st.cells = rs.cells;
+            st.blocked = rs.blocked;
+            st.expansions += rs.expansions;
+            st.legs = rs.legs;
+            st.oracleCalls += rs.oracleCalls;
+            st.retries += rs.retries;
+            st.pullChecks += rs.pullChecks;
+            st.cellYd = rs.cellYd;
+            st.grown = std::max(st.grown, rs.grown);
+            if (!rs.found || plan.outcome != Outcome::Move || plan.waypoints.empty()
+                || !TargetOk(in, plan.target, plan.arriveAt, std::max(plan.arriveAt, horizonEnd)))
+                continue;
+            st.found = true;
+            plan.answers = Detail::Answers(in, plan.path);
+            plan.holdUntil = Detail::HoldUntil(in, plan.answers, plan.arriveAt, plan.target);
+            return plan;
+        }
+        return none;
+    }
+
     // Where stock following can take over a route (§3.8, STAGE-M3-R-REPORT m-9): the index in route.waypoints of
     // the first waypoint from which the straight line to `goal` passes CheckPath at the full margin, timed from the
     // arrival there; the last waypoint when no earlier one does (0 for a route with none). `pathIndex` gets that

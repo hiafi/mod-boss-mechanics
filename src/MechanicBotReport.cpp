@@ -128,9 +128,11 @@ namespace BossMechanics
                 k.solveUs.Quantile(0.95), k.solveUs.max, k.routeUs.Quantile(0.5), k.routeUs.Quantile(0.95),
                 k.routeUs.max, k.brainUs.Mean(), k.brainUs.max,
                 k.mapUpdates ? k.mapBrainUsTotal / k.mapUpdates : 0, k.mapBrainUsMax, k.mapUpdates);
-            // M4: the lock's by-name gate and id-less casts (STAGE-M4-HANDOFF §3.5, WP-X).
-            handler->PSendSysMessage("  m4 lock: by-name blocks {}, chat do let through {}, casts with no spell id {}",
-                c.specificBlocks, c.doBypasses, c.unknownCasts);
+            // M4: the lock's by-name gate and id-less casts (STAGE-M4-HANDOFF §3.5, WP-X); X8 pulls refused and the
+            // BossMechanics.Bots.ForceLeaks debug passes (WP-X2).
+            handler->PSendSysMessage("  m4 lock: by-name blocks {}, chat do let through {}, casts with no spell id {}, "
+                "pulls refused {}, forced leak passes (moves/casts/turns) {}/{}/{}", c.specificBlocks, c.doBypasses,
+                c.unknownCasts, c.pullBlocks, c.forcedMoves, c.forcedCasts, c.forcedTurns);
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

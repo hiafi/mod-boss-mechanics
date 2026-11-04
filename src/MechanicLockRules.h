@@ -1,6 +1,7 @@
 /*
  * mod-boss-mechanics: the pure rules of the lock multiplier (MechanicBotLock) that need no live unit
- * (dungeon-mechanics STAGE-M4-HANDOFF §3.5, WP-X; the audit is STAGE-M4-L-REPORT §6.3, §10 X1-X3).
+ * (dungeon-mechanics STAGE-M4-HANDOFF §3.5, WP-X; the audit is STAGE-M4-L-REPORT §6.3, §10 X1-X3, X6, X8), and the
+ * forced-leak debug check (BossMechanics.Bots.ForceLeaks, M4-SWEEP G8).
  *
  * No AzerothCore or playerbots includes: the lock resolves units, spells and actions into the plain values below, and
  * tests/lock_rules_test.cpp compiles these with the host compiler.
@@ -141,6 +142,72 @@ namespace BossMechanics::LockRules
         if (cast.turnsToCurrentTarget && cast.currentTargetOutside)
             return true;
         return (cast.facingInfront || cast.offensiveTarget) && cast.targetOutside;
+    }
+
+    // M4 X6 (STAGE-M4-L-REPORT §2.3): what the waker does about the look-away facing of a bot with a cast or channel
+    // in progress. A cast in PREPARING stops the bot's engine (PlayerbotAI::UpdateAI yields), so the face action cannot
+    // turn it, and a ground cast left it turned to its point (its own feet: world orientation 0). Only an
+    // INFRONT-flagged cast on a unit target is turned back to that target every update; the rest keep whatever facing
+    // they have. A channel keeps the engine running, but the waker need not wait for the face action.
+    enum class CastFacingStep : uint8_t
+    {
+        None,       // nothing to do
+        Break,      // interrupt it: it re-faces a target outside the arc (the M3 rule, facingBreaks)
+        Turn,       // turn the bot to the look-away facing now; the cast goes on (facingsApplied)
+    };
+
+    struct CastFacing
+    {
+        bool breaksLookAway = false;    // BotFacing::CastBreaksLookAway: an INFRONT cast on a target outside the arc
+                                        // whose window opens before the cast ends
+        bool windowOpen = false;        // the look-away window (+- margin) is open now
+        bool escaping = false;          // Escape: a move turns the bot along its spline; the facing waits
+        bool facingOff = false;         // the bot is off the look-away facing by more than the face tolerance
+    };
+
+    // Turning is safe for every cast that is not broken: an INFRONT one that stays has its target inside the arc of
+    // the look-away facing (CAST_ANGLE_IN_FRONT, narrower than the cast's own facing check), and the others need no
+    // facing (heals, ground casts, self casts).
+    inline CastFacingStep CastFacingStepOf(CastFacing const& c)
+    {
+        if (c.breaksLookAway)
+            return CastFacingStep::Break;
+        if (c.windowOpen && !c.escaping && c.facingOff)
+            return CastFacingStep::Turn;
+        return CastFacingStep::None;
+    }
+
+    // M4 X8 (STAGE-M4-L-REPORT §2.4): a human's `pull` mid-encounter starts playerbots' pull, whose PullMultiplier
+    // then zeroes every other action (the brain's moves included) for up to 15 s. The lock refuses these two chat
+    // actions (ChatCommandHandlerStrategy: "pull", "pull back", "pull rti") while an encounter is live on the map.
+    inline constexpr std::array<std::string_view, 2> kPullRequests = { "pull my target", "pull rti target" };
+
+    inline bool IsPullRequestName(std::string_view name)
+    {
+        for (std::string_view const pull : kPullRequests)
+            if (pull == name)
+                return true;
+        return false;
+    }
+
+    // BossMechanics.Bots.ForceLeaks (a debug check of the leak detectors, MechanicLeaks.h): the detector a blocked
+    // action would feed if it ran. Only blocks the detectors can see are tagged: a mover, a movement spell or a
+    // scripted mover in Escape, Hold or Freeze (leakMoves); a cast-time spell or item in Escape or Hold (leakCasts); a
+    // look-away block (leakTurns). Never our own actions, a cast-break block, tank facing or a pull.
+    enum class LeakKind : uint8_t
+    {
+        None,
+        Move,
+        Cast,
+        Turn
+    };
+
+    // The forced-leak check lets a tagged block of `kind` through while that detector has counted fewer than `budget`
+    // leaks since the counters' last reset (0 = off). The first leak it counts closes it again, so it is self-ending
+    // and spends nothing on candidates that never ran (the lock judges many per tick).
+    inline bool ForceLeakPasses(LeakKind kind, uint32_t leaksCounted, uint32_t budget)
+    {
+        return budget != 0 && kind != LeakKind::None && leaksCounted < budget;
     }
 }
 

@@ -82,6 +82,8 @@ namespace BossMechanics
         uint32 routeMaxExpansions = 4096;                       // BossMechanics.Bots.Route.MaxExpansions
         uint32 routeMaxLegs = 8;                                // BossMechanics.Bots.Route.MaxLegs
         uint32 routeRetryMs = 1000;                             // BossMechanics.Bots.Route.RetryMs
+        // M4 (M4-SWEEP G8): a debug check of the leak detectors; 0 = off (MechanicLockRules.h ForceLeakPasses).
+        uint32 forceLeaks = 0;                                  // BossMechanics.Bots.ForceLeaks
     };
 
     struct ModuleConfig

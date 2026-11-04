@@ -14,8 +14,12 @@
 // Solves are rate limited per bot (MinSolveIntervalMs) and per update (kMaxSolvesPerMapUpdate); a bot denied a solve
 // tries again on the next update. Movement: our escape (after the start delay) or stock follow, straight lines at run
 // speed; Hold stands still. Not modeled: perception and fallibility, the stuck clock (straight legs never stall),
-// player kinds, tasks, reservations, look-away, roles. Hits are judged on the exact hitboxes: a plain Zone at its
-// resolve time, a projectile while its body covers the bot, a mine on entry.
+// reservations, look-away, roles. Hits are judged on the exact hitboxes: a plain Zone at its resolve time, a
+// projectile while its body covers the bot, a mine on entry.
+// Player kinds (M4 WP-Q, optional): World::kinds adds what MechanicBotView adds for one bot (regions, synthetic
+// hazards, carried shapes, allies) and the bot's tasks; a bot with a live holding task holds its spot (TaskHoldUntil,
+// HoldForTasks) once the spot passes TargetOk, and a bot with a task or a player kind is relevant without a hazard.
+// The test judges the player kinds itself (tests/fight_test.cpp).
 #ifndef MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 #define MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 
@@ -61,6 +65,9 @@ namespace BrainModel
         // margins (M3), 1 = keep a clear one (exposure 0) whose rest stays clear (the brain, M4), 2 = keep any one
         // no worse than planned.
         int fallbackKeep = 1;
+        // M4 WP-Q (G2): a Fallback or NoPath that breaks a hard region asks for Solver::RegionRoute on a later step
+        // (Route.RetryMs apart, one budget unit), as the brain does.
+        bool regionRoute = true;
     };
 
     enum class Mode { Watch, Escape, Hold };
@@ -70,7 +77,7 @@ namespace BrainModel
         std::uint32_t solves = 0, pathChecks = 0, fallbackClear = 0, fallbackHot = 0, budgetStops = 0;
         std::uint32_t crossStart = 0, crossOther = 0, reroutes = 0, motionStops = 0, releases = 0;
         std::uint32_t routes = 0, routesFound = 0, routesGrown = 0, routeLoops = 0;
-        std::uint32_t hits = 0, deniedSolves = 0, fallbackKept = 0;
+        std::uint32_t hits = 0, deniedSolves = 0, fallbackKept = 0, regionRoutes = 0, regionRoutesFound = 0;
         std::array<std::uint32_t, 5> outcomes{};
         std::int64_t solveUsMax = 0, solveUsTotal = 0, routeUsMax = 0;
         // Per Fallback: pass 1 spent its whole MaxPathChecks budget (a budget stop) or not.
@@ -95,6 +102,8 @@ namespace BrainModel
             hits += o.hits;
             deniedSolves += o.deniedSolves;
             fallbackKept += o.fallbackKept;
+            regionRoutes += o.regionRoutes;
+            regionRoutesFound += o.regionRoutesFound;
             for (std::size_t i = 0; i < outcomes.size(); ++i)
                 outcomes[i] += o.outcomes[i];
             solveUsMax = std::max(solveUsMax, o.solveUsMax);
@@ -124,7 +133,20 @@ namespace BrainModel
         std::uint32_t seenRevision = 0;
         std::vector<std::uint32_t> hitBy;       // hazard ids that hit this bot (once each)
         bool insideMine = false;
+        bool moving = false;                    // moved in the last step (SpotOf's slack)
+        bool regionRoutePending = false;        // a Fallback broke a hard region: RegionRoute on a later step
+        bool regionRoute = false;               // the escape walks a RegionRoute (its end must pass TargetOk)
+        Ms regionRouteAskedAt{ 0 }, lastRegionRouteAt{ -100000 };
         Counters c;
+    };
+
+    // A task of the view (BotTask): the bot holds its spot for it until `to` + marginMs unless it only avoids
+    // (`holds` false: an Avoider).
+    struct Task
+    {
+        std::uint32_t id = 0;
+        Ms to{ 0 };
+        bool holds = true;
     };
 
     struct World
@@ -139,6 +161,22 @@ namespace BrainModel
         // it is the Escape re-check's re-solve).
         enum class SolveAt { Spot, ReCheck, Reroute };
         std::function<void(Bot const&, Solver::Input const&, Solver::Plan const&, SolveAt)> onSolve;
+        // Player kinds: what the view adds for bot i at `now` (the input already holds the hazards and the crowd).
+        std::function<void(std::size_t, Solver::Input&, Ms, std::vector<Task>&)> kinds;
+
+        // Where bot j will stand for the others (ViewRules::PlannedSpot without reservations): its plan target in
+        // Escape or Hold, else its spot with kUnplannedBotSlackYd (+ run speed x MovingAnchorRecheckMs moving).
+        Vec3 SpotOf(std::size_t j, float& slackYd) const
+        {
+            Bot const& b = bots[j];
+            if (b.mode == Mode::Escape || b.mode == Mode::Hold)
+            {
+                slackYd = 0.f;
+                return b.plan.target;
+            }
+            slackYd = 0.5f + (b.moving ? cfg.speed * 0.25f : 0.f);
+            return b.pos;
+        }
 
         void AddHazard(Solver::Hazard h)
         {
@@ -169,7 +207,7 @@ namespace BrainModel
             return std::hypot(a.x - b.x, a.y - b.y);
         }
 
-        Solver::Input View(std::size_t i, Ms now) const
+        Solver::Input View(std::size_t i, Ms now, std::vector<Task>& tasks) const
         {
             Bot const& b = bots[i];
             Solver::Input in;
@@ -184,7 +222,20 @@ namespace BrainModel
                 for (std::size_t j = 0; j < bots.size(); ++j)
                     if (j != i && (bots[j].mode == Mode::Escape || bots[j].mode == Mode::Hold))
                         in.crowd.push_back(bots[j].plan.target);
+            tasks.clear();
+            if (kinds)
+                kinds(i, in, now, tasks);
             return in;
+        }
+
+        // TaskHoldUntil: the latest end (+ marginMs) of the live holding tasks; 0 = none.
+        Ms TaskHoldUntil(std::vector<Task> const& tasks, Ms now) const
+        {
+            Ms until{ 0 };
+            for (Task const& t : tasks)
+                if (t.holds && t.to + cfg.params.marginMs >= now)
+                    until = std::max(until, t.to + cfg.params.marginMs);
+            return until;
         }
 
         bool CanSolve(Bot& b, Ms now, std::uint32_t& budget, bool bypass = false)
@@ -221,6 +272,12 @@ namespace BrainModel
                 ++(plan.exposure > Ms(0) ? b.c.fallbackHot : b.c.fallbackClear);
                 b.c.fallbackBudget += plan.stats.budgetStops > 0;
             }
+            if (cfg.regionRoute && !in.reroute && plan.violated > 0
+                && (plan.outcome == Solver::Outcome::Fallback || plan.outcome == Solver::Outcome::NoPath))
+            {
+                b.regionRoutePending = true;
+                b.regionRouteAskedAt = now;
+            }
             if (onSolve)
                 onSolve(b, in, plan, at);
             return plan;
@@ -237,6 +294,7 @@ namespace BrainModel
             b.mode = Mode::Escape;
             b.wp = 0;
             b.routePending = false;
+            b.regionRoute = false;
             b.moveFrom = now + cfg.params.startDelay;
         }
 
@@ -268,7 +326,7 @@ namespace BrainModel
             ++b.c.motionStops;
         }
 
-        void StepWatch(std::size_t i, Solver::Input& in, Ms now, std::uint32_t& budget)
+        void StepWatch(std::size_t i, Solver::Input& in, Ms now, std::uint32_t& budget, std::vector<Task> const& tasks)
         {
             Bot& b = bots[i];
             Ms const horizonEnd = now + in.params.horizon;
@@ -280,6 +338,21 @@ namespace BrainModel
                 if (CanSolve(b, now, budget))
                     SolveAndApply(b, in, now);
                 return;
+            }
+            if (now >= b.releaseUntil)
+            {
+                // HoldForTasks
+                Ms const until = TaskHoldUntil(tasks, now);
+                if (until > now)
+                {
+                    b.plan = Solver::Plan();
+                    b.plan.target = b.pos;
+                    b.plan.path = { b.pos };
+                    b.plan.arriveAt = now;
+                    b.plan.holdUntil = until;
+                    b.mode = Mode::Hold;
+                    return;
+                }
             }
             b.mode = Mode::Watch;
             Vec3 end;
@@ -393,7 +466,7 @@ namespace BrainModel
             motion.params.startDelay = Ms(0);
             Solver::PathCheck const pc = Solver::CheckPath(motion, rest, now, false);
             Ms const hEnd = std::max(pc.arriveAt, horizonEnd);
-            bool const endOk = w.empty() ? Solver::TargetOk(in, b.plan.target, pc.arriveAt, hEnd)
+            bool const endOk = w.empty() || b.regionRoute ? Solver::TargetOk(in, b.plan.target, pc.arriveAt, hEnd)
                 : Solver::PointSafe(in, b.plan.target, pc.arriveAt, hEnd);
             if (pc.ok && endOk)
                 return;
@@ -421,14 +494,15 @@ namespace BrainModel
         void Brain(std::size_t i, Ms now, std::uint32_t& budget)
         {
             Bot& b = bots[i];
-            Solver::Input in = View(i, now);
+            std::vector<Task> tasks;
+            Solver::Input in = View(i, now, tasks);
             bool const viewRebuilt = b.seenRevision != revision || now - b.lastViewAt >= cfg.viewRefresh;
             if (viewRebuilt)
             {
                 b.seenRevision = revision;
                 b.lastViewAt = now;
             }
-            if (in.hazards.empty())
+            if (in.hazards.empty() && !Solver::Detail::HasPlayerKinds(in) && tasks.empty())
             {
                 // ToIdle: nothing relevant, the plan goes.
                 b.mode = Mode::Watch;
@@ -449,10 +523,32 @@ namespace BrainModel
                     return;
                 }
             }
+            if (b.regionRoutePending && now > b.regionRouteAskedAt)
+            {
+                b.regionRoutePending = false;
+                bool const due = cfg.regionRoute && (b.mode == Mode::Escape || b.mode == Mode::Hold)
+                    && (b.plan.outcome == Solver::Outcome::Fallback || b.plan.outcome == Solver::Outcome::NoPath)
+                    && now - b.lastRegionRouteAt >= cfg.routeRetry && now >= b.releaseUntil;
+                if (due && budget > 0)
+                {
+                    --budget;
+                    b.lastRegionRouteAt = now;
+                    ++b.c.regionRoutes;
+                    Straight oracle;
+                    Solver::Plan plan = Solver::RegionRoute(in, oracle, cfg.route);
+                    if (plan.outcome == Solver::Outcome::Move)
+                    {
+                        ++b.c.regionRoutesFound;
+                        BeginEscape(b, std::move(plan), now);
+                        b.regionRoute = true;
+                    }
+                    return;
+                }
+            }
             switch (b.mode)
             {
                 case Mode::Watch:
-                    StepWatch(i, in, now, budget);
+                    StepWatch(i, in, now, budget, tasks);
                     break;
                 case Mode::Escape:
                     StepEscape(i, in, now, budget, viewRebuilt);
@@ -461,7 +557,7 @@ namespace BrainModel
                     if (now >= b.plan.holdUntil)
                     {
                         b.plan = Solver::Plan();
-                        StepWatch(i, in, now, budget);
+                        StepWatch(i, in, now, budget, tasks);
                     }
                     else if (!Solver::TargetOk(in, b.pos, now, horizonEnd) && CanSolve(b, now, budget))
                         SolveAndApply(b, in, now);
@@ -486,9 +582,11 @@ namespace BrainModel
                 if (follow(i, f) && Dist(b.pos, f) > cfg.followSlackYd)
                     to = f;
             }
+            b.moving = false;
             if (end > from)
             {
                 float const d = Dist(b.pos, to);
+                b.moving = d > 0.01f;
                 float const stepYd = cfg.speed * static_cast<float>((end - from).count()) / 1000.f;
                 if (d > 0.f)
                 {

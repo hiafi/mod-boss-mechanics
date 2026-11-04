@@ -1,6 +1,7 @@
 // Standalone tests for src/MechanicLockRules.h, the pure rules of the bots' lock multiplier (STAGE-M4-HANDOFF §3.5,
 // WP-X; STAGE-M4-L-REPORT §6.3, §10 X1-X3): the scripted-mover table and its conditions, the named movers and the
-// turning self casts, and the look-away cast rule.
+// turning self casts, and the look-away cast rule; WP-X2: the waker's cast facing step (X6), the pull requests (X8) and
+// the forced-leak passes (BossMechanics.Bots.ForceLeaks).
 // Build: tests/run.sh.
 
 #include "check.h"
@@ -134,6 +135,67 @@ namespace
             CHECK(LookAwayBlocksCast(c) == expected);
         }
     }
+
+    // X6: the waker's step for a casting bot under look-away.
+    void TestCastFacingStep()
+    {
+        auto step = [](bool breaks, bool open, bool escaping, bool off)
+        {
+            CastFacing c;
+            c.breaksLookAway = breaks;
+            c.windowOpen = open;
+            c.escaping = escaping;
+            c.facingOff = off;
+            return CastFacingStepOf(c);
+        };
+        // A Flamestrike that left the bot facing its point, the window open, Hold: turned, the cast goes on.
+        CHECK(step(false, true, false, true) == CastFacingStep::Turn);
+        // Already on the facing, or the window not open yet: nothing.
+        CHECK(step(false, true, false, false) == CastFacingStep::None);
+        CHECK(step(false, false, false, true) == CastFacingStep::None);
+        // Escape: the move turns the bot; the facing waits for it to stand (as the face action does).
+        CHECK(step(false, true, true, true) == CastFacingStep::None);
+        // The M3 rule wins: an INFRONT cast on a target outside the arc is broken, never turned (UpdateAI would turn
+        // the bot back to its target every update).
+        for (int bits = 0; bits < 8; ++bits)
+            CHECK(step(true, bits & 1, bits & 2, bits & 4) == CastFacingStep::Break);
+        // Exhaustive.
+        for (int bits = 0; bits < 16; ++bits)
+        {
+            bool const breaks = bits & 1, open = bits & 2, escaping = bits & 4, off = bits & 8;
+            CastFacingStep const expected = breaks ? CastFacingStep::Break
+                : (open && !escaping && off) ? CastFacingStep::Turn : CastFacingStep::None;
+            CHECK(step(breaks, open, escaping, off) == expected);
+        }
+    }
+
+    // X8: the two pull requests, exact names only.
+    void TestPullRequests()
+    {
+        CHECK(kPullRequests.size() == 2);
+        CHECK(IsPullRequestName("pull my target"));
+        CHECK(IsPullRequestName("pull rti target"));
+        // The pull's own steps run only once a request started one; the chat trigger names are not action names.
+        for (char const* name : { "pull", "pull back", "pull rti", "pull start", "pull action", "pull end",
+                 "reach pull", "return to pull position", "dc pull", "Pull my target", "pull my target " })
+            CHECK(!IsPullRequestName(name));
+    }
+
+    // BossMechanics.Bots.ForceLeaks: the lock's half of the forced-leak check (leak_fire_test.cpp runs it against
+    // the detectors).
+    void TestForceLeakPasses()
+    {
+        for (LeakKind kind : { LeakKind::Move, LeakKind::Cast, LeakKind::Turn })
+        {
+            CHECK(!ForceLeakPasses(kind, 0, 0));        // off
+            CHECK(ForceLeakPasses(kind, 0, 1));
+            CHECK(!ForceLeakPasses(kind, 1, 1));        // the detector counted it: closed
+            CHECK(ForceLeakPasses(kind, 2, 3));
+            CHECK(!ForceLeakPasses(kind, 7, 3));
+        }
+        CHECK(!ForceLeakPasses(LeakKind::None, 0, 1));  // a block no detector sees never passes
+        CHECK(!ForceLeakPasses(LeakKind::None, 0, 100));
+    }
 }
 
 int main()
@@ -143,5 +205,8 @@ int main()
     TestNamedMovers();
     TestTurningSelfCasts();
     TestLookAwayRule();
+    TestCastFacingStep();
+    TestPullRequests();
+    TestForceLeakPasses();
     return Report("lock_rules_test");
 }

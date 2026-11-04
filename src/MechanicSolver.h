@@ -176,6 +176,9 @@ namespace BossMechanics::Solver
         // The slot ring (M3): with a carried circle and a role band, 16 candidates on the band's outer radius. Only
         // a test switches it off (to prove it is needed).
         bool slotRing = true;
+        // Entry points round a circle region's edge (M4 WP-Q, Detail::kRegionEdgeArcDeg). Only a test switches them
+        // off (to prove they are needed).
+        bool regionEdgeArcs = true;
     };
 
     struct Input
@@ -1167,8 +1170,10 @@ namespace BossMechanics::Solver
 
         // The walk behind CheckPath. measure = keep walking after a failing sample and count its dwell too (the
         // Fallback ranks candidates by their full time inside, so the walk must not stop at the first hit).
+        // measureCap (measure only, M4 WP-Q G7): stop once the time inside exceeds it; timeInsideHot is then some
+        // value above the cap, not the full time (the Fallback ranking only needs to know the walk lost).
         inline PathCheck WalkPath(Input const& in, std::vector<Geo::Vec3> const& path, Ms start, bool allowGrace,
-            bool measure)
+            bool measure, Ms measureCap = kForever)
         {
             PathCheck res;
             res.ok = true;
@@ -1193,8 +1198,18 @@ namespace BossMechanics::Solver
                 float lastSd = kInf;
                 Ms exemptUntil{ 0 };
                 Ms graceUsed{ 0 };
+                Ms hotFrom{ 0 }, hotTo{ 0 };    // the hazard's hot hull, widened (nearLeg's time test)
             };
             std::vector<Track> track(n);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                // Every window of a non-projectile lies in [from, max(to, strictTo)]. A projectile's can reach past
+                // HazardEnd in its margin band beyond the far end: never skipped.
+                Hazard const& h = in.hazards[i];
+                bool const projectile = h.timing.type == TimingType::Projectile;
+                track[i].hotFrom = projectile ? -kForever : h.timing.from - widen;
+                track[i].hotTo = projectile ? kForever : std::max(HazardEnd(h), h.timing.strictTo) + widen;
+            }
             // Each hazard pose prepared once, when a sample first tests it (the samples then test it many times).
             std::vector<std::size_t> firstFrame(n + 1, 0);
             for (std::size_t i = 0; i < n; ++i)
@@ -1263,6 +1278,11 @@ namespace BossMechanics::Solver
                     Track& tr = track[i];
                     if (!tr.near)
                         continue;
+                    // M4 WP-Q (G7): a sample outside the hazard's hot hull cannot fail on it, and outside its start
+                    // exemption the spatial test would only find that out later (nearLeg's leg test, per sample: a
+                    // lane set's lines reach every sample of a long leg but are hot for half a second of it).
+                    if (!tr.inStart && (lo > tr.hotTo || hi < tr.hotFrom))
+                        continue;
                     Hazard const& h = in.hazards[i];
                     float sd = kInf;
                     if (!within(i, p, &sd))
@@ -1298,6 +1318,8 @@ namespace BossMechanics::Solver
                     if (!measure)
                         return false;
                 }
+                if (measure && res.timeInsideHot > measureCap)
+                    return false;
                 return clean || measure;
             };
 
@@ -1581,6 +1603,11 @@ namespace BossMechanics::Solver
 
         constexpr float kRegionInsetYd = 0.5f;      // region candidates sit this far inside the margin
         constexpr float kRegionLineStepYd = 2.f;    // line region: centerline points this far apart
+        // A circle region the bot is outside: entry points on its inset edge this far round from the nearest one,
+        // both ways (M4 WP-Q, G1): when the straight way in is blocked (another player's landing circle on it), the
+        // nearest point that is not lies round the edge, and the grid rings and the half-radius ring are too coarse
+        // to hit the thin band between the edge and what the bot can reach in time.
+        constexpr std::array<float, 6> kRegionEdgeArcDeg{ 15.f, 30.f, 45.f, 60.f, 90.f, 120.f };
         constexpr float kMarchStepYd = 0.25f;       // parking: outward march step
 
         // The point of the shape nearest p, `inset` inside its edge (the shape's middle when it has no such room).
@@ -1655,6 +1682,19 @@ namespace BossMechanics::Solver
                         : (s.inner + s.radius) * 0.5f;
                     for (std::uint32_t i = 0; i < 8; ++i)
                         PushPolar(out, { pose.x, pose.y, pose.z }, f + Geo::kTwoPi * i / 8.f, rr, pose.z);
+                    // Entry points round the edge (kRegionEdgeArcDeg), for a bot outside a circle.
+                    float const edge = s.radius - inset;
+                    float const dx = in.bot.x - pose.x;
+                    float const dy = in.bot.y - pose.y;
+                    if (in.params.regionEdgeArcs && s.type == ShapeType::Circle && edge > 0.f
+                        && dx * dx + dy * dy > edge * edge)
+                    {
+                        float const bearing = std::atan2(dy, dx);
+                        for (float deg : kRegionEdgeArcDeg)
+                            for (float sign : { 1.f, -1.f })
+                                PushPolar(out, { pose.x, pose.y, pose.z }, bearing + sign * Geo::DegToRad(deg), edge,
+                                    pose.z);
+                    }
                     return;
                 }
                 case ShapeType::Cone:
@@ -2216,6 +2256,8 @@ namespace BossMechanics::Solver
         constexpr float kMinTightMarginYd = 0.1f;       // the reduced-margin pass never goes below this
         constexpr float kMovedYd = 0.05f;               // a probe or a path end moved the point by more than this
         constexpr std::uint32_t kFallbackProbes = 8;    // fallback: walkability probes down its ranking
+        // ...so at most this many of its top entries are read (the probes, then one with a known path)
+        constexpr std::uint32_t kFallbackRanked = kFallbackProbes + 1;
         constexpr std::uint32_t kStraightChecks = 64;   // straight-line checks per validation pass (cost cap)
 
         // The input of the reduced-margin pass: every margin cut to its drift + tightMarginYd. false = no margin
@@ -2583,8 +2625,23 @@ namespace BossMechanics::Solver
             exact.params.marginMs = Ms(0);
             for (Hazard& h : exact.hazards)
                 h.marginYd = std::max(0.f, h.driftYd);
+            auto rankedLess = [](Ranked const& a, Ranked const& b)
+            {
+                if (a.inside != b.inside)
+                    return a.inside < b.inside;
+                if (a.violated != b.violated)
+                    return a.violated < b.violated;
+                return a.dist < b.dist;
+            };
             std::vector<Ranked> ranked;
             ranked.reserve(Detail::kFallbackScans);
+            // M4 WP-Q (G7, the lane-set Fallbacks of the sweep): only the top kFallbackRanked entries of the ranking
+            // are ever read (the probes down it, then one with a known path). The candidates come nearest first, so a
+            // later one beats the kFallbackRanked-th best so far only with less time inside, or as much and fewer
+            // broken kinds: its walk stops once it is past that (WalkPath's measureCap), or is not walked at all when
+            // it cannot get there (that best spends no time inside). The top, all this solve reads, stays exact.
+            std::vector<Ranked> top;    // the kFallbackRanked best so far, in ranking order
+            top.reserve(Detail::kFallbackRanked + 1);
             for (std::uint32_t i = 0; i < cands.size() && ranked.size() < Detail::kFallbackScans; ++i)
             {
                 if (counts[i] != minCount || unreachable.count(i))
@@ -2593,17 +2650,30 @@ namespace BossMechanics::Solver
                 float const dist = Detail::Dist3(in.bot, c);
                 std::uint32_t const violated = kinds
                     ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0;
-                ranked.push_back({ Detail::WalkPath(exact, { in.bot, c }, in.now, true, true).timeInsideHot,
-                    violated, dist, i });
+                Ms cap = kForever;
+                bool walk = true;
+                if (top.size() >= Detail::kFallbackRanked)
+                {
+                    Ranked const& last = top.back();
+                    if (violated < last.violated)
+                        cap = last.inside;
+                    else if (last.inside > Ms(0))
+                        cap = last.inside - Ms(1);
+                    else
+                        walk = false;
+                }
+                Ms const inside = walk
+                    ? Detail::WalkPath(exact, { in.bot, c }, in.now, true, true, cap).timeInsideHot : kForever;
+                Ranked const r{ inside, violated, dist, i };
+                ranked.push_back(r);
+                if (walk && inside <= cap)
+                {
+                    top.insert(std::upper_bound(top.begin(), top.end(), r, rankedLess), r);
+                    if (top.size() > Detail::kFallbackRanked)
+                        top.pop_back();
+                }
             }
-            std::stable_sort(ranked.begin(), ranked.end(), [](Ranked const& a, Ranked const& b)
-            {
-                if (a.inside != b.inside)
-                    return a.inside < b.inside;
-                if (a.violated != b.violated)
-                    return a.violated < b.violated;
-                return a.dist < b.dist;
-            });
+            std::stable_sort(ranked.begin(), ranked.end(), rankedLess);
 
             // Default: the top of the ranking (as before the probes), also when every probe down it fails.
             Geo::Vec3 target = !ranked.empty() ? point[ranked.front().index] : (cands.empty() ? in.bot : cands[0]);

@@ -84,10 +84,26 @@ namespace BossMechanics
         uint32 fallbackKept = 0;
         // Route searches for (about) the same goal within 5 s of a route's handoff to stock follow (§3.7, U minefield).
         uint32 routeLoops = 0;
+        // M4 WP-Q (G2): Solver::RegionRoute searches after a Fallback that broke a hard region, and the ones that
+        // found a way round the hazards into it.
+        uint32 regionRoutes = 0;
+        uint32 regionRoutesFound = 0;
+        // M4 WP-Q (G5): ms in Escape, Hold or Freeze with the bot outside its role band (melee reach of its target,
+        // the ranged band, follow distance), sampled by the brain; ...of them while a task holds it (a Stack, Bait,
+        // Spread or Spot window). What a melee loses to the lock is msOutOfBand; what a re-position inside a task
+        // window could win back is at most msOutOfBandTask.
+        uint32 msOutOfBand = 0;
+        uint32 msOutOfBandTask = 0;
         // M4 lock (STAGE-M4-HANDOFF §3.5, WP-X; MechanicBotLock.cpp).
         uint32 specificBlocks = 0;  // actions run by name (DoSpecificAction) the gate refused (also in lockBlocks)
         uint32 doBypasses = 0;      // chat `do` orders the lock would have refused, let through (a human's order)
         uint32 unknownCasts = 0;    // casts judged with no known spell id (no cast-time or movement test ran)
+        uint32 pullBlocks = 0;      // X8: `pull` requests refused while an encounter is live (also in lockBlocks)
+        // BossMechanics.Bots.ForceLeaks: blocked judgements let through (per candidate judged), by the detector each
+        // feeds. Many passes of a kind and no leak of that kind over a run point at a blind detector.
+        uint32 forcedMoves = 0;
+        uint32 forcedCasts = 0;
+        uint32 forcedTurns = 0;
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;

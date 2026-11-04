@@ -81,6 +81,7 @@ namespace BossMechanics
             b.routeMaxExpansions = GetClampedU32("BossMechanics.Bots.Route.MaxExpansions", 4096, 64, 16384);
             b.routeMaxLegs = GetClampedU32("BossMechanics.Bots.Route.MaxLegs", 8, 1, 32);
             b.routeRetryMs = GetClampedU32("BossMechanics.Bots.Route.RetryMs", 1000, 100, 60000);
+            b.forceLeaks = GetClampedU32("BossMechanics.Bots.ForceLeaks", 0, 0, 100);
 
             BotFallibilityConfig& f = b.fallibility;
             f.enable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Fallibility.Enable", false);
@@ -159,6 +160,11 @@ namespace BossMechanics
         c.bots = LoadBotConfig();
 
         sConfig = std::move(c);
+
+        if (sConfig.bots.forceLeaks)
+            LOG_WARN("module.bossmechanics.bots", "mod-boss-mechanics: BossMechanics.Bots.ForceLeaks = {}: the bots' "
+                "lock lets blocked moves, casts and turns through until each leak detector has counted {} (a debug "
+                "check; never on a live realm)", sConfig.bots.forceLeaks, sConfig.bots.forceLeaks);
 
         if (sConfig.bots.fallibility.enable)
             LOG_INFO("module.bossmechanics.bots", "mod-boss-mechanics: bot fallibility on, seed {}{}",

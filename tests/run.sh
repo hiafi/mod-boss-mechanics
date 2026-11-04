@@ -14,7 +14,8 @@ trap 'rm -rf "$out"' EXIT
 CXX="${CXX:-g++}"
 status=0
 for test in geometry_test math_test barrage_test solver_test solver_m3_test assign_test judge_test drill_test \
-    drill_plan_test route_test view_rules_test lock_rules_test bot_stats_test crowd_test; do
+    drill_plan_test route_test view_rules_test lock_rules_test bot_stats_test leak_fire_test crowd_test \
+    fight_test; do
   "$CXX" -std=c++20 -Wall -Wextra -Werror -O1 -I "$root/src" -I "$here" "$here/$test.cpp" -o "$out/$test"
   if ! "$out/$test"; then
     status=1

@@ -35,6 +35,16 @@
  *   player cast hook) remembers the bot's own non-triggered casts, so a leaked move names its spell;
  * - after the loop, the brain time of every bot on the map in this update (BotBrain::TakeMapBrainUs) goes to each
  *   bot's CostStats.
+ *
+ * Order (M4-SWEEP G8): the sample is taken after the bot's own AI step of this update. Live, playerbots runs it in
+ * OnPlayerAfterUpdate inside Map::Update's player loop, before this hook, so the sample sees what that step did (our
+ * own move included: hence the spline and facing tokens). The sim (mod-dpssim SimDaemon) also ticks every bot's AI
+ * once more right after Map::Update; what that step does is sampled by the next update, after Unit::Update.
+ *
+ * M4 X6 (STAGE-M4-L-REPORT §2.3, WP-X2): a casting bot keeps the look-away facing. The engine of a bot in a
+ * PREPARING cast yields, so the face action cannot turn it, and a ground cast left it turned to its point: under an
+ * open window (not in Escape) the waker turns it to the look-away facing itself, unless the cast is one the M3 rule
+ * breaks (an INFRONT cast on a target outside the arc, which UpdateAI would turn back). Channels too.
  */
 
 #include "MechanicBotGuard.h"
@@ -48,6 +58,7 @@
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
 #include "MechanicLeaks.h"
+#include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "MotionMaster.h"
 #include "MoveSpline.h"
@@ -216,7 +227,8 @@ namespace BossMechanics
             }
             if (v.turn)
                 ++c.leakTurns;
-            if (debug)
+            // Also under BossMechanics.Bots.ForceLeaks, whose check reads these lines.
+            if (debug || GetConfig().bots.forceLeaks)
                 LOG_INFO(kLog, "Bot {}: lock leak in {}{}: {}{}{}", bot->GetName(), ModeName(st.mode),
                     s.lookAway ? " (look-away)" : "",
                     v.move ? Acore::StringFormat("move (spell {}) ", v.moveSpell) : std::string(),
@@ -280,7 +292,20 @@ namespace BossMechanics
                 // a casting bot to its target every update) would run into a window.
                 bool const turnsAway = BotFacing::CastBreaksLookAway(bot, *st, spell, now, remaining);
                 if (Solver::CastAllowed(now, remaining, leaveBy, margin) && !turnsAway)
+                {
+                    // X6: the cast goes on; the bot turns to the look-away facing (CastLeaveBy refreshed it).
+                    LockRules::CastFacing f;
+                    f.windowOpen = BotFacing::LookAwayActive(*st, now);
+                    f.escaping = st->mode == MechanicBotMode::Escape;
+                    f.facingOff = f.windowOpen && BotFacing::FacingOff(bot, st->lookFacing);
+                    if (LockRules::CastFacingStepOf(f) == LockRules::CastFacingStep::Turn)
+                    {
+                        BotFacing::Apply(bot, st->lookFacing);
+                        Leaks::OwnFacing(st->leak, st->lookFacing);     // ours, not a leak
+                        ++st->counters.facingsApplied;
+                    }
                     continue;
+                }
                 if (turnsAway)
                     ++st->counters.facingBreaks;
                 botAI->RequestSpellInterrupt();

@@ -30,6 +30,15 @@
  *   Engine::SetExecuteActionGate (PLAYERBOTS_HAS_EXECUTE_ACTION_GATE), InstallSpecificActionGate puts the same verdict
  *   there. Chat `do` (event source "do") is a human order and is let through, counted when the lock would refuse it.
  *
+ * M4, WP-X2 (STAGE-M4-L-REPORT §10 X7, X8; M4-SWEEP G8):
+ * - an item use in Escape or Hold is judged by its on-use spell's cast and channel time, as a spell (the warlock
+ *   stones are 3 s casts); Freeze still allows it unless the spell moves the caster;
+ * - in every mode, `pull my target` and `pull rti target` (a human's `pull`) are refused while an encounter is live on
+ *   the map: playerbots' PullMultiplier would zero every other action, ours included, for up to 15 s (pullBlocks);
+ * - BossMechanics.Bots.ForceLeaks (debug, 0 = off): the blocks the leak detectors can see are let through until each
+ *   detector has counted that many leaks since the counters' reset (forcedMoves, forcedCasts, forcedTurns), to
+ *   prove the detectors fire.
+ *
  * Multipliers are per engine, so the strategy registers this in the combat and the non-combat engine alike.
  */
 

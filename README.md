@@ -624,6 +624,12 @@ The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The
   the next waypoint passes the path check at the route's margin (`RouteAdvanceOk`; else it walks on to the waypoint).
   It ends at `RouteHandoff`'s waypoint, where stock follow takes over. A leg that needed the reduced margin is
   re-checked at the reduced margins. No route: hold, as before.
+- **Region route** (M4): a solve whose Fallback breaks a hard region (a Stack, Cluster, Bait range or Spot the bot
+  cannot reach straight, because its way in crosses a Zone that is hot by then: the Alexei Assembly member behind the
+  Out of bounds circle) asks for `Solver::RegionRoute` on the next brain step, under the route search's rules
+  (`Route.Enable`, `Route.RetryMs`, one budget unit, nothing else that step), while the bot still walks or holds that
+  Fallback. A found route is an Escape over its waypoints to a spot that passes the full check (the re-check holds its
+  end to it, not only to the hazards) and goes onto the reservation board; it holds the region's window there.
 
 Role solves, region tracking, tank re-facing searches and routes count in the 8-per-map-update budget.
 
@@ -645,7 +651,17 @@ navmesh path calls (paths found earlier are reused):
 3. only when an armed or arming mine allows grace: a grace crossing at the full margin -> GraceMove;
 4. Fallback: the candidate with the fewest hazards hot from its arrival, then the least time inside the exact hitboxes
    (no margin) on its straight line, then the nearest; candidates known to have no path are skipped and the first
-   walkable one down that ranking is taken. No path to it -> NoPath, straight to the nearest exit.
+   walkable one down that ranking is taken. No path to it -> NoPath, straight to the nearest exit. Only the top nine
+   of the ranking are ever read (eight probes, then one with a known path), so a straight-line walk stops once it
+   cannot enter them any more (M4: the same answer, a third less time on a lane-set Fallback).
+
+Path walks skip a sample's test against a hazard that is not hot at that sample's time (outside its window, widened
+as the windows are; never a projectile, whose window can run past its end in the margin band, nor a hazard the walk
+started in): the same answer as testing it, about 40% less time when a lane set's 40 yd lines reach every sample of a
+leg but are hot for half a second of it (M4). A circle region the bot is outside adds twelve entry points on its edge,
+15 to 120 degrees round from the nearest one either way (M4): when another player's landing circle blocks the
+straight way in, the nearest clear way in lies round the edge, between the edge and what the bot can reach in time,
+which the rings and the half-radius points miss (the Fenrus healer that stood still and took the leap).
 
 Within a pass, candidates whose straight line passes the path check are tried first; the others (their straight line
 crosses a hazard while it is hot, the common case under a barrage) only when none of the first validated. Before a
@@ -706,7 +722,7 @@ solving one after another on the map thread never pick colliding spots (decision
 | Kind | The bot is | Solver input |
 | --- | --- | --- |
 | Spread, RunOut (group) | a carrier | its circle carried (no other eligible player inside); slot ring by guid rank |
-| | eligible | each other live carrier's circle as a hazard at its planned spot (both sides) |
+| | eligible | each other live carrier's circle as a hazard at its reservation, or a human's spot<sup>2</sup> |
 | RunOut `From(Owner)` | a carrier | a circle hazard on the owner (drift as M2) |
 | Stack | anchored on the bot | Leader: nothing to reach (the brain holds) |
 | | eligible | a region: the shape at the anchor's planned spot (a bot's plan), or live + a drift pose |
@@ -725,7 +741,14 @@ solving one after another on the map thread never pick colliding spots (decision
 | Zone with `Park` | the parked unit's attacker | a Parker task (tank parking) |
 
 <sup>1</sup> The landing circle (`Radius`) around the other players' planned spots (picker), or around the picker's
-(others); none when the radius is 0 (the hit lands on the pick only). The picker also gets `FarFrom` the owner.
+reservation or a human picker's spot (others)<sup>2</sup>; none when the radius is 0 (the hit lands on the pick only).
+The picker also gets `FarFrom` the owner.
+
+<sup>2</sup> M4 (`ViewRules::PlaceOtherCircle`): a group bot's circle goes into the others' view only once it planned
+for the mechanic (its reservation on it: every solve with a task publishes one, and a claim role holding its spot
+does). Until then it is about to move for it itself, and its own side (the carried circle, the picker's hazards on
+the others' planned spots) keeps everyone out. Placing it at its current spot made the others yield first, and the
+carrier then saw them clear and stayed: a Ras runner in the middle of the stack pushed the stack out of its region.
 
 A region's margin is `SafetyMarginYd`, at most half its inner radius; a moving anchor's drift (as poses, capped the
 same way) shrinks it further. Reservations: `until` = the task's window end, `claim` for claimers, pickers and leaders;
@@ -856,6 +879,13 @@ M4 adds three lines (the same numbers reach the sim through `Sim::ReadBotStats`)
   that answer no mechanic);
 - `cost us`: solve and route p50 / p95 / max, the bot's brain step mean and max, and the brain time of every bot on
   the map per map update (mean and max). p50 and p95 are log2 bucket bounds (`src/MechanicCost.h`).
+
+A fourth M4 line, `m4 lock`, counts the actions run by name the lock's gate refused, the chat `do` orders it let
+through, casts judged with no spell id, `pull` requests refused while an encounter is live, and forced leak passes.
+`BossMechanics.Bots.ForceLeaks = N` (debug only, never on a live realm) proves the leak detectors fire: the lock lets
+the blocks they can see through (a foreign mover, a cast-time spell or item in Escape or Hold, a look-away turn) until
+each detector has counted N since the counters' last reset, and every leak is logged as `lock leak in ...`. Passes
+are counted per candidate judged, so a kind with many passes and no leak over a whole run points at a blind detector.
 
 With `Debug = 1`, each solve logs the pass that found the plan and why the rest failed: candidates kept, probes (off
 the navmesh, snapped), path calls without a path, ends unsafe at arrival, paths crossing a hazard that holds the bot

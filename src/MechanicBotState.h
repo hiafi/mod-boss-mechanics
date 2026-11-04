@@ -139,6 +139,12 @@ namespace BossMechanics
         Milliseconds clockAt{ 0 };                          // the mode clocks' last sample (0 = none yet)
         Milliseconds routeHandoffAt{ 0 };                   // a route's escape arrived: stock follow took over
         Geo::Vec3 routeHandoffGoal;                         // ...towards this goal
+        // M4 WP-Q (G2): a Fallback broke a hard region; Solver::RegionRoute runs on a later brain step.
+        bool regionRoutePending = false;
+        Milliseconds regionRouteAskedAt{ 0 };
+        Milliseconds lastRegionRouteAt{ 0 };
+        bool regionRoute = false;                           // the escape walks a RegionRoute (its end: TargetOk)
+        Milliseconds bandClockAt{ 0 };                      // G5: the out-of-band clock's last sample (0 = none)
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

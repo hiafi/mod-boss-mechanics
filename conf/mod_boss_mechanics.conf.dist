@@ -615,3 +615,16 @@ BossMechanics.Bots.Route.MaxLegs = 8
 #
 
 BossMechanics.Bots.Route.RetryMs = 1000
+
+#
+#    BossMechanics.Bots.ForceLeaks
+#        Description: Debug check of the lock leak detectors (leaks in .mech bots and the mechanics sim). With N above
+#                     0, each bot's lock lets blocked moves, casts and turns through until each detector has counted
+#                     N leaks since the counters' last reset (every sim iteration resets them). A run with working
+#                     detectors then reports about N leaks of each kind its drills block (turns need a look-away
+#                     drill), and logs each one. The bots break their own rules on purpose: never set it on a live
+#                     realm (0-100).
+#        Default:     0 - Disabled
+#
+
+BossMechanics.Bots.ForceLeaks = 0
