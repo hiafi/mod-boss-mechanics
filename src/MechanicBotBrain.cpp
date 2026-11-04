@@ -314,6 +314,23 @@ namespace BossMechanics
             return first;
         }
 
+        // The bot stands in a hazard's exact hitbox (no margin) while one of its windows there is open.
+        bool InsideHot(Solver::Input const& in, Geo::Vec3 const& p, Milliseconds now)
+        {
+            for (Solver::Hazard const& h : in.hazards)
+            {
+                bool inside = false;
+                for (Geo::Pose const& pose : h.poses)
+                    inside = inside || Solver::SignedDistance(h.shape, pose, p) <= 0.f;
+                if (!inside)
+                    continue;
+                for (HotWindow const& w : Solver::WindowsAt(h, p))
+                    if (w.from <= now && now <= w.to)
+                        return true;
+            }
+            return false;
+        }
+
         // The bot's spline still to walk: its position, then the spline points after the current segment.
         bool RemainingSpline(Player const* bot, std::vector<Geo::Vec3>& out)
         {
@@ -573,6 +590,7 @@ namespace BossMechanics
             Milliseconds const travel = std::max(Milliseconds(0), plan.arriveAt - now);
             st.escapeCeilingAt = now + 2 * travel + kEscapeSlack;
             st.escapeDeadline = FirstThreatAt(st.input, from);
+            st.lateCounted = false;
             st.planReduced = plan.stats.pass == 2;
             st.plan = std::move(plan);
             st.planFor = st.plan.answers;
@@ -697,14 +715,17 @@ namespace BossMechanics
             bool const spotSafe = Solver::PointSafe(in, pos, now, horizonEnd);
             bool const arrived = (Dist2d(pos, st.plan.target) <= kArriveYd && (spotSafe || !spline))
                 || (st.escapeIssuedAt != Milliseconds(0) && !spline && spotSafe);
+            // Late: still inside a hazard's exact hitbox once one of its windows there has started. Reaching the
+            // target after the window opened is not late on its own: the target often lies well past the edge.
+            if (!st.lateCounted && now >= st.escapeDeadline && InsideHot(in, pos, now))
+            {
+                st.lateCounted = true;
+                ++st.counters.lateArrivals;
+                if (st.plan.outcome == Solver::Outcome::Fallback || st.plan.outcome == Solver::Outcome::NoPath)
+                    ++st.counters.lateFallbacks;
+            }
             if (arrived)
             {
-                if (now > st.escapeDeadline)
-                {
-                    ++st.counters.lateArrivals;
-                    if (st.plan.outcome == Solver::Outcome::Fallback || st.plan.outcome == Solver::Outcome::NoPath)
-                        ++st.counters.lateFallbacks;
-                }
                 st.mode = MechanicBotMode::Hold;
                 st.outOfRoleSince = Milliseconds(0);
                 return;

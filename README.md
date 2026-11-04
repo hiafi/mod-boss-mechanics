@@ -550,9 +550,11 @@ moved) and the rejected ones by path type flag (NOPATH, NOT_USING_PATH, SHORT, S
 empty) and by end distance (more than 3 yd off). `.mech bots` then adds the same counts summed per bot ("debug solve",
 "debug nav"). Nothing of this is counted or formatted with `Debug = 0`.
 
-A late arrival is an escape that reached its target after the first window of the spot it left had started. Most are
-Fallback escapes, late by construction (nothing on time existed); a late clean Move points at reaction time (the view
-seen late, a solve deferred by the per-map budget, a stuck re-solve).
+A late arrival is an escape whose bot still stood inside a hazard's exact hitbox (no margin) once one of that hazard's
+windows there had started, counted once per escape. Reaching the target after the window opened is not late: the
+target often lies well past the edge. Most late arrivals are Fallback escapes, late by construction (nothing on time
+existed); a late clean Move points at reaction time (the view seen late, a solve deferred by the per-map budget, a
+stuck re-solve).
 
 ### Limits
 

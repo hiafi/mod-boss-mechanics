@@ -50,7 +50,7 @@ namespace BossMechanics
         uint32 pathChecks = 0;
         std::array<uint32, kOutcomes> outcomes{};       // indexed by Solver::Outcome
         uint32 tightMoves = 0;      // Move outcomes found only at the reduced margin (Solver::Params::tightMarginYd)
-        uint32 lateArrivals = 0;    // reached the target after the first window of the spot it left had started
+        uint32 lateArrivals = 0;    // escapes still inside a hazard's hitbox once its window there had started
         uint32 lateFallbacks = 0;   // ...of which the plan was a Fallback or NoPath (late by construction)
         uint32 stuckResolves = 0;   // re-solved because the bot did not move for 500 ms during an escape
         uint32 releases = 0;        // escapes given up (stuck on the same target, rooted, or past the hard ceiling)
@@ -93,6 +93,7 @@ namespace BossMechanics
         Solver::Input input;                                // the view: hazards, lanes, role band, crowd
         Milliseconds nextPerceptionAt = Solver::kForever;   // fallibility: a hidden mechanic becomes visible
         Milliseconds escapeDeadline = Solver::kForever;     // first window start at the spot the escape left
+        bool lateCounted = false;                           // this escape was already counted late
         bool planReduced = false;                           // the plan came from the reduced-margin pass
         Geo::Vec3 stuckRef;                                 // escape: where the bot was at stuckSince (set when the
         Milliseconds stuckSince{ 0 };                       // escape begins and on progress only, never on a send)
