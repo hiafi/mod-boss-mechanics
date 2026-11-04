@@ -83,8 +83,6 @@ namespace BossMechanics
         constexpr Milliseconds kSightBackoff{ 5000 };
         // Parking / drag-out hold: renewed every step while the park input holds.
         constexpr Milliseconds kParkHold{ 500 };
-        // A route ends on a waypoint this close to a path corner (route waypoints are leg ends, path corners exactly).
-        constexpr float kWaypointMatchYd = 0.01f;
         // Look-away: a new facing goes onto the reservation board when it moved more than this.
         constexpr float kRepublishFacingDeg = 5.f;
 
