@@ -17,6 +17,7 @@
 #include "Define.h"
 #include "Duration.h"
 #include "MechanicGeometry.h"
+#include "MechanicJudge.h"
 #include "MechanicMath.h"
 #include "ObjectGuid.h"
 #include "Position.h"
@@ -38,18 +39,7 @@ namespace BossMechanics
     // ----------------------------------------------------------------------------------------------------------------
     // Enums
     // ----------------------------------------------------------------------------------------------------------------
-    enum class Kind : uint8
-    {
-        Zone,
-        Frontal,
-        Spread,
-        RunOut,
-        Stack,
-        Soak,
-        Bait,
-        HoldStill,
-        Spot
-    };
+    // Kind lives in MechanicJudge.h (the pure judging rules the host tests compile).
 
     // Telegraph colors: the index is the marker display's color block (Ids::MarkerDisplay), so the order is the asset
     // script's COLORS. Every marker shape exists in every color.
@@ -203,11 +193,17 @@ namespace BossMechanics
         static BaitRule Farthest() { return { Type::Farthest, 0 }; }
     };
 
+    // A bot's planned spot on one mechanic (M3 handoff §3.6). Registry::Reserve replaces the bot's earlier entry and
+    // keeps its `since`; Tick drops it at `until`.
     struct Reservation
     {
         ObjectGuid bot;
         Position point;
         Milliseconds until{ 0 };
+        Milliseconds since{ 0 };        // when the bot's current claim (claim, slot) began on this mechanic (0: now)
+        float facing = 0.f;             // the facing the bot will hold there (look-away, carried cones)
+        uint8 slot = 0;                 // Spread slot ring index; Stack Cluster: slot 0 = the leader
+        bool claim = false;             // Soak claimer, Bait picker, Cluster leader
     };
 
     // What one resolve pass is testing. Set by the registry right before EngineBridge::CastResolve and read by the
@@ -277,9 +273,17 @@ namespace BossMechanics
         SelfTrigger selfTrigger;
         MeasuredFrom measuredFrom = MeasuredFrom::Group;
         uint8 count = 0;                // Spread/RunOut: how many random targets when none are given
-        uint8 soakCount = 0;            // Soak: bodies needed
-        bool tankExempt = false;        // Frontal/Zone: the owner's victim is never hit
+        uint8 soakCount = 0;            // Soak: bodies needed (at least; extra bodies never fail)
+        uint8 clusterMinOthers = 0;     // Stack Cluster(n): each eligible player needs n others within the radius
+        // Frontal/Zone: one player is never hit: the victim of the anchor when the anchor is a creature, else the
+        // owner's victim (ExemptVictim).
+        bool tankExempt = false;
         float othersRange = 0.f;        // Bait: everyone else stays within this of the owner
+        float holdTolerance = Rules::kHoldStillToleranceYd;    // HoldStill: allowed movement in the window (yd)
+        // Shape kinds, Park(unit): the tank should hold `parkUnit` (empty: the owner) inside this shape. Read by the
+        // bots only; no server effect.
+        bool park = false;
+        ObjectGuid parkUnit;
         BaitRule bait;
         GuidSet targets;                // Spread/RunOut/HoldStill: the players (Spread: empty = everyone eligible)
         std::unordered_map<ObjectGuid, Position> spots;     // Spot
@@ -319,9 +323,12 @@ namespace BossMechanics
         Geo::Pose lastPose;             // last known anchor pose (used when a unit anchor is gone)
         ResolveContext ctx;
         std::unordered_map<ObjectGuid, Position> holdStart;     // HoldStill: positions at the window start
-        GuidSet failedPlayers;          // HoldStill/Spot: one failure per player
+        GuidSet failedPlayers;          // HoldStill/Spot, lasting Stack: one failure per player
 
-        bool IsShapeKind() const { return kind == Kind::Zone || kind == Kind::Frontal; }
+        bool IsShapeKind() const { return Judge::IsShapeKind(kind); }
+        bool IsCluster() const { return kind == Kind::Stack && clusterMinOthers > 0; }
+        // Park: the unit the tank should hold inside the shape.
+        ObjectGuid ParkedUnit() const { return parkUnit.IsEmpty() ? owner : parkUnit; }
         bool IsActive(Milliseconds now) const { return !cancelled && !finished && now < expireAt; }
     };
 
@@ -468,7 +475,15 @@ namespace BossMechanics
         void ClearAll();                // every encounter (`.mech clear all`)
         void Tick(Milliseconds now);    // from AllMapScript::OnMapUpdate (C2), full map updates only
         void PostFailure(FailureEvent const& e);
-        void Reserve(uint32 id, Reservation r);     // replaces the bot's earlier reservation on that mechanic
+        // Replaces the bot's earlier reservation on that mechanic (keeping its `since`; a new one with since 0 starts
+        // now). Bumps ReservationRevision when the entry is new or its point, facing, slot or claim changed; a
+        // re-reserve that only moves `until` does not.
+        void Reserve(uint32 id, Reservation r);
+        void Unreserve(uint32 id, ObjectGuid bot);  // bumps ReservationRevision when the bot had an entry
+        // Changes whenever another bot's reservations may have changed (Reserve, Unreserve, pruning at `until`, a
+        // mechanic holding reservations removed). Separate from Revision() so a reservation never re-plans the bots
+        // that only follow hazards. Never 0.
+        uint32 ReservationRevision() const { return _reservationRevision; }
         LaneSet& AddLaneSet(ObjectGuid owner, RoomFrame const& frame);
         LaneSet* FindLaneSetMutable(uint32 id);
 
@@ -518,19 +533,27 @@ namespace BossMechanics
         // gone) and the effective shape (Line(from, to): direction and length from the two anchors).
         Geo::Pose AnchorPose(ActiveMechanic const& m) const;
         Shape EffectiveShape(ActiveMechanic const& m, Geo::Pose& pose) const;
-        // Shape kinds: inside the hitbox now. Spread/RunOut: within the radius of a carrier other than `who`.
-        // Stack/Soak: inside the circle. Spot: within the radius of who's own spot (other kinds: false).
+        // Shape kinds: inside the hitbox now (false for `who` when the shape is anchored on `who`, decision §7.7).
+        // Spread/RunOut: within the radius of a carrier other than `who`. Stack/Soak: inside the shape. Stack
+        // Cluster(n): at least n eligible players other than `who` within the radius of the point. Spot: within the
+        // radius of who's own spot (other kinds: false).
         bool ContainsPoint(ActiveMechanic const& m, Position const& p, ObjectGuid who = ObjectGuid::Empty) const;
         bool ContainsUnit(ActiveMechanic const& m, Unit const* who) const;
         // When the point is dangerous (empty when it is outside the shape). Times are absolute.
         std::vector<HotWindow> HotWindows(ActiveMechanic const& m, Position const& p) const;
         bool IsEligible(ActiveMechanic const& m, Unit const* who) const;
         bool IsTankExempted(ActiveMechanic const& m, Unit const* who) const;
+        // Tank-exempt shapes: the player never hit (B7: the anchor creature's victim, else the owner's victim);
+        // empty when not tank-exempt or nobody is the victim.
+        ObjectGuid ExemptVictim(ActiveMechanic const& m) const;
         Role RoleOf(ActiveMechanic const& m, Player const* player) const;
         // Bait: who the rule picks now (empty guid when nobody qualifies).
         ObjectGuid BaitPick(ActiveMechanic const& m) const;
         // Spread/RunOut: the carriers right now (targets, all eligible, or self-trigger stacks).
         std::vector<ObjectGuid> Carriers(ActiveMechanic const& m) const;
+        // The eligible players of the mechanic right now (candidates: alive, in world, not GM, in test scope and
+        // range). Stack Cluster(n): the players who each need n others around them.
+        std::vector<ObjectGuid> EligiblePlayers(ActiveMechanic const& m) const;
 
     private:
         Unit* FindUnit(ObjectGuid guid) const;
@@ -552,6 +575,10 @@ namespace BossMechanics
         void StepBait(ActiveMechanic& m, Milliseconds now);
         void StepHoldStill(ActiveMechanic& m, Milliseconds now);
         void StepSpot(ActiveMechanic& m, Milliseconds now);
+        // One Stack/Soak judgement (a single resolve, or one pass of a lasting one).
+        void JudgeStackSoak(ActiveMechanic& m, uint32 pass, Milliseconds now);
+        // Shape kinds anchored on a player: that player (never hit by its own shape, decision §7.7); else empty.
+        ObjectGuid ShapeExclude(ActiveMechanic const& m) const;
 
         // One resolve pass: sets ctx, casts through the bridge (or, with no damage, rider or Weakened, only collects
         // who is inside), clears ctx. Returns the units hit this pass.
@@ -573,10 +600,17 @@ namespace BossMechanics
                 _revision = 1;
         }
 
+        void BumpReservationRevision()
+        {
+            if (++_reservationRevision == 0)
+                _reservationRevision = 1;
+        }
+
         Map* _map;                      // the map that owns this registry (CustomData): always outlives it
         uint32 _nextId = 1;
         uint32 _nextLaneSetId = 1;
         uint32 _revision = 1;
+        uint32 _reservationRevision = 1;
         bool _ticking = false;
         std::map<uint32, ActiveMechanic> _mechanics;
         std::map<uint32, LaneSet> _laneSets;

@@ -104,7 +104,7 @@ namespace BossMechanics
         // penalty (any kind but Soak)
         MechanicRef& Weakened();
         MechanicRef& WeakenedOncePerPlayer();           // implies Weakened()
-        // timing (shape kinds)
+        // timing (shape kinds; Persistent also Stack and Soak: judged at every tick)
         MechanicRef& Persistent(Milliseconds duration, Milliseconds tick);  // tick 0: one resolve, then lingers
         MechanicRef& Projectile(float speed);           // Line only: resolves as the body passes (yd/s)
         MechanicRef& ProjectileUnit(Unit const* unit);  // track this unit instead of the computed position
@@ -126,6 +126,12 @@ namespace BossMechanics
         MechanicRef& SelfTrigger(uint32 auraSpell, uint8 minStacks);    // Spread, RunOut
         MechanicRef& From(MeasuredFrom from);           // RunOut
         MechanicRef& TankExempt();                      // shape kinds; a cone Zone becomes a Frontal
+        // Stack: no anchor; each eligible player needs `minOthers` eligible players within the radius (Assembly).
+        MechanicRef& Cluster(uint8 minOthers);
+        MechanicRef& Radius(float yd);                  // Bait: the landing circle (default: the picked player only)
+        MechanicRef& Tolerance(float yd);               // HoldStill: movement allowed in the window (default 0.3)
+        // Shape kinds: the tank should hold `unit` (nullptr: the owner) inside this shape. Bots only.
+        MechanicRef& Park(Unit const* unit = nullptr);
         // telegraph and bookkeeping
         MechanicRef& Color(BossMechanics::Color color);
         MechanicRef& Tag(uint32 tag);
@@ -198,7 +204,8 @@ namespace Mechanic
     MechanicRef Zone(Unit* owner, BossMechanics::ZoneSpec const& spec, Milliseconds warn);
     MechanicRef Circle(Unit* owner, Anchor const& at, float r, Milliseconds warn);
     MechanicRef Donut(Unit* owner, Anchor const& at, float inner, float outer, Milliseconds warn);
-    // Anchored on `source`, turning with it. TankExempt::Yes makes it a Frontal (the owner's victim is never hit).
+    // Anchored on `source`, turning with it. TankExempt::Yes makes it a Frontal (the victim of `source` when it is a
+    // creature, else the owner's victim, is never hit).
     MechanicRef Cone(Unit* owner, Unit* source, float angleDeg, float length, Milliseconds warn,
         BossMechanics::TankExempt exempt = BossMechanics::TankExempt::No);
     MechanicRef Line(Unit* owner, Anchor const& from, Anchor const& to, float width, Milliseconds warn);
@@ -213,6 +220,9 @@ namespace Mechanic
     MechanicRef RunOut(Unit* owner, Unit* target, float r, Milliseconds warn);
     MechanicRef Stack(Unit* owner, Anchor const& at, float r, Milliseconds warn);
     MechanicRef Soak(Unit* owner, Anchor const& at, float r, uint8 count, Milliseconds warn);
+    // Any shape (a lane: Shapes::LineFacing); drawn like a Zone in the get-in color.
+    MechanicRef Stack(Unit* owner, BossMechanics::ZoneSpec const& spec, Milliseconds warn);
+    MechanicRef Soak(Unit* owner, BossMechanics::ZoneSpec const& spec, uint8 count, Milliseconds warn);
     MechanicRef Bait(Unit* owner, BossMechanics::BaitRule const& rule, float othersRange, Milliseconds warn);
     // The listed players (empty: every eligible player) must not move during [now + warn, now + warn + window].
     MechanicRef HoldStill(Unit* owner, GuidSet const& players, Milliseconds window,

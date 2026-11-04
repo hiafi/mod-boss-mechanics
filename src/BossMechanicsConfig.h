@@ -63,6 +63,25 @@ namespace BossMechanics
         float facingSlackDeg = 15.f;                            // BossMechanics.Bots.FacingSlackDeg
         bool debug = false;                                     // BossMechanics.Bots.Debug
         BotFallibilityConfig fallibility;                       // BossMechanics.Bots.Fallibility.*
+        // M3 (STAGE-M3-HANDOFF §3.10): the player kinds, tank tasks, healer sight and the route search.
+        float humanSlackYd = 1.f;                               // BossMechanics.Bots.HumanSlackYd
+        float regionComfortWeight = 1.5f;                       // BossMechanics.Bots.RegionComfortWeight
+        float trackSlackYd = 0.75f;                             // BossMechanics.Bots.TrackSlackYd
+        float lookAwayMarginDeg = 10.f;                         // BossMechanics.Bots.LookAway.MarginDeg
+        bool tankFacingEnable = true;                           // BossMechanics.Bots.TankFacing.Enable
+        bool parkEnable = true;                                 // BossMechanics.Bots.Park.Enable
+        float parkDepthYd = 1.f;                                // BossMechanics.Bots.Park.DepthYd
+        uint32 parkHoldCapMs = 8000;                            // BossMechanics.Bots.Park.HoldCapMs
+        uint32 freezeSettleMs = 250;                            // BossMechanics.Bots.Freeze.SettleMs
+        float healerSightWeight = 10.f;                         // BossMechanics.Bots.Healer.SightWeight
+        uint32 healerMaxSightChecks = 8;                        // BossMechanics.Bots.Healer.MaxSightChecks
+        bool routeEnable = true;                                // BossMechanics.Bots.Route.Enable
+        float routePadYd = 8.f;                                 // BossMechanics.Bots.Route.PadYd
+        float routeCellYd = 1.f;                                // BossMechanics.Bots.Route.CellYd
+        uint32 routeMaxCells = 4096;                            // BossMechanics.Bots.Route.MaxCells
+        uint32 routeMaxExpansions = 4096;                       // BossMechanics.Bots.Route.MaxExpansions
+        uint32 routeMaxLegs = 8;                                // BossMechanics.Bots.Route.MaxLegs
+        uint32 routeRetryMs = 1000;                             // BossMechanics.Bots.Route.RetryMs
     };
 
     struct ModuleConfig

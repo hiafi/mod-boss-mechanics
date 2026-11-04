@@ -24,7 +24,25 @@ namespace
 
     bool IsShapeKind(Kind k)
     {
-        return k == Kind::Zone || k == Kind::Frontal;
+        return Judge::IsShapeKind(k);
+    }
+
+    bool IsStackOrSoak(Kind k)
+    {
+        return k == Kind::Stack || k == Kind::Soak;
+    }
+
+    // A shape's sizes are usable (donut: inner < outer).
+    bool ShapeSizeOk(Shape const& s)
+    {
+        switch (s.type)
+        {
+            case ShapeType::Circle: return s.radius > 0.f;
+            case ShapeType::Donut: return s.radius > 0.f && s.inner >= 0.f && s.inner < s.radius;
+            case ShapeType::Cone: return s.length > 0.f && s.angleDeg > 0.f;
+            case ShapeType::Line: return s.length > 0.f && s.width > 0.f;
+        }
+        return false;
     }
 
     // Weakened lands only from resolve hits (Rules::kWeakenedOnNonHitFailures = false), so only the kinds that cast
@@ -257,7 +275,8 @@ namespace BossMechanics
     MechanicRef& MechanicRef::Persistent(Milliseconds duration, Milliseconds tick)
     {
         ActiveMechanic const* cur = Get();
-        bool const fits = cur && IsShapeKind(cur->kind) && !cur->mine && !cur->projectile;
+        bool const fits = cur && (IsShapeKind(cur->kind) || IsStackOrSoak(cur->kind)) && !cur->mine
+            && !cur->projectile;
         if (ActiveMechanic* m = Edit("Persistent", fits))
         {
             Persist p;
@@ -446,6 +465,43 @@ namespace BossMechanics
             m->tankExempt = true;
             if (m->kind == Kind::Zone && m->shape.type == ShapeType::Cone)
                 m->kind = Kind::Frontal;
+        }
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::Cluster(uint8 minOthers)
+    {
+        ActiveMechanic const* cur = Get();
+        bool const fits = cur && cur->kind == Kind::Stack && cur->shape.type == ShapeType::Circle && minOthers > 0
+            && !cur->committed;
+        if (ActiveMechanic* m = Edit("Cluster", fits))
+            m->clusterMinOthers = minOthers;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::Radius(float yd)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("Radius", cur && cur->kind == Kind::Bait && yd > 0.f))
+            m->shape.radius = yd;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::Tolerance(float yd)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("Tolerance", cur && cur->kind == Kind::HoldStill && yd >= 0.f))
+            m->holdTolerance = yd;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::Park(Unit const* unit)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("Park", cur && IsShapeKind(cur->kind)))
+        {
+            m->park = true;
+            m->parkUnit = unit ? unit->GetGUID() : ObjectGuid::Empty;
         }
         return *this;
     }
@@ -722,15 +778,7 @@ namespace Mechanic
     MechanicRef Zone(Unit* owner, ZoneSpec const& spec, Milliseconds warn)
     {
         Shape const& s = spec.shape;
-        bool ok = true;
-        switch (s.type)
-        {
-            case ShapeType::Circle: ok = s.radius > 0.f; break;
-            case ShapeType::Donut: ok = s.radius > 0.f && s.inner >= 0.f && s.inner < s.radius; break;
-            case ShapeType::Cone: ok = s.length > 0.f && s.angleDeg > 0.f; break;
-            case ShapeType::Line: ok = s.length > 0.f && s.width > 0.f; break;
-        }
-        if (!SizeOk(ok, "Zone", owner))
+        if (!SizeOk(ShapeSizeOk(s), "Zone", owner))
             return MechanicRef();
         std::optional<Anchor> const to = spec.to;
         return Register(owner, "Zone", Kind::Zone, spec.anchor, s, warn, [&to](ActiveMechanic& m)
@@ -831,6 +879,29 @@ namespace Mechanic
             return MechanicRef();
         return Register(owner, "Soak", Kind::Soak, at, Shape::Circle(r), warn, [count](ActiveMechanic& m)
         {
+            m.soakCount = count;
+        });
+    }
+
+    MechanicRef Stack(Unit* owner, ZoneSpec const& spec, Milliseconds warn)
+    {
+        if (!SizeOk(ShapeSizeOk(spec.shape), "Stack", owner))
+            return MechanicRef();
+        std::optional<Anchor> const to = spec.to;
+        return Register(owner, "Stack", Kind::Stack, spec.anchor, spec.shape, warn, [&to](ActiveMechanic& m)
+        {
+            m.to = to;
+        });
+    }
+
+    MechanicRef Soak(Unit* owner, ZoneSpec const& spec, uint8 count, Milliseconds warn)
+    {
+        if (!SizeOk(ShapeSizeOk(spec.shape), "Soak", owner))
+            return MechanicRef();
+        std::optional<Anchor> const to = spec.to;
+        return Register(owner, "Soak", Kind::Soak, spec.anchor, spec.shape, warn, [&to, count](ActiveMechanic& m)
+        {
+            m.to = to;
             m.soakCount = count;
         });
     }

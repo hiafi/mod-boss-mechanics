@@ -173,9 +173,45 @@ namespace BossMechanics::Telegraph
             return static_cast<uint8>(m.color);
         }
 
+        // Rings on players: Spread/RunOut carriers, and every eligible player of a Stack Cluster(n) (get-in rings).
         bool IsCarrierKind(ActiveMechanic const& m)
         {
-            return m.kind == Kind::Spread || m.kind == Kind::RunOut;
+            return m.kind == Kind::Spread || m.kind == Kind::RunOut || m.IsCluster();
+        }
+
+        // How a mechanic is drawn: Shape = the hitbox's pieces (shape kinds, and a Stack/Soak of any shape but a
+        // circle, M3 B1, in the get-in color); Carriers = rings on players; GetIn = a disc on the anchor (Stack/Soak
+        // circles) or on each spot (Spot); None = no marker (Bait, HoldStill).
+        enum class DrawPath : uint8
+        {
+            Shape,
+            Carriers,
+            GetIn,
+            None
+        };
+
+        DrawPath DrawPathOf(ActiveMechanic const& m)
+        {
+            if (m.IsShapeKind())
+                return DrawPath::Shape;
+            if (IsCarrierKind(m))
+                return DrawPath::Carriers;
+            switch (m.kind)
+            {
+                case Kind::Stack:
+                case Kind::Soak:
+                    return m.shape.type == ShapeType::Circle ? DrawPath::GetIn : DrawPath::Shape;
+                case Kind::Spot:
+                    return DrawPath::GetIn;
+                default:
+                    return DrawPath::None;
+            }
+        }
+
+        // The players a carrier-path mechanic draws its rings on.
+        std::vector<ObjectGuid> RingHosts(Registry const& reg, ActiveMechanic const& m)
+        {
+            return m.IsCluster() ? reg.EligiblePlayers(m) : reg.Carriers(m);
         }
 
         bool IsRunOutFromOwner(ActiveMechanic const& m)
@@ -624,7 +660,7 @@ namespace BossMechanics::Telegraph
 
         void SyncCarriers(Map* map, TelegraphState& state, Registry const& reg, ActiveMechanic& m)
         {
-            std::vector<ObjectGuid> const carriers = reg.Carriers(m);
+            std::vector<ObjectGuid> const carriers = RingHosts(reg, m);
             std::vector<CarrierHost> const hosts = CarrierHosts(m, carriers);
             Unit* owner = FindUnit(map, m.owner);
 
@@ -825,7 +861,7 @@ namespace BossMechanics::Telegraph
         {
             ModuleConfig const& cfg = GetConfig();
             Shape shape = Shape::Circle(m.shape.radius);
-            if (m.kind == Kind::Zone || m.kind == Kind::Frontal)
+            if (DrawPathOf(m) == DrawPath::Shape)
             {
                 Geo::Pose pose;
                 shape = DrawnShape(reg, m, now, pose);
@@ -855,10 +891,9 @@ namespace BossMechanics::Telegraph
                 return pick;
             };
 
-            switch (m.kind)
+            switch (DrawPathOf(m))
             {
-                case Kind::Zone:
-                case Kind::Frontal:
+                case DrawPath::Shape:
                 {
                     Geo::Pose pose;
                     Shape const shape = DrawnShape(reg, m, now, pose);
@@ -873,9 +908,7 @@ namespace BossMechanics::Telegraph
                             ObjectGuid::Empty, ms.fillStepMs);
                     break;
                 }
-                case Kind::Stack:
-                case Kind::Soak:
-                case Kind::Spot:
+                case DrawPath::GetIn:
                 {
                     VisualPick const pick = pickFor(Shape::Circle(m.shape.radius), nullptr);
                     if (pick.pieces.empty())
@@ -897,8 +930,7 @@ namespace BossMechanics::Telegraph
                     }
                     break;
                 }
-                case Kind::Spread:
-                case Kind::RunOut:
+                case DrawPath::Carriers:
                 {
                     VisualPick const pick = pickFor(Shape::Circle(m.shape.radius), nullptr);
                     if (pick.pieces.empty())
@@ -931,8 +963,7 @@ namespace BossMechanics::Telegraph
                     }
                     break;
                 }
-                case Kind::Bait:
-                case Kind::HoldStill:
+                case DrawPath::None:
                     break;
             }
 
@@ -1035,23 +1066,18 @@ namespace BossMechanics::Telegraph
         ms.fillStepMs = FillStepFor(*reg, m, now);
         ms.nextFillAt = now + Milliseconds(ms.fillStepMs);
 
-        switch (m.kind)
+        switch (DrawPathOf(m))
         {
-            case Kind::Zone:
-            case Kind::Frontal:
+            case DrawPath::Shape:
                 SyncShapePieces(map, state, *reg, m, now, true);
                 break;
-            case Kind::Spread:
-            case Kind::RunOut:
+            case DrawPath::Carriers:
                 SyncCarriers(map, state, *reg, m);
                 break;
-            case Kind::Stack:
-            case Kind::Soak:
-            case Kind::Spot:
+            case DrawPath::GetIn:
                 SpawnGetIn(map, state, *reg, m);
                 break;
-            case Kind::Bait:
-            case Kind::HoldStill:
+            case DrawPath::None:
                 break;
         }
         if (FillApplies(m))
@@ -1077,23 +1103,18 @@ namespace BossMechanics::Telegraph
         if (IsDynamic(m) && now >= state.mechanics[m.id].nextFollowAt)
         {
             state.mechanics[m.id].nextFollowAt = now + Milliseconds(cfg.followIntervalMs);
-            switch (m.kind)
+            switch (DrawPathOf(m))
             {
-                case Kind::Zone:
-                case Kind::Frontal:
+                case DrawPath::Shape:
                     SyncShapePieces(map, state, *reg, m, now, false);
                     break;
-                case Kind::Spread:
-                case Kind::RunOut:
+                case DrawPath::Carriers:
                     SyncCarriers(map, state, *reg, m);
                     break;
-                case Kind::Stack:
-                case Kind::Soak:
-                    FollowGetIn(map, state, *reg, m);
+                case DrawPath::GetIn:
+                    FollowGetIn(map, state, *reg, m);     // Stack/Soak on a unit; Spot never moves
                     break;
-                case Kind::Spot:
-                case Kind::Bait:
-                case Kind::HoldStill:
+                case DrawPath::None:
                     break;
             }
         }
