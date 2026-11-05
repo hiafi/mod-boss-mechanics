@@ -629,12 +629,13 @@ namespace
     // else the M4 build on a 100 ms map update (path check only, a brain step every 200 ms). The role-band release
     // (RoleSlackMs 1 s) runs in both.
     std::uint32_t RunOutOfBoundsChase(Ms regDelay, bool fixed, std::uint32_t* endStops = nullptr,
-        float* deepest = nullptr, bool valveWindow = true, std::uint32_t* releases = nullptr)
+        float* deepest = nullptr, bool valveWindow = true, std::uint32_t* releases = nullptr, bool walkIn = true)
     {
         Fight f(false);
         f.w.cfg.watchEndCheck = fixed;
         f.w.cfg.chaseLanding = fixed;
         f.w.cfg.chaseValveWindow = valveWindow;
+        f.w.cfg.walkIn = walkIn;
         f.w.cfg.brainCadence = Ms(fixed ? 100 : 200);
         f.w.cfg.roleSlack = Ms(1000);
         // On the desks' 12 yd ring round the group, so the centroid (the circle's center) lies near the boss.
@@ -844,6 +845,7 @@ namespace
         f.w.cfg.chaseRecovery = !asBuilt;
         f.w.cfg.bandBlock = !asBuilt;
         f.w.cfg.chaseRelease = asBuilt ? Ms(0) : releaseMs;
+        f.w.cfg.strandRoute = !asBuilt;
         f.w.cfg.roleSlack = Ms(1000);
         for (std::size_t i = 0; i < 5; ++i)
             f.w.bots[i].pos = i == me ? start : At(30.f, 90.f + 20.f * static_cast<float>(i));
@@ -963,19 +965,311 @@ namespace
         CHECK(tank.firstInReach >= Ms(1500) && tank.firstInReach < on.firstInReach);
         CHECK(tank.hits == 0);
 
-        // alexei's Out of bounds with the plain valve, and with its window.
+        // alexei's Out of bounds with the plain valve (a blind release, WP-F2 before its window), with its window,
+        // and with the plain valve's walk-in alone (M5 CD: the walk-in sees the circle within its short horizon).
         std::uint32_t plain = 0;
         std::uint32_t windowed = 0;
+        std::uint32_t plainWalkIn = 0;
         std::uint32_t plainReleases = 0;
         for (int d = 0; d < 2000; d += 100)
         {
-            plain += RunOutOfBoundsChase(Ms(d), true, nullptr, nullptr, false, &plainReleases);
+            plain += RunOutOfBoundsChase(Ms(d), true, nullptr, nullptr, false, &plainReleases, false);
             windowed += RunOutOfBoundsChase(Ms(d), true, nullptr, nullptr, true);
+            plainWalkIn += RunOutOfBoundsChase(Ms(d), true, nullptr, nullptr, false);
         }
         std::printf("alexei out of bounds + hold still, 20 phases: %u bots in the circle with a plain valve (%u "
-            "releases), %u with its window\n", plain, plainReleases, windowed);
+            "releases), %u with its window, %u with the plain valve's walk-in\n", plain, plainReleases, windowed,
+            plainWalkIn);
         CHECK(plain > 0);
         CHECK(windowed == 0);
+        CHECK(plainWalkIn == 0);
+    }
+
+    // ---- M5 CD (STAGE-M5-CD-REPORT fix spec A, C, D): the walk-in, the stranding clock, facing in Escape ------------
+
+    struct WalkInRun
+    {
+        std::uint32_t hits = 0;
+        std::uint32_t msInReach = 0;
+        Ms valveAt{ -1 };               // from kStart; -1 = the valve never opened
+        BrainModel::Counters c;
+    };
+
+    // fight_test TestValveWalkIn (STAGE-M5-CD-REPORT `c3release`): a melee bot 9 yd out at 160 degrees, the whole
+    // melee ring under a circle 6 over the boss hot 10-12 s (TestChaseValve's zone), so the valve opens at 3 s; a live
+    // melee range (band 4.5, the chase to 4). `donut`: a 3/8 donut 0.4 yd off the bot registered as the valve opens
+    // (2 s warning); else an armed mine (r 2) on its chase line, 3.5 yd from the boss. `walkIn` false: the WP-F2
+    // valve, a blind release.
+    WalkInRun RunWalkIn(bool walkIn, bool donut)
+    {
+        Fight f(false);
+        std::size_t const me = 2;
+        f.melee = { { false, false, true, false, false } };
+        f.meleeYd = 4.5f;
+        f.chaseYd = 4.f;
+        f.w.cfg.chaseLanding = true;
+        f.w.cfg.roleSlack = Ms(1000);
+        f.w.cfg.walkIn = walkIn;
+        f.w.cfg.strandRoute = walkIn;
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = i == me ? At(9.f, 160.f) : At(30.f, 90.f + 20.f * static_cast<float>(i));
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        Solver::Hazard zone;
+        zone.id = 21;
+        zone.shape = Shape::Circle(6.f);
+        zone.poses = { Pose{} };
+        zone.marginYd = kMargin;
+        zone.timing = Solver::MakeInterval(kStart + Ms(10000), kStart + Ms(12000));
+        f.w.AddHazard(zone);
+        if (!donut)
+        {
+            Solver::Hazard mine;
+            mine.id = 22;
+            mine.shape = Shape::Circle(2.f);
+            Vec3 const c = At(3.5f, 160.f);
+            mine.poses = { Pose{ c.x, c.y, 0.f, 0.f } };
+            mine.marginYd = kMargin;
+            mine.timing = Solver::MakeMineArmed(kStart - Ms(5000), kStart + Ms(30000), Ms(500));
+            f.w.AddHazard(mine);
+        }
+        WalkInRun r;
+        bool added = false;
+        f.Run(kStart, kStart + Ms(9500), [&](Ms now)
+        {
+            if (!donut || added || r.valveAt < Ms(0))
+                return;
+            // Registered on the update after the valve opened (Registry::Tick runs after the players).
+            Vec3 const p = f.w.bots[me].pos;
+            Solver::Hazard d;
+            d.id = 23;
+            d.shape = Shape::Donut(3.f, 8.f);
+            d.poses = { Pose{ p.x + 0.4f, p.y, 0.f, 0.f } };
+            d.marginYd = kMargin;
+            d.timing = Solver::MakeInstant(now + Ms(2000), Ms(500));
+            f.w.AddHazard(d);
+            added = true;
+        }, [&](Ms now)
+        {
+            if (r.valveAt < Ms(0) && f.w.bots[me].c.chaseReleases > 0)
+                r.valveAt = now - kStart;
+            if (Dist(f.w.bots[me].pos, f.boss) <= f.meleeYd + 0.5f)
+                r.msInReach += 100;
+        });
+        r.hits = f.w.bots[me].c.hits;
+        r.c = f.w.bots[me].c;
+        return r;
+    }
+
+    void TestValveWalkIn()
+    {
+        WalkInRun const donutBefore = RunWalkIn(false, true);
+        WalkInRun const donutAfter = RunWalkIn(true, true);
+        WalkInRun const mineBefore = RunWalkIn(false, false);
+        WalkInRun const mineAfter = RunWalkIn(true, false);
+        std::printf("chase valve, donut on the melee as the valve opens: blind release hits %u (in reach %u ms, valve "
+            "at %lld ms), walk-in hits %u (in reach %u ms, valve at %lld ms); armed mine on its chase line: hits %u / "
+            "%u (in reach %u / %u ms, stranded %u / %u ms, strand routes %u)\n", donutBefore.hits,
+            donutBefore.msInReach, static_cast<long long>(donutBefore.valveAt.count()), donutAfter.hits,
+            donutAfter.msInReach, static_cast<long long>(donutAfter.valveAt.count()), mineBefore.hits,
+            mineAfter.hits, mineBefore.msInReach, mineAfter.msInReach, mineBefore.c.msChaseStranded,
+            mineAfter.c.msChaseStranded, mineAfter.c.strandRoutes);
+        CHECK(donutBefore.valveAt >= Ms(2500) && donutBefore.valveAt <= Ms(3500));
+        CHECK(donutAfter.valveAt >= Ms(2500) && donutAfter.valveAt <= Ms(3500));
+        CHECK(donutBefore.hits == 1);
+        CHECK(donutAfter.hits == 0);
+        CHECK(mineBefore.hits == 1);
+        CHECK(mineAfter.hits == 0);
+    }
+
+    // fight_test TestChaseLineMine (STAGE-M5-CD-REPORT `c5mine`, C5 source 3): a melee bot `startYd` out at 160
+    // degrees, an armed mine (r 2) 3.5 yd from the boss on its chase line, the rest of the ring clear, 20 s. As built
+    // the chase walks into the mine's margin, the brain solves out and holds, again and again: never in reach, and the
+    // refusal clock sees nothing. The stranding clock counts it, the strand route walks round the mine.
+    WalkInRun RunChaseLineMine(float startYd, bool fixed, std::uint32_t* longestStranded = nullptr)
+    {
+        Fight f(false);
+        std::size_t const me = 2;
+        f.melee = { { false, false, true, false, false } };
+        f.meleeYd = 4.5f;
+        f.chaseYd = 4.f;
+        f.w.cfg.chaseLanding = true;
+        f.w.cfg.roleSlack = Ms(1000);
+        f.w.cfg.walkIn = fixed;
+        f.w.cfg.strandRoute = fixed;
+        for (std::size_t i = 0; i < 5; ++i)
+            f.w.bots[i].pos = i == me ? At(startYd, 160.f) : At(30.f, 90.f + 20.f * static_cast<float>(i));
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        Solver::Hazard mine;
+        mine.id = 24;
+        mine.shape = Shape::Circle(2.f);
+        Vec3 const c = At(3.5f, 160.f);
+        mine.poses = { Pose{ c.x, c.y, 0.f, 0.f } };
+        mine.marginYd = kMargin;
+        mine.timing = Solver::MakeMineArmed(kStart - Ms(5000), kStart + Ms(30000), Ms(500));
+        f.w.AddHazard(mine);
+        WalkInRun r;
+        std::uint32_t run = 0;
+        std::uint32_t prev = 0;
+        f.Run(kStart, kStart + Ms(20000), [&](Ms) { prev = f.w.bots[me].c.msChaseStranded; }, [&](Ms)
+        {
+            run = f.w.bots[me].c.msChaseStranded > prev ? run + 100 : 0;
+            if (longestStranded)
+                *longestStranded = std::max(*longestStranded, run);
+            if (Dist(f.w.bots[me].pos, f.boss) <= f.meleeYd + 0.5f)
+                r.msInReach += 100;
+        });
+        r.hits = f.w.bots[me].c.hits;
+        r.c = f.w.bots[me].c;
+        return r;
+    }
+
+    void TestChaseLineMine()
+    {
+        std::uint32_t longest = 0;
+        WalkInRun const before = RunChaseLineMine(6.5f, false);
+        WalkInRun const after = RunChaseLineMine(6.5f, true, &longest);
+        std::printf("melee 6.5 yd out, an armed mine on its chase line, 20 s: as built in reach %u ms, stranded %u ms, "
+            "refused %u ms, hits %u; fixed in reach %u ms, stranded %u ms (longest run %u ms), %u strand routes, hits "
+            "%u\n", before.msInReach, before.c.msChaseStranded, before.c.msChaseRefused, before.hits, after.msInReach,
+            after.c.msChaseStranded, longest, after.c.strandRoutes, after.hits);
+        CHECK(before.msInReach == 0);
+        CHECK(before.c.msChaseStranded >= 10000);
+        CHECK(before.c.strandRoutes == 0);
+        CHECK(after.msInReach >= 15000);
+        CHECK(after.c.msChaseStranded <= 3000 + 500);
+        CHECK(longest <= 3000 + 500);
+        CHECK(after.c.strandRoutes >= 1);
+        CHECK(before.hits == 0);
+        CHECK(after.hits == 0);
+        // From farther out the band re-route already walks round the mine: nothing stranded either way.
+        for (float startYd : { 8.f, 10.f, 14.f })
+        {
+            WalkInRun const b = RunChaseLineMine(startYd, false);
+            WalkInRun const a = RunChaseLineMine(startYd, true);
+            std::printf("  from %.0f yd: in reach %u / %u ms, stranded %u / %u ms, strand routes %u, hits %u / %u\n",
+                startYd, b.msInReach, a.msInReach, b.c.msChaseStranded, a.c.msChaseStranded, a.c.strandRoutes, b.hits,
+                a.hits);
+            CHECK(a.c.msChaseStranded == 0);
+            CHECK(a.c.strandRoutes == 0);
+            CHECK(a.msInReach >= 15000);
+            CHECK(a.hits == 0);
+        }
+        // The whole ring blocked (TestChaseValve's zone, over its life): no stranding, by design.
+        Solver::Hazard zone;
+        zone.id = 25;
+        zone.shape = Shape::Circle(6.f);
+        zone.poses = { Pose{} };
+        zone.marginYd = kMargin;
+        zone.timing = Solver::MakeInterval(kStart + Ms(10000), kStart + Ms(12000));
+        ReturnRun const valve = RunReturn({ zone }, At(14.f, 160.f), false, Ms(3000), Ms(12000));
+        std::printf("  whole ring under a zone warned 10 s: stranded %u ms\n", valve.c.msChaseStranded);
+        CHECK(valve.c.msChaseStranded == 0);
+    }
+
+    // C6: a melee bot at the boss, a circle on the boss warned 2 s: it escapes straight away from its target, where
+    // stock `set facing` ("not facing target") runs on every AI tick unless the lock refuses it in Escape.
+    BrainModel::Counters RunEscapeFacing(bool rule)
+    {
+        Fight f(false);
+        f.w.cfg.escapeFacingBlock = rule;
+        f.w.kinds = [&f](std::size_t i, Solver::Input& in, Ms, std::vector<Task>&) { f.Band(i, in); };
+        Solver::Hazard zone;
+        zone.id = 26;
+        zone.shape = Shape::Circle(8.f);
+        zone.poses = { Pose{} };
+        zone.marginYd = kMargin;
+        zone.timing = Solver::MakeInstant(kStart + Ms(2000), Ms(500));
+        f.w.AddHazard(zone);
+        f.Run(kStart, kStart + Ms(4000), nullptr, nullptr);
+        return f.w.Total();
+    }
+
+    void TestEscapeFacing()
+    {
+        BrainModel::Counters const off = RunEscapeFacing(false);
+        BrainModel::Counters const on = RunEscapeFacing(true);
+        std::printf("melee escaping a circle on the boss: `set facing` runs in Escape %u without the rule, %u with it "
+            "(%u refused); hits %u / %u\n", off.escapeFacingRuns, on.escapeFacingRuns, on.escapeFacingBlocks,
+            off.hits, on.hits);
+        CHECK(off.escapeFacingRuns > 0);
+        CHECK(on.escapeFacingRuns == 0);
+        CHECK(on.escapeFacingBlocks == off.escapeFacingRuns);
+        CHECK(off.hits == on.hits);
+        // The rule itself: Escape or look-away refuse, standing allows.
+        CHECK(LockRules::FacingOnlyRefused(true, false));
+        CHECK(!LockRules::FacingOnlyRefused(false, false));
+    }
+
+    // M5 CD (C3 B, the `cd-c3-l0b` rerun): two ranged bots (no band) `apart` yd apart at `bearingDeg`, the m4 seed-5
+    // shot order on them: t 0 a donut 3/8 on A (0.26 yd off), t 3.6 s a donut on B, t 4.5 s a circle 3.8 on A, t 5.4 s
+    // a donut on A; 2 s warnings, margin 0.75. As built B escapes A's donut into its hole, onto A, and the later
+    // shots catch both. With the spacing term it leaves the ring outward instead. Returns the hits; `fallbacks` and
+    // `stacked` (the pair within 3 yd after 2.5 s) add up.
+    std::uint32_t RunRangedPair(float apart, float bearingDeg, bool spacing, std::uint32_t& fallbacks,
+        std::uint32_t& stacked)
+    {
+        BrainModel::World w;
+        w.cfg.standing = spacing;
+        BrainModel::Bot a;
+        a.pos = {};
+        w.bots.push_back(a);
+        BrainModel::Bot b;
+        b.pos = At(apart, bearingDeg);
+        w.bots.push_back(b);
+        auto add = [&w](std::uint32_t id, Shape const& shape, Vec3 const& c, Ms at)
+        {
+            Solver::Hazard h;
+            h.id = id;
+            h.shape = shape;
+            h.poses = { Pose{ c.x, c.y, 0.f, 0.f } };
+            h.marginYd = kMargin;
+            h.timing = Solver::MakeInstant(at + Ms(2000), Ms(500));
+            w.AddHazard(h);
+        };
+        float nearest = 100.f;
+        for (Ms now = kStart; now < kStart + Ms(9000); now += w.cfg.step)
+        {
+            Ms const t = now - kStart;
+            Vec3 const pa = w.bots[0].pos;
+            Vec3 const pb = w.bots[1].pos;
+            if (t == Ms(0))
+                add(31, Shape::Donut(3.f, 8.f), { pa.x + 0.16f, pa.y - 0.2f, 0.f }, now);
+            if (t == Ms(3600))
+                add(32, Shape::Donut(3.f, 8.f), { pb.x - 0.06f, pb.y - 0.5f, 0.f }, now);
+            if (t == Ms(4500))
+                add(33, Shape::Circle(3.8f), pa, now);
+            if (t == Ms(5400))
+                add(34, Shape::Donut(3.f, 8.f), { pa.x + 0.14f, pa.y - 0.25f, 0.f }, now);
+            w.Step(now);
+            if (t >= Ms(2500))
+                nearest = std::min(nearest, Dist(w.bots[0].pos, w.bots[1].pos));
+        }
+        fallbacks += w.bots[0].c.Fallbacks() + w.bots[1].c.Fallbacks();
+        stacked += nearest < 3.f;
+        return w.bots[0].c.hits + w.bots[1].c.hits;
+    }
+
+    void TestRangedPairBarrage()
+    {
+        std::array<std::uint32_t, 2> hits{};
+        std::array<std::uint32_t, 2> fallbacks{};
+        std::array<std::uint32_t, 2> stacked{};
+        std::uint32_t runs = 0;
+        for (float apart : { 4.f, 5.f, 6.f, 7.f, 8.f })
+            for (int bearing = 0; bearing < 360; bearing += 30)
+            {
+                ++runs;
+                for (int arm = 0; arm < 2; ++arm)
+                    hits[arm] += RunRangedPair(apart, static_cast<float>(bearing), arm == 1, fallbacks[arm],
+                        stacked[arm]);
+            }
+        std::printf("two ranged bots 4-8 yd apart, the seed-5 shot order, %u starts: as built hits %u, fallbacks %u, "
+            "stacked %u; spacing hits %u, fallbacks %u, stacked %u\n", runs, hits[0], fallbacks[0], stacked[0],
+            hits[1], fallbacks[1], stacked[1]);
+        CHECK(hits[0] > 0);
+        CHECK(hits[1] == 0);
+        CHECK(stacked[1] == 0);
+        CHECK(fallbacks[1] < fallbacks[0]);
     }
 
     // ---- WP-F2 (STAGE-M4-R2-REPORT M-2): the band re-route of a ranged bot too close to its target -----------------
@@ -1128,6 +1422,117 @@ namespace
         CHECK(after.c.solves < before.c.solves || before.c.solves == 0);
         CHECK(after.c.motionStops <= 1);
         CHECK(after.hits == 0);
+    }
+
+    // ---- WP-Q3: m4-q3/q4 Hit Spread/3, Killing Spree through smite's Harpoon Volley -----------------------------
+
+    struct SpreeRun
+    {
+        std::uint32_t hits = 0;     // Spread hits (both members of a pair within 6 yd count)
+        BrainModel::Counters c;
+    };
+
+    // `spread 6 2500 role=nontank` with the two reference melee (bots 2 and 4) 2.4 yd apart by the boss. As in
+    // m4-q3diag-s3: the lock refused Combat's Killing Spree while smite's cones were warned and let it through in the
+    // gap after the rear cone, one AI tick before the Spread's warning; its hits (one teleport each next to the boss
+    // every 500 ms, 2.5 s for 5 combo points) put the rogue back beside Arms through its escape, and both took the
+    // Spread. `spree`: the rogue casts it; `breakAura`: the brain cancels it once it escapes or holds
+    // (LockRules::MoverAuraBreaks).
+    SpreeRun RunSpreeSpread(bool spree, bool breakAura)
+    {
+        Fight f(false);
+        f.w.cfg.moverAuraBreak = breakAura;
+        Ms const resolve = kStart + Ms(2500);
+        Ms const to = resolve + Ms(500);
+        Solver::Timing const timing = Solver::MakeInstant(resolve, to - resolve);
+        std::array<bool, 5> published{};
+        bool active = false;
+        auto eligible = [](std::size_t j) { return j != 0; };
+        f.w.kinds = [&](std::size_t i, Solver::Input& in, Ms now, std::vector<Task>& tasks)
+        {
+            f.Band(i, in);
+            if (!active || to + in.params.marginMs < now || !eligible(i))
+                return;
+            // My circle: no other non-tank inside (the carrier's side)...
+            std::vector<std::uint32_t> allies;
+            for (std::size_t j = 0; j < 5; ++j)
+                if (j != i && eligible(j))
+                {
+                    float slack = 0.f;
+                    Vec3 const p = f.w.SpotOf(j, slack);
+                    in.allies.push_back({ static_cast<std::uint32_t>(j + 1), p, slack });
+                    allies.push_back(static_cast<std::uint32_t>(in.allies.size() - 1));
+                }
+            in.carried.push_back(VR::CarriedCircle(3, 6.f, 10.f, kMargin, timing, std::move(allies)));
+            // ...and every other carrier's circle at its published spot (the avoider's side).
+            for (std::size_t j = 0; j < 5; ++j)
+            {
+                VR::Spot s;
+                if (j != i && eligible(j) && f.OtherSpot(j, published[j], true, s))
+                    in.hazards.push_back(VR::CarrierHazard(3, 6.f, 10.f, s, kMargin, timing));
+            }
+            tasks.push_back({ 3, to, true });
+        };
+        f.w.onSolve = [&](BrainModel::Bot const& b, Solver::Input const&, Solver::Plan const&,
+            BrainModel::World::SolveAt)
+        {
+            published[static_cast<std::size_t>(&b - f.w.bots.data())] = true;
+        };
+        // Killing Spree's teleport: next to the boss on the rogue's side, inside Arms' circle.
+        f.w.moverHop = [&](std::size_t i, Vec3& p)
+        {
+            if (i != 4)
+                return false;
+            p = At(1.5f, 200.f);
+            return true;
+        };
+        if (spree)
+        {
+            // Cast at -0.1 s: its 5 hits teleport at +0.4, 0.9, 1.4, 1.9 and 2.4 s, the last one 0.1 s before the
+            // Spread resolves.
+            f.w.bots[4].moverAuraUntil = kStart + Ms(2401);
+            f.w.bots[4].nextMoverHopAt = kStart + Ms(400);
+        }
+        SpreeRun r;
+        auto before = [&](Ms now)
+        {
+            if (now == kStart)
+            {
+                active = true;
+                ++f.w.revision;
+            }
+        };
+        auto after = [&](Ms now)
+        {
+            if (resolve <= now || resolve > now + f.w.cfg.step)
+                return;
+            for (std::size_t j = 1; j < 5; ++j)
+                for (std::size_t k = 1; k < 5; ++k)
+                    if (k != j && Dist(f.w.bots[k].pos, f.w.bots[j].pos) <= 6.f)
+                    {
+                        ++r.hits;
+                        break;
+                    }
+        };
+        f.Run(kStart - Ms(1000), kStart + Ms(4000), before, after);
+        r.c = f.w.Total();
+        return r;
+    }
+
+    void TestKillingSpreeSpread()
+    {
+        SpreeRun const none = RunSpreeSpread(false, true);
+        SpreeRun const asBuilt = RunSpreeSpread(true, false);
+        SpreeRun const fixed = RunSpreeSpread(true, true);
+        std::printf("spread 6 on the non-tanks, Killing Spree cast 0.1 s before the warning: no spree %u hits; "
+            "WP-F2 %u hits (%u hops); WP-Q3 %u hits (%u hops, %u cancelled)\n", none.hits, asBuilt.hits,
+            asBuilt.c.moverHops, fixed.hits, fixed.c.moverHops, fixed.c.moverBreaks);
+        CHECK(none.hits == 0);
+        CHECK(asBuilt.hits >= 2);       // the rogue and Arms, as in the sweep
+        CHECK(asBuilt.c.moverHops >= 4);
+        CHECK(fixed.hits == 0);
+        CHECK(fixed.c.moverBreaks == 1);
+        CHECK(fixed.c.moverHops == 0);  // cancelled on the brain step that saw the warning
     }
 
     // ---- G7: solve cost --------------------------------------------------------------------------------------
@@ -1457,9 +1862,14 @@ int main(int argc, char** argv)
     TestRingChase();
     TestFrontalChase();
     TestChaseValve();
+    TestValveWalkIn();
+    TestChaseLineMine();
+    TestEscapeFacing();
+    TestRangedPairBarrage();
     TestHunterFlee();
     TestHealerToPatient();
     TestRingHazardCreep();
+    TestKillingSpreeSpread();
     TestG7Exact();
     Bench(true);
     return Report("fight_test");

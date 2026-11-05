@@ -31,6 +31,12 @@
  * anyone may start one on an idle dummy and read the report. GMs also have `.mech dummy <program|stop|report>
  * [dmg=<n>|dmg=pct]` on the selected dummy (HandleMechDummyCommand). A program entry that fails is whispered to the
  * scope player (and logged).
+ *
+ * M5 (STAGE-M5-HANDOFF §3.6, WP-K): the Descriptor Training Dummy (300403) runs this same AI under a second entry. Its
+ * template has the reworked bosses' immunities (-273: stun-immune, but kickable and tauntable), so its program's
+ * `cast` entries are boss casts the bots kick. Its default program is the descriptor loop (Drill::kDescriptorProgram)
+ * and its gossip offers the descriptor drills (MechanicDescriptorDrills.h) instead of the M4 drills and damage choices;
+ * 300402 and its menu are unchanged.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DUMMY_AI_H
@@ -112,8 +118,8 @@ namespace BossMechanics
         std::vector<std::string> _lastReport;   // the ledger of the last ended fight
     };
 
-    // `.mech dummy <program|stop|report> [dmg=<n>|dmg=pct]` on the selected training dummy (MechanicCommand.cpp's
-    // table).
+    // `.mech dummy <program|stop|report> [dmg=<n>|dmg=pct]` on the selected training dummy, 300402 or 300403
+    // (MechanicCommand.cpp's table).
     bool HandleMechDummyCommand(ChatHandler* handler, Acore::ChatCommands::Tail args);
 }
 

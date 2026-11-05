@@ -1,6 +1,7 @@
 /*
- * mod-boss-mechanics: npc_boss_mechanics_dummy (Mechanics Training Dummy 300402, STAGE-M4-HANDOFF §3.2, WP-K).
- * See MechanicDummyAI.h for the behavior; the program runner is MechanicDrillRunner.h.
+ * mod-boss-mechanics: npc_boss_mechanics_dummy (Mechanics Training Dummy 300402, STAGE-M4-HANDOFF §3.2, WP-K; and the
+ * Descriptor Training Dummy 300403, STAGE-M5-HANDOFF §3.6, M5 WP-K). See MechanicDummyAI.h for the behavior; the
+ * program runner is MechanicDrillRunner.h, the descriptor drills MechanicDescriptorDrills.h.
  */
 
 #include "MechanicDummyAI.h"
@@ -32,7 +33,8 @@ namespace BossMechanics
     {
         constexpr char const* kLog = "module.bossmechanics";
 
-        // Gossip actions (sender GOSSIP_SENDER_MAIN). A drill pick is kActionDrillFirst + its index in Drill::All().
+        // Gossip actions (sender GOSSIP_SENDER_MAIN). A drill pick is ACTION_DRILL_FIRST + its index in Drill::All();
+        // a descriptor drill pick (300403) ACTION_DESC_DRILL_FIRST + its index in Drill::ProgramDrills().
         enum DummyGossipAction : uint32
         {
             ACTION_MAIN = 1,
@@ -45,7 +47,11 @@ namespace BossMechanics
             ACTION_DAMAGE_PERCENT,
             ACTION_REPORT,
             ACTION_STOP,
-            ACTION_DRILL_FIRST = 100
+            ACTION_PROGRAM_DESCRIPTOR,          // M5, 300403
+            ACTION_PROGRAM_DESCRIPTOR_DRILLS,
+            ACTION_MENU_DESC_DRILLS,
+            ACTION_DRILL_FIRST = 100,
+            ACTION_DESC_DRILL_FIRST = 200
         };
 
         constexpr char const* kProgramAll = "all";
@@ -58,12 +64,20 @@ namespace BossMechanics
             return guid.ToString();
         }
 
+        // The program a dummy starts with: every M4 drill on 300402, the descriptor loop on 300403 (M5).
+        char const* DefaultProgram(uint32 entry)
+        {
+            return entry == Ids::NPC_DESCRIPTOR_DUMMY ? Drill::kDescriptorProgram : kProgramAll;
+        }
+
         std::string DescribeProgram(std::string const& program)
         {
             if (program.empty() || program == kProgramAll)
                 return "every drill, then barrage and minefield";
             if (program == kProgramBarrage)
                 return "barrage only";
+            if (Drill::ProgramDef const* d = Drill::FindProgramDrill(program))
+                return Acore::StringFormat("{} ({})", d->name, d->summary);
             return program;
         }
 
@@ -81,7 +95,8 @@ namespace BossMechanics
         }
     }
 
-    MechanicDummyAI::MechanicDummyAI(Creature* creature) : NullCreatureAI(creature), _program(kProgramAll)
+    MechanicDummyAI::MechanicDummyAI(Creature* creature) : NullCreatureAI(creature),
+        _program(DefaultProgram(creature->GetEntry()))
     {
         // Scheduled once for the creature's life: Check() may evade, and Reset() runs inside that, so Reset() must
         // not touch the scheduler (a CancelAll there would let this task's Repeat schedule a second copy). The drill
@@ -308,9 +323,9 @@ namespace BossMechanics
     bool MechanicDummyAI::Configure(std::string const& program, int32 damage, bool percent, Player* by,
         std::string& err)
     {
-        if (!Drill::ParseProgram(program, err))
+        if (!CheckProgram(program, err))
             return false;
-        _program = program.empty() ? std::string(kProgramAll) : program;
+        _program = program.empty() ? std::string(DefaultProgram(me->GetEntry())) : program;
         _damage = std::max<int32>(damage, 0);
         _percent = percent;
         _stopped = false;
@@ -369,7 +384,7 @@ namespace BossMechanics
     {
         MechanicDummyAI* DummyAI(Creature* creature)
         {
-            if (!creature || creature->GetEntry() != Ids::NPC_MECHANIC_DUMMY)
+            if (!creature || !Ids::IsTrainingDummy(creature->GetEntry()))
                 return nullptr;
             return dynamic_cast<MechanicDummyAI*>(creature->AI());
         }
@@ -386,8 +401,54 @@ namespace BossMechanics
                 Tell(me, player, line);
         }
 
+        // The Descriptor Training Dummy's menu (300403, M5): the descriptor loop, every descriptor drill in turn, one
+        // descriptor drill, the report and stop. Its programs deal no `.mech test` damage, so it has no damage menu.
+        void SendDescriptorMainMenu(Player* player, Creature* creature, MechanicDummyAI const& ai)
+        {
+            ClearGossipMenuFor(player);
+            std::string const& p = ai.Program();
+            auto mark = [](bool on) { return on ? " (current)" : ""; };
+            Drill::ProgramDef const* current = Drill::FindProgramDrill(p);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, Acore::StringFormat("Program: every list at once (60 s "
+                "loop){}", mark(p == Drill::kDescriptorProgram)), GOSSIP_SENDER_MAIN, ACTION_PROGRAM_DESCRIPTOR);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, Acore::StringFormat("Program: every descriptor drill in "
+                "turn{}", mark(p == Drill::kDescriptorDrillsProgram)), GOSSIP_SENDER_MAIN,
+                ACTION_PROGRAM_DESCRIPTOR_DRILLS);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, Acore::StringFormat("Program: one descriptor drill...{}",
+                mark(current && current->listed && p != Drill::kDescriptorProgram
+                    && p != Drill::kDescriptorDrillsProgram)), GOSSIP_SENDER_MAIN, ACTION_MENU_DESC_DRILLS);
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Whisper me the failure report", GOSSIP_SENDER_MAIN,
+                ACTION_REPORT);
+            if (ai.Running())
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Stop the program", GOSSIP_SENDER_MAIN, ACTION_STOP);
+            SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
+        }
+
+        void SendDescriptorDrillMenu(Player* player, Creature* creature, MechanicDummyAI const& ai)
+        {
+            ClearGossipMenuFor(player);
+            std::vector<Drill::ProgramDef> const& drills = Drill::ProgramDrills();
+            for (uint32 i = 0; i < drills.size(); ++i)
+            {
+                Drill::ProgramDef const& d = drills[i];
+                if (!d.listed || d.name == std::string_view(Drill::kDescriptorProgram)
+                    || d.name == std::string_view(Drill::kDescriptorDrillsProgram))
+                    continue;
+                AddGossipItemFor(player, GOSSIP_ICON_BATTLE, Acore::StringFormat("{}{}: {}", d.name,
+                    ai.Program() == d.name ? " (current)" : "", d.summary), GOSSIP_SENDER_MAIN,
+                    ACTION_DESC_DRILL_FIRST + i);
+            }
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Back", GOSSIP_SENDER_MAIN, ACTION_MAIN);
+            SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
+        }
+
         void SendMainMenu(Player* player, Creature* creature, MechanicDummyAI const& ai)
         {
+            if (creature->GetEntry() == Ids::NPC_DESCRIPTOR_DUMMY)
+            {
+                SendDescriptorMainMenu(player, creature, ai);
+                return;
+            }
             ClearGossipMenuFor(player);
             std::string const& p = ai.Program();
             auto mark = [](bool on) { return on ? " (current)" : ""; };
@@ -470,9 +531,14 @@ namespace BossMechanics
         if (tokens.empty() || !ai)
         {
             handler->SendErrorMessage("Usage: .mech dummy <program|stop|report> [dmg=<n>|dmg=pct], with a Mechanics "
-                "Training Dummy ({}) selected. Programs: all (default), none, or comma-separated drill names, "
-                "lanes, barrage, minefield and uminefield, each with an optional :<cycles or seconds>.",
-                Ids::NPC_MECHANIC_DUMMY);
+                "Training Dummy ({}) or a Descriptor Training Dummy ({}) selected. Programs: all (the default on {}), "
+                "none, or comma-separated drill names, lanes, barrage, minefield and uminefield, each with an optional "
+                ":<cycles or seconds>, the descriptor drills (descriptor, the default on {}; descriptor-drills, "
+                "interrupts, dispels, purges, targets, ignore and their parts, each with an optional :<runs>), and the "
+                "descriptor entries wait, cast, add, debuff, buff, swap, hold and describe (arguments split by ':', "
+                "e.g. cast:205010:every=4000).",
+                Ids::NPC_MECHANIC_DUMMY, Ids::NPC_DESCRIPTOR_DUMMY, Ids::NPC_MECHANIC_DUMMY,
+                Ids::NPC_DESCRIPTOR_DUMMY);
             return false;
         }
         std::string const what(tokens[0]);
@@ -560,6 +626,15 @@ public:
             case ACTION_MENU_DAMAGE:
                 SendDamageMenu(player, creature, *ai);
                 return true;
+            case ACTION_MENU_DESC_DRILLS:
+                SendDescriptorDrillMenu(player, creature, *ai);
+                return true;
+            case ACTION_PROGRAM_DESCRIPTOR:
+                Apply(player, creature, *ai, Drill::kDescriptorProgram, ai->Damage(), ai->Percent());
+                break;
+            case ACTION_PROGRAM_DESCRIPTOR_DRILLS:
+                Apply(player, creature, *ai, Drill::kDescriptorDrillsProgram, ai->Damage(), ai->Percent());
+                break;
             case ACTION_PROGRAM_ALL:
                 Apply(player, creature, *ai, kProgramAll, ai->Damage(), ai->Percent());
                 break;
@@ -590,7 +665,11 @@ public:
             default:
             {
                 std::vector<Drill::Def> const& drills = Drill::All();
-                if (action >= ACTION_DRILL_FIRST && action - ACTION_DRILL_FIRST < drills.size())
+                std::vector<Drill::ProgramDef> const& descDrills = Drill::ProgramDrills();
+                if (action >= ACTION_DESC_DRILL_FIRST && action - ACTION_DESC_DRILL_FIRST < descDrills.size())
+                    Apply(player, creature, *ai, descDrills[action - ACTION_DESC_DRILL_FIRST].name, ai->Damage(),
+                        ai->Percent());
+                else if (action >= ACTION_DRILL_FIRST && action - ACTION_DRILL_FIRST < drills.size())
                     Apply(player, creature, *ai, drills[action - ACTION_DRILL_FIRST].name, ai->Damage(),
                         ai->Percent());
                 break;

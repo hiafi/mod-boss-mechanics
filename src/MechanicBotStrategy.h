@@ -10,6 +10,9 @@
  * | trigger  | boss mechanic face         | MechanicBotFaceTrigger        | checkInterval 1      |
  * | action   | boss mechanic face         | MechanicBotFaceAction         | ACTION_EMERGENCY + 4 |
  * | (mult.)  | boss mechanic lock         | MechanicBotLockMultiplier     | MechanicBotLock.h    |
+ * | trigger  | boss focus                 | MechanicBotFocusTrigger       | M5 WP-T, see         |
+ * | action   | boss focus                 | MechanicBotFocusAction        | ACTION_RAID + 2      |
+ * | (mult.)  | boss focus                 | MechanicBotFocusMultiplier    | MechanicBotTargets.h |
  *
  * The triggers run the brain (MechanicBotBrain::Update, once per game-time ms) and read the mode it leaves. The
  * move action is a MovementAction so it can use the protected MoveTo; the lock multiplier exempts it by type (and
@@ -55,6 +58,9 @@ public:
     // The base Strategy has no triggers or multipliers of its own: nothing to chain.
     void InitTriggers(std::vector<TriggerNode*>& triggers) override;
     void InitMultipliers(std::vector<Multiplier*>& multipliers) override;
+    // M5 WP-T: the ignored encounter units (MechanicBotTargets.h). Init reads HasTargetExclusions once.
+    bool HasTargetExclusions() const override { return true; }
+    void AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType type) override;
 };
 
 // Escape: active while the plan's move is not under way (not issued yet, re-planned, or the spline ended short).

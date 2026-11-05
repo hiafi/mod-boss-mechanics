@@ -20,8 +20,11 @@
 #include "Map.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotContexts.h"
+#include "MechanicBotDispel.h"
+#include "MechanicBotInterrupt.h"
 #include "MechanicBotLock.h"
 #include "MechanicBotReportHook.h"
+#include "MechanicBotTargets.h"
 #include "MechanicBotView.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
@@ -115,6 +118,7 @@ namespace
         }
         RegisterAll();
         BotLock::InstallSpecificActionGate();
+        BotTargets::InstallTargetFilter();      // M5 WP-T: the ignore list in IsPossibleTarget (fork hook)
         SetBotAfterTick(&BotAfterTick);
         LOG_INFO(kLog, "mod-boss-mechanics: registered the boss-mechanics strategy, triggers, actions and value "
             "into all ten playerbots class contexts");
@@ -259,6 +263,7 @@ public:
     void OnPlayerSpellCast(Player* player, Spell* spell, bool /*skipCheck*/) override
     {
         BotOnSpellCast(player, spell);
+        BotKick::OnBotSpellCast(player, spell);     // M5 WP-I: kicks judged at the cast (MechanicBotInterrupt.h)
     }
 
     void OnPlayerLogin(Player* player) override
@@ -286,6 +291,8 @@ void AddSC_boss_mechanics_bots()
 {
     new BossMechanicsBotWorldScript();
     new BossMechanicsBotPlayerScript();
+    AddSC_boss_mechanics_bot_targets();     // M5 WP-T: damage on ignored units (MechanicBotTargets.cpp)
+    BotDispel::AddScripts();                // M5 WP-P: dispel and purge counts (MechanicBotDispel.cpp)
     SetBotReport(&BotReport);
 }
 

@@ -47,6 +47,12 @@
  * WP-F (STAGE-M4-R-REPORT M-4: it no longer ticks every bot's AI once more after Map::Update); the other sim modes
  * still do, and what that extra step does is sampled by the next update, after Unit::Update.
  *
+ * M5 CD (E, STAGE-M5-I-REPORT question 3): rule 1 also wakes a bot for its boss descriptor (counted in
+ * descriptorWakes): the descriptor's revision moved since the bot's view (LockRules::DescriptorWakeDue), a listed cast
+ * it can kick started (BotKick::WakeSignature), or a listed aura it can cure became urgent on its group
+ * (BotDispel::WakeSignature). Before, a kicker woke only on Registry::Revision() and the fast tick (not Idle), so a
+ * bot with no hazard to mind waited out playerbots' react delay before its kick.
+ *
  * M4 X6 (STAGE-M4-L-REPORT §2.3, WP-X2): a casting bot keeps the look-away facing. The engine of a bot in a
  * PREPARING cast yields, so the face action cannot turn it, and a ground cast left it turned to its point: under an
  * open window (not in Escape) the waker turns it to the look-away facing itself, unless the cast is one the M3 rule
@@ -62,8 +68,11 @@
 #include "Log.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
+#include "MechanicBotDispel.h"
 #include "MechanicBotFacing.h"
+#include "MechanicBotInterrupt.h"
 #include "MechanicBotLock.h"
+#include "MechanicBotTargets.h"
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
@@ -297,6 +306,10 @@ namespace BossMechanics
             if (!st)
                 continue;
             seen.push_back(st);
+            // M5 CD (E): the descriptor revision the bot's view was last built from (AfterTick brings it up to date).
+            uint32 const descriptorSeen = st->descriptor.seenRevision;
+            // M5 WP-T: the ignore list on the bot's attack and its minions, the target clocks (also while it casts).
+            BotTargets::AfterTick(botAI, bot, *st, reg, now);
 
             // M4: mode clocks and leak detectors, from the state the bot's update left (before the waker acts).
             bool const released = BotBrain::Released(botAI, *st, now);
@@ -346,8 +359,24 @@ namespace BossMechanics
                 continue;
             }
 
+            // M5 CD (E): the descriptor's wakes (signatures kept current while the bot does not cast, so a cast or aura
+            // that appeared during its own cast wakes it once the cast is over).
+            bool descriptorWake = LockRules::DescriptorWakeDue(descriptorSeen, st->descriptor.seenRevision,
+                st->descriptor.Active());
+            uint64 const kickSig = BotKick::WakeSignature(bot, *st);
+            uint64 const dispelSig = BotDispel::WakeSignature(bot, *st);
+            descriptorWake = descriptorWake || LockRules::SignatureWakeDue(st->kickWakeSignature, kickSig)
+                || LockRules::SignatureWakeDue(st->dispelWakeSignature, dispelSig);
+            st->kickWakeSignature = kickSig;
+            st->dispelWakeSignature = dispelSig;
+
             if (revision != st->seenRevision || now >= st->nextPerceptionAt)
                 Wake(botAI, *st, now);
+            else if (descriptorWake)
+            {
+                Wake(botAI, *st, now);
+                ++st->counters.descriptorWakes;
+            }
             else if (st->mode != MechanicBotMode::Idle
                 && LockRules::FastTickDue((now - st->lastBrainAt).count(),
                     LockRules::WakeLeadFor(st->wakeLeadMs, gap.count()), fastTick.count()))

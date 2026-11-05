@@ -21,11 +21,14 @@
 #include "MechanicBotCounters.h"
 #include "MechanicBotView.h"
 #include "MechanicCost.h"
+#include "MechanicDescriptorView.h"
 #include "MechanicFallibility.h"
 #include "MechanicGeometry.h"
+#include "MechanicKickRules.h"
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
 #include "MechanicSolver.h"
+#include "MechanicTargetRules.h"
 #include "ObjectGuid.h"
 #include "Value.h"
 #include <array>
@@ -82,7 +85,6 @@ namespace BossMechanics
         Milliseconds escapeChainSince{ 0 };                 // start of an unbroken run of escapes (hard ceiling)
         Milliseconds releaseUntil{ 0 };                     // released: an unsafe spot is not solved until then
         bool releaseForRoot = false;                        // ...and the release ends as soon as the bot can move
-        bool releaseForChase = false;                       // ...by the chase valve (WP-F2): Watch lets its motion be
         bool pendingEscape = false;                         // Watch, spot unsafe, solve deferred: lock as in Escape
         Milliseconds noCastUntil{ 0 };                      // after a cast break: cast-time spells, item uses blocked
         Milliseconds lastCastBreakAt{ 0 };
@@ -157,8 +159,28 @@ namespace BossMechanics
         Milliseconds nextChaseSolveAt{ 0 };                 // ...none before this (one that stayed backs off)
         Milliseconds bandBlockedUntil{ 0 };                 // m-6: no band re-route found; hold, no release before
         uint32 bandBlockedBy = 0;                           // ...the hazard the motion's end failed on
+        // M5 CD (C3 A): the chase valve's walk-in runs until this (0 = none): Watch, horizon capped
+        // (LockRules::WalkInHorizonMs), no valve and no recovery solve meanwhile. Not a release.
+        Milliseconds walkInUntil{ 0 };
+        // M5 CD (C5): the last brain step the bot was within melee range of its target (band + kMeleeBandSlackYd), or
+        // had no melee band (msChaseStranded, the strand route).
+        Milliseconds lastInRangeAt{ 0 };
         Milliseconds wakeAt{ 0 };                           // m-2: the waker's last wake (0 = none pending)
         int64 wakeLeadMs = -1;                              // ...the smallest wake-to-brain delay seen (-1 = none)
+
+        // ---- M5 (STAGE-M5-HANDOFF §3.2, WP-D) ----
+        // The active boss descriptor, its units, prisons and cast notes; WP-I/P/T bring it up to date with
+        // RefreshDescriptorView (a revision compare when nothing changed) and read facts through FactsOf.
+        DescriptorView descriptor;
+        // WP-T: the last focus, the lower-priority and break-out clocks (MechanicBotTargets.cpp).
+        TargetRules::State targets;
+        // WP-I: the kick plan, the hold's inputs and the miss tracking (MechanicBotInterrupt.cpp).
+        Kick::KickState kick;
+        // M5 CD (E): the waker's descriptor signatures at its last look (LockRules::SignatureWakeDue).
+        uint64 kickWakeSignature = 0;
+        uint64 dispelWakeSignature = 0;
+        // M5 WP-F (R m-6): `boss dispel urgent` plans nothing before this (a cast it planned was refused).
+        Milliseconds dispelRetryAt{ 0 };
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

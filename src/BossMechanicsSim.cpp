@@ -8,7 +8,9 @@
 
 #include "BossMechanicsSim.h"
 #include "MechanicBotGuard.h"
+#include "BossMechanicsIds.h"
 #include "Creature.h"
+#include "MechanicDrillPlan.h"
 #include "MechanicDrillRunner.h"
 #include "MechanicRegistry.h"
 
@@ -28,15 +30,39 @@ namespace BossMechanics::Sim
         BossMechanics::SetFailureSink(fn);
     }
 
+    namespace
+    {
+        // M5 WP-F (R M-2): a program with descriptor entries (the `descriptor` slice) is a reworked boss's fight: its
+        // owner takes the reworked bosses' immunities (stun, silence, ...) while it runs, so a Hammer of Justice, a
+        // Bash or a rotation stun on SimTarget (CreatureImmunitiesId -26: stunnable) does not stop the program's
+        // casts as it never would live. The M4 programs keep the owner as it is. StopProgram restores the template's.
+        bool HasDescriptorEntries(std::string_view program)
+        {
+            std::string err;
+            std::optional<Drill::Program> const parsed = Drill::ParseProgram(program, err);
+            if (!parsed)
+                return false;
+            for (Drill::ProgramEntry const& e : parsed->entries)
+                if (e.kind == Drill::EntryKind::Describe)
+                    return true;
+            return false;
+        }
+    }
+
     bool StartProgram(Creature* owner, ObjectGuid scopePlayer, std::string_view program, DrillOptions const& opt,
         std::string& err)
     {
-        return BossMechanics::StartProgram(owner, scopePlayer, program, opt, err);
+        bool const started = BossMechanics::StartProgram(owner, scopePlayer, program, opt, err);
+        if (started && owner && HasDescriptorEntries(program))
+            owner->LoadTemplateImmunities(Ids::REWORKED_BOSS_IMMUNITIES);
+        return started;
     }
 
     void StopProgram(Creature* owner)
     {
         BossMechanics::StopProgram(owner);
+        if (owner && owner->GetCreatureTemplate())
+            owner->LoadTemplateImmunities(owner->GetCreatureTemplate()->CreatureImmunitiesId);
     }
 
     ProgramErrors TakeProgramErrors(Creature const* owner)

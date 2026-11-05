@@ -67,6 +67,7 @@ namespace BossMechanics
         // M3 (STAGE-M3-HANDOFF §3.10): the player kinds, tank tasks, healer sight and the route search.
         float humanSlackYd = 1.f;                               // BossMechanics.Bots.HumanSlackYd
         float regionComfortWeight = 1.5f;                       // BossMechanics.Bots.RegionComfortWeight
+        float spacingWeight = 1.5f;                             // BossMechanics.Bots.SpacingWeight (M5 CD)
         float trackSlackYd = 0.75f;                             // BossMechanics.Bots.TrackSlackYd
         float lookAwayMarginDeg = 10.f;                         // BossMechanics.Bots.LookAway.MarginDeg
         bool tankFacingEnable = true;                           // BossMechanics.Bots.TankFacing.Enable

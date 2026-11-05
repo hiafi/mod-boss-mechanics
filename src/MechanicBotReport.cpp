@@ -13,6 +13,9 @@
 #if BOSS_MECHANICS_WITH_BOTS
 
 #include "MechanicBotGate.h"
+#include "MechanicBotDispel.h"
+#include "MechanicBotInterrupt.h"
+#include "MechanicBotTargets.h"
 #include "Chat.h"
 #include "GameTime.h"
 #include "Group.h"
@@ -85,21 +88,24 @@ namespace BossMechanics
             MechanicBotCounters const& c = st->counters;
             auto outcome = [&c](Solver::Outcome o) { return c.outcomes[static_cast<std::size_t>(o)]; };
             uint64 const mean = c.solves ? c.solveUsTotal / c.solves : 0;
+            uint64 const refreshMean = c.solveRefreshes ? c.refreshUsTotal / c.solveRefreshes : 0;
             handler->PSendSysMessage("  solves {} (safe {}, move {} (reduced margin {}), grace {}, fallback {}, "
                 "no path {}), path checks {}, late {} (fallback {}), stuck {}, released {}, motion stops {} (rerouted "
-                "{}), lock {} (moves {}, casts {}), cast breaks {}, wakes {}, solve us last {} max {} mean {}",
+                "{}), lock {} (moves {}, casts {}), cast breaks {}, wakes {} (descriptor {}), solve us last {} max {} "
+                "mean {}, refresh before solve us last {} max {} mean {}",
                 c.solves, outcome(Solver::Outcome::Safe), outcome(Solver::Outcome::Move), c.tightMoves,
                 outcome(Solver::Outcome::GraceMove), outcome(Solver::Outcome::Fallback),
                 outcome(Solver::Outcome::NoPath), c.pathChecks, c.lateArrivals, c.lateFallbacks, c.stuckResolves,
                 c.releases, c.motionStops, c.reroutes, c.lockBlocks, c.lockMoves, c.lockCasts, c.castBreaks, c.wakes,
-                c.solveUsLast, c.solveUsMax, mean);
+                c.descriptorWakes, c.solveUsLast, c.solveUsMax, mean, c.refreshUsLast, c.refreshUsMax, refreshMean);
             // M3: the player kinds, the tank tasks and the route search (STAGE-M3-HANDOFF §3.8 telemetry).
             handler->PSendSysMessage("  m3: carrier solves {}, claim solves {}, pick solves {}, role solves {}, "
-                "violated {}, freezes {}, facings {}, facing blocks {}, facing breaks {}, tank re-facings {} "
-                "(stopped by a warning {}), parks {}, routes {} ({} found, {} failed, us last {} max {}), "
-                "sight rays {}",
+                "violated {}, freezes {}, facings {}, facing blocks {} (in escape {}), facing breaks {}, tank "
+                "re-facings {} (stopped by a warning {}), parks {}, routes {} ({} found, {} failed, us last {} max "
+                "{}), sight rays {}",
                 c.carrierSolves, c.claimSolves, c.pickSolves, c.roleSolves, c.violatedPlans, c.freezes,
-                c.facingsApplied, c.facingBlocks, c.facingBreaks, c.tankRefacings, c.refacingStops, c.parks,
+                c.facingsApplied, c.facingBlocks, c.escapeFacingBlocks, c.facingBreaks, c.tankRefacings,
+                c.refacingStops, c.parks,
                 c.routesFound + c.routesFailed, c.routesFound, c.routesFailed, c.routeUsLast, c.routeUsMax,
                 c.sightRays);
             // M4 (STAGE-M4-HANDOFF §3.5-§3.7, WP-C): mode time, lock leaks (spell x count), the Fallback split by
@@ -137,10 +143,18 @@ namespace BossMechanics
             handler->PSendSysMessage("  m4 routes and bands: region routes {} ({} found), out of band {} ms ({} ms "
                 "with a task)", c.regionRoutes, c.regionRoutesFound, c.msOutOfBand, c.msOutOfBandTask);
             // WP-Q2: unsafe landings refused (gap closers, the melee chase) and Watch motions stopped for their end;
-            // WP-F2: the time out of reach with the chase refused, the safety valve and the recovery solves.
+            // WP-F2: the time out of reach with the chase refused, the safety valve (its walk-ins since M5 CD) and the
+            // recovery solves; M5 CD: the stranding clock and its routes; WP-Q3: the mover auras cancelled.
             handler->PSendSysMessage("  m4 landings: gap closers and chases refused {}, motions stopped for their end "
-                "{}, out of reach with the chase refused {} ms, chases released {}, recovery solves {}",
-                c.landingBlocks, c.motionEndStops, c.msChaseRefused, c.chaseReleases, c.chaseSolves);
+                "{}, out of reach with the chase refused {} ms, chase walk-ins {}, recovery solves {}, stranded {} "
+                "ms (strand routes {}), mover auras cancelled {}", c.landingBlocks, c.motionEndStops, c.msChaseRefused,
+                c.chaseReleases, c.chaseSolves, c.msChaseStranded, c.strandRoutes, c.moverBreaks);
+            // M5 WP-T: the focus and the ignore list (MechanicBotTargets.cpp).
+            handler->PSendSysMessage("  {}", BotTargets::ReportLine(*st));
+            // M5 WP-P: dispels and purges, and which `party member to dispel` the bot holds (MechanicBotDispel.cpp).
+            handler->PSendSysMessage("{}", BotDispel::ReportLine(botAI, *st));
+            // M5 WP-I: kicks, holds, misses and the current kick plan (MechanicBotInterrupt.cpp).
+            handler->PSendSysMessage("{}", BotKick::ReportLine(*st));
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

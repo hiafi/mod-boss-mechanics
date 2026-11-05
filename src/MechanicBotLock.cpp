@@ -26,6 +26,7 @@
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
 #include "MechanicBotState.h"
+#include "MechanicBotTargets.h"
 #include "MechanicLanding.h"
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
@@ -317,7 +318,7 @@ namespace
 
     // WP-F2 (R2 M-1): the melee chase toward `dest` is refused while no point of the melee ring (the bot's melee band
     // round dest) is safe over the horizon. A refusal goes on the chase clock: the brain releases a bot refused for
-    // BossMechanics.Bots.ChaseReleaseMs (the safety valve), and the lock then allows everything (Released). The
+    // BossMechanics.Bots.ChaseReleaseMs (the safety valve, a walk-in on a short horizon since M5 CD). The
     // brain's view (st.input) is current: the brain steps before the engine picks actions in the same AI tick.
     bool ChaseRefused(Player* bot, MechanicBotState& st, Unit* dest, Milliseconds now)
     {
@@ -352,6 +353,8 @@ namespace
         LeakKind leak = LeakKind::None;
         bool pull = false;          // X8: a pull request refused
         bool landing = false;       // WP-Q2: a gap closer (or the melee chase) refused for its landing
+        bool escapeFacing = false;  // M5 CD (C6): a facing-only action refused in Escape (not look-away)
+        bool quiet = false;         // M5 WP-F (R m-1): refused without a count (`boss focus` while the bot walks)
     };
 
     Judgement Allow(bool unknownCast = false)
@@ -404,11 +407,16 @@ namespace
         if (BotBrain::TankOwned(st) && (typeid(*action) == typeid(TankFaceAction) || action->getName() == "tank face"))
             return Blocked(LockVerdict::BlockMove);
         bool const lookAway = BotFacing::LookAwayActive(st, now);
+        // M5 WP-F (R m-1): `boss focus` attacks the descriptor's pick (st.targets.focus), not its target value.
+        bool const focus = dynamic_cast<MechanicBotFocusAction*>(action) != nullptr;
         if (lookAway)
         {
             if (dynamic_cast<SetFacingTargetAction*>(action) || dynamic_cast<CastFacingUnitAction*>(action))
                 return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
             if (IsAttackOnly(action) && BotFacing::WouldTurnAway(bot, st, now, action->GetTarget()))
+                return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
+            if (focus && st.targets.focus.target && BotFacing::WouldTurnAway(bot, st, now,
+                botAI->GetUnit(ObjectGuid(st.targets.focus.target))))
                 return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
         }
 
@@ -419,6 +427,16 @@ namespace
         MechanicBotMode mode = st.mode;
         if (mode == MechanicBotMode::Watch && st.pendingEscape)
             mode = MechanicBotMode::Escape;
+        // M5 CD (C6): a facing-only action while the brain walks the bot (LockRules::FacingOnlyRefused): it would not
+        // stop the escape, but broadcasts a heartbeat that snaps the walk on observers' clients on every AI tick the
+        // bot walks away from its target ("not facing target"), and spends an action slot and a react delay.
+        if (LockRules::FacingOnlyRefused(mode == MechanicBotMode::Escape, false)
+            && (dynamic_cast<SetFacingTargetAction*>(action) || action->getName() == "set facing"))
+        {
+            Judgement j = Blocked(LockVerdict::BlockFacing);
+            j.escapeFacing = true;
+            return j;
+        }
         bool const afterBreak = now < st.noCastUntil;
         bool const frozen = mode == MechanicBotMode::Freeze;
         bool const idleOrWatch = mode == MechanicBotMode::Idle || mode == MechanicBotMode::Watch;
@@ -456,6 +474,19 @@ namespace
         // under look-away).
         bool const castsOnly = mode == MechanicBotMode::Idle || mode == MechanicBotMode::Watch;
 
+        // M5 WP-F (R m-1): `boss focus` is an AttackAction (so a MovementAction) that only picks a target and starts
+        // the swing: allowed where the bot stands (Hold, Freeze), as the stock pickers are; in Escape Attack() would
+        // clear the walk (MotionMaster::Clear), so it waits, uncounted (its trigger stays true every tick of the
+        // escape).
+        if (focus)
+        {
+            if (mode != MechanicBotMode::Escape)
+                return Allow();
+            Judgement j = Blocked(LockVerdict::BlockMove);
+            j.quiet = true;
+            return j;
+        }
+
         // Foreign movers (Freeze: every one, decision §7.4).
         if (IsAttackOnly(action))
             return Allow();
@@ -479,7 +510,8 @@ namespace
         // Spells.
         CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action);
         if (!cast)
-            return Allow();     // facing ("set facing" is a plain Action; blocked above under look-away), items, chat
+            return Allow();     // facing ("set facing" is a plain Action; blocked above under look-away and in
+                                // Escape), items, chat
         uint32 const spellId = CastSpellIdOf(botAI, cast);
         SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
         // The cast target, read once: the look-away test and Ambush's stealth rule need it.
@@ -587,6 +619,8 @@ namespace
     // Counts a judgement: 1 to allow, 0 to drop.
     float CountJudgement(MechanicBotState& st, Judgement const& j)
     {
+        if (j.quiet && j.verdict != LockVerdict::Allow)
+            return 0.f;
         if (j.unknownCast)
             ++st.counters.unknownCasts;
         if (j.pull && j.verdict != LockVerdict::Allow)
@@ -606,9 +640,10 @@ namespace
                 ++st.counters.lockCasts;
                 return 0.f;
             case LockVerdict::BlockFacing:
-                // Look-away (decision §7.6): an action that would turn the bot off its chosen facing.
+                // Look-away (decision §7.6): an action that would turn the bot off its chosen facing; M5 CD (C6): a
+                // facing-only action while the brain walks it.
                 ++st.counters.lockBlocks;
-                ++st.counters.facingBlocks;
+                ++(j.escapeFacing ? st.counters.escapeFacingBlocks : st.counters.facingBlocks);
                 return 0.f;
         }
         return 1.f;

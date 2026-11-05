@@ -9,10 +9,19 @@
  * | 205001-205007 | Resolve damage, one per school: 205001 + SpellSchools value       |
  * | 205008        | Baited (drill): dummy debuff, 10 stacks, 2 min (bait rotation)    |
  * | 205009        | Marked (drill): dummy debuff, 10 stacks, 2 min (drill selector)   |
- * | 205000-205099 | the reserved spell block (`rider=` takes 205008-205099 only)      |
+ * | 205010-205012 | M5 interruptible casts: low / mid / high (2 / 2.5 / 3 s)          |
+ * | 205013        | M5 do-not-kick cast                                               |
+ * | 205014-205017 | M5 dispellable debuffs: Magic, Curse, Poison, Disease             |
+ * | 205018        | M5 urgent loss of control (Magic stun)                            |
+ * | 205019-205020 | M5 deadline debuff (Magic, 8 s) and its expiry burst              |
+ * | 205021-205022 | M5 purgeable Magic buff, Enrage buff (soothe)                     |
+ * | 205023        | M5 "Aiming" aura (raises an add's priority)                       |
+ * | 205000-205099 | the reserved spell block (`rider=` takes 205008 and 205009 only)  |
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
  * | 300402        | Mechanics Training Dummy: runs the drill program on itself (M4)   |
+ * | 300403        | Descriptor Training Dummy: 300402's AI, kickable (M5)             |
+ * | 300404-300407 | M5 Drill Caster, Drill Add, Drill Copy, Drill Prison              |
  *
  * Display ids (CreatureDisplayInfo id = CreatureModelData id), one block of 100 ids per color in each range:
  *
@@ -81,11 +90,31 @@ namespace BossMechanics::Ids
         return spellId >= SPELL_BLOCK_FIRST && spellId <= SPELL_BLOCK_LAST;
     }
 
-    // `.mech test rider=`: the block past Weakened and the resolve spells. A rider of 205000 would hand out Weakened
-    // on a job hit (around the user ruling) and outlive the encounter; a resolve spell would deal a second hit.
+    // M5 descriptor stand-ins (STAGE-M5-HANDOFF §3.6; declared in core apps/dbc-tools source/npcs/boss_mechanics.py).
+    // The drills (MechanicDescriptorDrills.h) and their presets (MechanicDescriptorPresets.h) use them.
+    constexpr std::uint32_t SPELL_DRILL_CAST_LOW = 205010;      // interruptible 2.0 s, priority low
+    constexpr std::uint32_t SPELL_DRILL_CAST_MID = 205011;      // interruptible 2.5 s, priority mid
+    constexpr std::uint32_t SPELL_DRILL_CAST_HIGH = 205012;     // interruptible 3.0 s, priority high
+    constexpr std::uint32_t SPELL_DRILL_CAST_NO_KICK = 205013;  // do-not-kick (a kick is a violation)
+    constexpr std::uint32_t SPELL_DRILL_DEBUFF_MAGIC = 205014;
+    constexpr std::uint32_t SPELL_DRILL_DEBUFF_CURSE = 205015;
+    constexpr std::uint32_t SPELL_DRILL_DEBUFF_POISON = 205016;
+    constexpr std::uint32_t SPELL_DRILL_DEBUFF_DISEASE = 205017;
+    constexpr std::uint32_t SPELL_DRILL_STUN = 205018;          // urgent loss of control (Magic)
+    constexpr std::uint32_t SPELL_DRILL_DEADLINE = 205019;      // Magic, 8 s; expiring casts SPELL_DRILL_DEADLINE_BURST
+    constexpr std::uint32_t SPELL_DRILL_DEADLINE_BURST = 205020;
+    constexpr std::uint32_t SPELL_DRILL_PURGEABLE = 205021;     // Magic buff on an add
+    constexpr std::uint32_t SPELL_DRILL_ENRAGE = 205022;        // Enrage buff (soothe)
+    constexpr std::uint32_t SPELL_DRILL_AIMING = 205023;        // raises an add's target priority
+    constexpr std::uint32_t SPELL_M5_FIRST = SPELL_DRILL_CAST_LOW;
+    constexpr std::uint32_t SPELL_M5_LAST = SPELL_DRILL_AIMING;     // 205024-205029 reserved, undeclared
+
+    // `.mech test rider=`: the harmless drill auras only (Baited and Marked). Weakened would be handed out on a job hit
+    // (around the user ruling) and outlive the encounter; a resolve spell would deal a second hit; the M5 stand-ins
+    // deal damage, stun or buff enemies (STAGE-M5-HANDOFF §3.6).
     constexpr bool RiderAllowed(std::uint32_t spellId)
     {
-        return InSpellBlock(spellId) && spellId > SPELL_RESOLVE_LAST;
+        return spellId == SPELL_BAITED_DRILL || spellId == SPELL_MARKED_DRILL;
     }
 
     constexpr std::uint32_t ResolveSpellForSchool(std::uint8_t school)
@@ -97,6 +126,27 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t NPC_MECHANIC_MARKER = 300400;
     constexpr std::uint32_t NPC_MECHANIC_TEST_OWNER = 300401;
     constexpr std::uint32_t NPC_MECHANIC_DUMMY = 300402;          // npc_boss_mechanics_dummy (MechanicDummyAI.cpp)
+    // M5 (STAGE-M5-HANDOFF §3.6): the second dummy (same script, immunities -273: kickable) and the drill creatures.
+    constexpr std::uint32_t NPC_DESCRIPTOR_DUMMY = 300403;
+    constexpr std::uint32_t NPC_DRILL_CASTER = 300404;
+    constexpr std::uint32_t NPC_DRILL_ADD = 300405;
+    constexpr std::uint32_t NPC_DRILL_COPY = 300406;            // the ignore list's copy
+    constexpr std::uint32_t NPC_DRILL_PRISON = 300407;          // holds a player (break-out)
+    constexpr std::uint32_t NPC_BLOCK_FIRST = 300400;
+    constexpr std::uint32_t NPC_BLOCK_LAST = 300419;
+    // The reworked bosses' CreatureImmunitiesId (stun, fear, root, silence ...; not interrupt), as 300403 carries it.
+    // M5 WP-F (R M-2): the sim's descriptor slice gives it to its owner, so stuns and silences stop no program cast.
+    constexpr std::int32_t REWORKED_BOSS_IMMUNITIES = -273;
+
+    constexpr bool IsTrainingDummy(std::uint32_t entry)
+    {
+        return entry == NPC_MECHANIC_DUMMY || entry == NPC_DESCRIPTOR_DUMMY;
+    }
+
+    constexpr bool InCreatureBlock(std::uint32_t entry)
+    {
+        return entry >= NPC_BLOCK_FIRST && entry <= NPC_BLOCK_LAST;
+    }
 
     // Displays: a table of shape ladders inside one 100-id block per color (see the table above); the two line
     // ladders have their own ranges.

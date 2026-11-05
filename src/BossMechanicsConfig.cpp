@@ -66,6 +66,8 @@ namespace BossMechanics
             // M3
             b.humanSlackYd = GetClampedFloat("BossMechanics.Bots.HumanSlackYd", 1.f, 0.f, 5.f);
             b.regionComfortWeight = GetClampedFloat("BossMechanics.Bots.RegionComfortWeight", 1.5f, 0.f, 20.f);
+            // M5 CD (C3 B)
+            b.spacingWeight = GetClampedFloat("BossMechanics.Bots.SpacingWeight", 1.5f, 0.f, 20.f);
             b.trackSlackYd = GetClampedFloat("BossMechanics.Bots.TrackSlackYd", 0.75f, 0.f, 5.f);
             b.lookAwayMarginDeg = GetClampedFloat("BossMechanics.Bots.LookAway.MarginDeg", 10.f, 0.f, 45.f);
             b.tankFacingEnable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.TankFacing.Enable", true);

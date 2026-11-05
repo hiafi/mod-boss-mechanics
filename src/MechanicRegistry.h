@@ -16,6 +16,7 @@
 #include "DataMap.h"
 #include "Define.h"
 #include "Duration.h"
+#include "MechanicDescriptor.h"
 #include "MechanicGeometry.h"
 #include "MechanicJudge.h"
 #include "MechanicMath.h"
@@ -408,6 +409,25 @@ namespace BossMechanics
     // Program entry errors kept per encounter (Encounter::programErrors); the count goes on past it.
     constexpr std::size_t kMaxProgramErrors = 16;
 
+    // M5 (STAGE-M5-HANDOFF §3.2, WP-D): a unit of the encounter besides its owner. Program `add` and `hold` entries
+    // track theirs with despawnAtEnd (the encounter's end despawns them); Mechanic::TrackUnit tracks a script's own
+    // summon without it. Units that leave the world are dropped at the next Tick.
+    struct EncounterUnit
+    {
+        ObjectGuid guid;
+        uint32 entry = 0;
+        bool despawnAtEnd = false;
+    };
+
+    // A prison unit holding a player (program `hold`): `aura` (0: none) is removed from the player when the prison
+    // dies or leaves the world, and at the encounter's end.
+    struct HeldPlayer
+    {
+        ObjectGuid prison;
+        ObjectGuid player;
+        uint32 aura = 0;
+    };
+
     struct Encounter
     {
         ObjectGuid owner;
@@ -450,6 +470,15 @@ namespace BossMechanics
             std::function<void(Creature* owner)> fn;
         };
         std::vector<Task> tasks;
+        // ---- M5 (STAGE-M5-HANDOFF §3.2, WP-D): the boss descriptor ----
+        // Set by Mechanic::Describe / EditDescriptor / SetPhase and the program entry `describe`; bots read a copy
+        // through their DescriptorView (MechanicDescriptorView.h). It goes with the encounter.
+        Descriptor descriptor;
+        bool described = false;             // a descriptor was set: bots look only at encounters that have one
+        uint32 descriptorStamp = 0;         // the DescriptorRevision of its last change (the view re-copies when it
+                                            // moves; unique across the map's encounters, an owner's new one too)
+        std::vector<EncounterUnit> units;   // adds and tracked units (not the owner)
+        std::vector<HeldPlayer> held;       // prisons and the players they hold
     };
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -528,6 +557,37 @@ namespace BossMechanics
         uint32 ReservationRevision() const { return _reservationRevision; }
         LaneSet& AddLaneSet(ObjectGuid owner, RoomFrame const& frame);
         LaneSet* FindLaneSetMutable(uint32 id);
+
+        // ---- M5 descriptor (STAGE-M5-HANDOFF §3.2, WP-D) ----
+        // Changes whenever what a bot's DescriptorView copies may have changed: a descriptor set or edited, a phase, a
+        // cast note, an encounter unit or prison added or gone, an encounter ended. Separate from Revision() (like
+        // ReservationRevision) so a cast note never re-plans the bots that only dodge. Claims do not bump it: bots
+        // read them live. Never 0.
+        uint32 DescriptorRevision() const { return _descriptorRevision; }
+        // Sets (replaces) the owner's descriptor; begins the encounter when needed.
+        void Describe(ObjectGuid owner, Descriptor d);
+        // Edits the owner's descriptor in place (begins the encounter when needed; a first edit starts from an empty
+        // descriptor).
+        void EditDescriptor(ObjectGuid owner, std::function<void(Descriptor&)> const& fn);
+        void SetPhase(ObjectGuid owner, uint32 phase);
+        // The script's scheduler: `caster`'s cast of `spellId` is next due at `at` (GameTime ms).
+        void NoteNextCast(ObjectGuid caster, uint32 casterEntry, uint32 spellId, Milliseconds at);
+        // A cast seen starting (the `every` cadence counts from it); WP-I calls it when it sees a listed cast.
+        void NoteCastStarted(ObjectGuid caster, uint32 casterEntry, uint32 spellId, Milliseconds start);
+        Desc::CastNoteBook const& CastNotes() const { return _castNotes; }
+        // Kick claims (§3.3, WP-I): one bot per cast (caster + spell + cast start); a claim lasts until `expires`
+        // (pass the cast end) or a release, and expired ones are pruned every Tick. ClaimCast: true when `bot` holds
+        // the cast now (taken, or already its own); false while another bot holds it.
+        bool ClaimCast(Desc::CastKey const& cast, ObjectGuid bot, Milliseconds expires);
+        ObjectGuid CastClaimHolder(Desc::CastKey const& cast) const;      // empty: nobody (or expired)
+        void ReleaseCast(Desc::CastKey const& cast, ObjectGuid bot);
+        Desc::ClaimBook const& Claims() const { return _claims; }
+        // Adds `unit` to the owner's encounter units (begins the encounter when needed; once per guid).
+        void TrackUnit(ObjectGuid owner, ObjectGuid unit, uint32 entry, bool despawnAtEnd);
+        // `prison` holds `player` (the prison is tracked too, despawned at the end).
+        void NoteHeld(ObjectGuid owner, ObjectGuid prison, ObjectGuid player, uint32 aura);
+        // The live encounter `unit` belongs to: as its owner, else as a tracked unit. nullptr: none.
+        Encounter const* FindEncounterOfUnit(ObjectGuid unit) const;
 
         // ---- resolve spell (C2's spell_boss_mechanics_resolve calls these) ----
         // OnObjectAreaTargetSelect: keeps the units inside ctx (shape, sweep band, only/exclude), eligible, not
@@ -637,6 +697,17 @@ namespace BossMechanics
         void Remove(ActiveMechanic& m);     // despawn markers + fizzle callback; caller erases
         void FinishEncounter(ObjectGuid owner);
         void RunTasks(Milliseconds now);    // M4: the due Schedule tasks (start of Tick)
+        // M5: prunes claims, cast notes and units gone from the world; frees players whose prison died (Tick).
+        void StepDescriptors(Milliseconds now);
+        // M5: the encounter's descriptor side at its end: despawns its adds, frees its prisoners, drops their notes
+        // and claims.
+        void EndDescriptor(Encounter& e);
+        void BumpDescriptorRevision()
+        {
+            if (++_descriptorRevision == 0)
+                _descriptorRevision = 1;
+        }
+
         void BumpRevision()
         {
             if (++_revision == 0)
@@ -654,7 +725,10 @@ namespace BossMechanics
         uint32 _nextLaneSetId = 1;
         uint32 _revision = 1;
         uint32 _reservationRevision = 1;
+        uint32 _descriptorRevision = 1;
         uint64 _nextTaskSeq = 1;
+        Desc::CastNoteBook _castNotes;      // M5: every caster's notes on this map
+        Desc::ClaimBook _claims;            // M5: kick claims
         bool _ticking = false;
         std::map<uint32, ActiveMechanic> _mechanics;
         std::map<uint32, LaneSet> _laneSets;

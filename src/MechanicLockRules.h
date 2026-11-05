@@ -95,6 +95,28 @@ namespace BossMechanics::LockRules
         return mover && ScriptedMoverMoves(mover->rule, stealthed, hasTarget, inMeleeRange);
     }
 
+    // WP-Q3 (m4-q3/q4 Hit Spread/3): the scripted movers whose aura keeps moving the bot after the cast. Killing Spree
+    // teleports the rogue next to a target on every hit, for up to 2.5 s (500 ms per combo point;
+    // spell_rogue_combat.cpp, spell_rog_killing_spree_rework_aura). The lock judges the cast, not what comes after it:
+    // a Spread warned while the aura ran had the rogue teleported back next to the boss, into the other melee's
+    // circle, on every hit of its escape. tests/lock_rules_test.cpp pins this list.
+    inline constexpr std::array<uint32_t, 1> kMoverAuras = { { 51690 } };
+
+    inline bool IsMoverAura(uint32_t spellId)
+    {
+        for (uint32_t id : kMoverAuras)
+            if (id == spellId)
+                return true;
+        return false;
+    }
+
+    // A mover aura is cancelled while the brain owns where the bot stands: an escape walk, a hold, a freeze (Hold
+    // still). In Idle and Watch the spell the stock AI chose runs on.
+    inline bool MoverAuraBreaks(bool escape, bool hold, bool freeze)
+    {
+        return escape || hold || freeze;
+    }
+
     // Movers that are not MovementActions, found by the lock audits (STAGE-M2-C-REPORT "Lock audit",
     // STAGE-M4-L-REPORT §3), by the name the action reports (getName(), not always its creator key, so both are
     // listed where they differ). Gap-closers, leaps and blinks in the class rotations; a CastSpellAction is also caught
@@ -157,6 +179,16 @@ namespace BossMechanics::LockRules
         if (cast.turnsToCurrentTarget && cast.currentTargetOutside)
             return true;
         return (cast.facingInfront || cast.offensiveTarget) && cast.targetOutside;
+    }
+
+    // M5 CD (C6): a facing-only action (`set facing`) is refused while the brain walks the bot (Escape, a route's
+    // legs included, or a deferred escape) and under an open look-away window, as before. It does not stop the escape
+    // spline (ServerFacade::SetFacingTo only sets the orientation and sends a heartbeat), but every such tick
+    // broadcasts a heartbeat that snaps the walking bot on observers' clients and spends an action slot and a react
+    // delay. Standing (Watch, Hold, Freeze) it stays allowed.
+    inline bool FacingOnlyRefused(bool escape, bool lookAway)
+    {
+        return escape || lookAway;
     }
 
     // M4 X6 (STAGE-M4-L-REPORT §2.3): what the waker does about the look-away facing of a bot with a cast or channel
@@ -310,10 +342,10 @@ namespace BossMechanics::LockRules
     // The lock refuses the stock melee chase only while no point of the melee ring round its target is safe
     // (MechanicLanding.h RingSafe); the brain counts a chase whose end fails with no band re-route as refused too.
     // A melee bot or tank refused for its release time (BossMechanics.Bots.ChaseReleaseMs; a tank half of it), out of
-    // reach all along, is released to the stock AI for that long (the brain's Release, "chase valve"): it walks back
+    // reach all along, walks in for that long (the brain's StepChaseValve; M5 CD: a walk-in, see WalkInHorizonMs): back
     // into melee and stays. A stranded bot loses all its damage, a tank its threat (R2 Q-1 ruling: tanks are not
     // exempt, they get the valve at half the time). The refusal looks a whole horizon ahead (HorizonMs, 10 s), so the
-    // valve only needs the ring to be clear for the walk in, the release and the walk out (ChaseValveWindowMs): a
+    // valve only needs the ring to be clear for the walk in, the stay and the walk out (ChaseValveWindowMs): a
     // valve that walked the bot back into a zone about to resolve put the melee into alexei's Out of bounds at its
     // Hold still (fight_test TestChaseValve), the m4-s2 Zone/5 the lock was made for.
     struct ChaseClock
@@ -361,12 +393,39 @@ namespace BossMechanics::LockRules
         return c.lastRefusedAt != 0 && nowMs - c.lastRefusedAt <= kChaseRefusedNowMs;
     }
 
-    // The walk in and out a valve release must find clear on some point of the ring, beyond the release itself.
+    // The walk in and out a valve's walk-in must find clear on some point of the ring, beyond its stay itself.
     inline constexpr int64_t kChaseValveSlackMs = 2000;
 
     inline int64_t ChaseValveWindowMs(int64_t releaseMs)
     {
         return releaseMs + kChaseValveSlackMs;
+    }
+
+    // M5 CD (C3 A, C5): the valve no longer releases the bot blind. It starts a walk-in until `untilMs` (now + the
+    // release time): the bot is judged as in Watch (its spot, its stock chase, the lock's ring test), but looks only
+    // this far ahead, the window the valve found clear. A hazard registered during the walk-in that threatens the bot
+    // inside that window is answered at once (the blind release walked melee into the barrage's donuts and onto mines
+    // on the chase line); the lasting hazard that refused the chase is seen again once the walk-in ends, in time to
+    // leave. Outside a walk-in: the full horizon.
+    inline int64_t WalkInHorizonMs(int64_t untilMs, int64_t nowMs, int64_t horizonMs)
+    {
+        if (untilMs <= nowMs)
+            return horizonMs;
+        int64_t const walkIn = untilMs - nowMs + kChaseValveSlackMs;
+        return walkIn < horizonMs ? walkIn : horizonMs;
+    }
+
+    // M5 CD (C5): a melee bot out of melee range (its band + Landing::kMeleeBandSlackYd) for its release time while
+    // some point of the melee ring is clear over the valve's window (ChaseValveWindowMs) is stranded: the stock chase
+    // line ran into a lasting hazard on its side (solve, escape, hold, again), which the refusal clock never saw. The
+    // brain counts it (msChaseStranded) and routes to the first ring point that is safe over the horizon, this far
+    // inside the band (Landing::RingPoint). A whole-ring block (alexei's Out of bounds, a mine on the boss) is not
+    // stranding: no ring point is clear.
+    inline constexpr float kStrandRingInsetYd = 0.3f;
+
+    inline bool StrandedFor(int64_t lastInRangeMs, int64_t nowMs, int64_t releaseMs)
+    {
+        return lastInRangeMs != 0 && nowMs - lastInRangeMs >= releaseMs;
     }
 
     // The valve is due: an unbroken run of refusals (none staleMs apart) at least releaseMs long, still going.
@@ -408,6 +467,33 @@ namespace BossMechanics::LockRules
         if (estimateMs < 0 || gapMs <= 0)
             return 0;
         return estimateMs < gapMs ? estimateMs : gapMs;
+    }
+
+    // M5 CD (E, STAGE-M5-I-REPORT question 3): the waker also wakes a bot for its boss descriptor, so a kick or an
+    // urgent dispel does not wait out playerbots' react delay (0.5-3 s for a bot with no real master, 100 ms and up
+    // otherwise). One signature per kind: what the bot could act on now (the listed casts in progress it can kick,
+    // the listed urgent or deadline auras on its group it can cure), mixed order-free from (unit, id, instance); 0 =
+    // nothing. A wake is due when the signature is new and not empty (a cast or aura that ended only empties it).
+    inline uint64_t MixWakeSignature(uint64_t sig, uint64_t unit, uint64_t id, uint64_t instance)
+    {
+        uint64_t h = unit * 0x9E3779B97F4A7C15ull;
+        h ^= (id + 0x632BE59BD9B4E019ull) * 0xBF58476D1CE4E5B9ull;
+        h ^= instance * 0x94D049BB133111EBull;
+        h ^= h >> 31;
+        return sig + (h | 1ull);
+    }
+
+    inline bool SignatureWakeDue(uint64_t seen, uint64_t now)
+    {
+        return now != 0 && now != seen;
+    }
+
+    // ...and when the descriptor's revision moved since the bot's view was last brought up to date (a new or edited
+    // descriptor, a phase, a NoteNextCast, a listed cast another bot saw start), while a descriptor applies to it.
+    // `seenRevision` 0: the view was never built (the first update after the bot joined the map does not wake).
+    inline bool DescriptorWakeDue(uint32_t seenRevision, uint32_t revision, bool active)
+    {
+        return active && seenRevision != 0 && seenRevision != revision;
     }
 }
 

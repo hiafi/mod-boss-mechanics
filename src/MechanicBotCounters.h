@@ -40,9 +40,14 @@ namespace BossMechanics
         uint32 lockCasts = 0;       // ...of which cast-time or channelled spells
         uint32 castBreaks = 0;      // casts and channels the waker interrupted
         uint32 wakes = 0;           // AI ticks the waker pulled forward
-        uint32 solveUsLast = 0;
+        uint32 solveUsLast = 0;     // Solver::Solve alone (M5 C4: before, it included the allies' refresh below)
         uint32 solveUsMax = 0;
         uint64 solveUsTotal = 0;
+        // M5 C4: the allies' refresh (RefreshAllies) run right before each solve that is not a re-route, timed apart.
+        uint32 solveRefreshes = 0;
+        uint32 refreshUsLast = 0;
+        uint32 refreshUsMax = 0;
+        uint64 refreshUsTotal = 0;
         // M3 (STAGE-M3-HANDOFF §3.8 telemetry).
         uint32 carrierSolves = 0;   // solves while the bot carries a shape (Spread/RunOut, a Zone on or aimed at it)
         uint32 claimSolves = 0;     // ...while it claims a Soak
@@ -106,17 +111,69 @@ namespace BossMechanics
         uint32 landingBlocks = 0;
         uint32 motionEndStops = 0;
         // M4 WP-F2 (STAGE-M4-R2-REPORT M-1, m-3): ms in Idle or Watch out of the melee band while the lock refuses the
-        // melee chase (no point of the melee ring is safe), sampled by the brain; the times the safety valve
+        // melee chase (no point of the melee ring is safe), sampled by the brain (M5 CD: also in a hold on a blocked
+        // band, which refuses the chase too); the times the safety valve (a walk-in since M5 CD)
         // (BossMechanics.Bots.ChaseReleaseMs) let a refused chase through; the recovery role solves run for a refused
         // chase (also in roleSolves).
         uint32 msChaseRefused = 0;
         uint32 chaseReleases = 0;
         uint32 chaseSolves = 0;
+        // M5 CD (C5): ms a melee bot or tank spent out of melee range for longer than ChaseReleaseMs while a point of
+        // the melee ring stayed clear over the valve's window and the chase was not refused (stranded on its chase
+        // line; whole-ring blocks are never counted), sampled by the brain; and the strand routes that asked the
+        // route search for a clear ring point.
+        uint32 msChaseStranded = 0;
+        uint32 strandRoutes = 0;
+        // M5 CD (C6): facing-only actions (`set facing`) the lock refused while the brain walked the bot (Escape),
+        // also in lockBlocks; facingBlocks stays the look-away count.
+        uint32 escapeFacingBlocks = 0;
+        // M5 CD (E): waker wakes for the descriptor (its revision moved since the bot's view, a listed cast it can
+        // kick started, a listed urgent or deadline aura it can dispel appeared), also in wakes.
+        uint32 descriptorWakes = 0;
+        // M4 WP-Q3: mover auras (LockRules::kMoverAuras, Killing Spree) cancelled because the brain walked, held or
+        // froze the bot while one ran.
+        uint32 moverBreaks = 0;
         // BossMechanics.Bots.ForceLeaks: blocked judgements let through (per candidate judged), by the detector each
         // feeds. Many passes of a kind and no leak of that kind over a run point at a blind detector.
         uint32 forcedMoves = 0;
         uint32 forcedCasts = 0;
         uint32 forcedTurns = 0;
+        // M5 WP-T (targets and the ignore list, MechanicBotTargets.cpp).
+        uint32 focusSwitches = 0;       // `boss focus` attacks that moved the bot onto its pick
+        uint32 msLowerTarget = 0;       // ms attacking something else while an engaged pick lived (waker samples)
+        uint32 breakOutMsMax = 0;       // longest a prison held its player, as this bot saw it (open ones included)
+        uint32 ignoredHits = 0;         // damage events the bot dealt to ignored units (UnitScript OnDamage)...
+        uint32 ignoredDamage = 0;       // ...and their damage
+        uint32 petIgnoredHits = 0;      // the same for its pets, guardians and totems
+        uint32 petIgnoredDamage = 0;
+        uint32 ignoreBlocks = 0;        // actions the focus multiplier zeroed because their target is ignored
+        uint32 ignoreDrops = 0;         // ignored current targets, melee victims and cast targets dropped
+        uint32 petRecalls = 0;          // minions pulled off an ignored victim (onto the bot's target, or recalled)
+        // M5 WP-P (dispels and purges, MechanicBotDispel.cpp), whichever row cast them. M5 WP-F (R M-1): a dispel
+        // removes a random aura of its type, so the cures and purges are counted on the dispeller when the listed
+        // aura is removed by its cast (the aura hook, AURA_REMOVE_BY_ENEMY_SPELL), not at the cast; a dispel that
+        // only takes a stack off counts nothing.
+        uint32 urgentDispels = 0;       // cures of a listed loss-of-control aura (an `urgent` entry)...
+        uint32 urgentLatencyMsMax = 0;  // ...the longest time from that aura's application to its removal
+        uint32 deadlineDispels = 0;     // cures of a deadline entry inside its deadline (floored at skip + lead)
+        uint32 deadlineMisses = 0;      // deadline entries' auras that ran out on this bot (aura hook, by expiry)
+        uint32 listedDispels = 0;       // cures of a listed aura that was not urgent (stock rows, our target order)
+        uint32 purges = 0;              // listed enemy buffs stripped (Purge, Dispel Magic, Spellsteal, Tranq, Devour)
+        uint32 dispelWrongAura = 0;     // cures cast while an urgent or deadline aura was on the member that removed
+                                        // another aura (the core's random pick; a second dispel follows)
+        // M5 WP-I (interrupts, MechanicBotInterrupt.cpp): kicks are judged at the cast, whichever row cast them (the
+        // bot's own by the player cast hook, its Felhunter's Spell Lock by `boss kick`).
+        uint32 kicksLanded = 0;         // kicks on a listed cast this bot held the claim of
+        uint32 kicksWasted = 0;         // kicks on an unlisted cast while a listed cast was due before it was back
+        uint32 doNotKickKicks = 0;      // kicks on a do-not-kick cast (a violation: should stay 0)
+        uint32 duplicateKicks = 0;      // kicks on a listed cast another bot had claimed
+        uint32 overloadHolds = 0;       // casts this bot could kick but held for a higher one due (once per cast)
+        uint32 listedMissed = 0;        // listed casts that completed (counted by one bot per group: sum the group)
+        uint32 stockKicksDropped = 0;   // stock kick rows the kick multiplier zeroed (once per cast)
+        // M5 WP-F (R M-2): stuns, silences, incapacitates and fears outside the kick table that stopped (or would
+        // have stopped) a cast and were judged as kicks (also in kicksLanded, duplicateKicks, doNotKickKicks or
+        // kicksWasted).
+        uint32 castStops = 0;
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;
