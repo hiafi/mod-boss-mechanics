@@ -2,9 +2,10 @@
  * mod-boss-mechanics: damage and role providers (STAGE-M1-HANDOFF §3.7, §2.8).
  *
  * A mechanic's damage is a percent of reference health; the registry turns it into one flat number per target through
- * these providers. M1 ships stubs: the difficulties work (E3/E4) replaces the reference health and content key
- * providers, M3 may replace the role provider with playerbots roles. Providers are installed at startup (world
- * thread) and only read afterwards; the objects must live for the process.
+ * these providers. The reference health provider reads keyed rows from the config (dungeon difficulties E3,
+ * MechanicRefHealth.h); the content key provider resolves the map's difficulty and pinned level, and E4 replaces it to
+ * add the empowered level (building on DefaultContentKey). M3 may replace the role provider with playerbots roles.
+ * Providers are installed at startup (world thread) and only read afterwards; the objects must live for the process.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_PROVIDERS_H
@@ -12,6 +13,7 @@
 
 #include "Define.h"
 #include "MechanicMath.h"
+#include "MechanicRefHealth.h"
 #include "MechanicRegistry.h"
 
 class Map;
@@ -20,14 +22,8 @@ class Unit;
 
 namespace BossMechanics
 {
-    struct ContentKey
-    {
-        uint8 level = 0;
-        bool heroic = false;
-        uint8 empoweredLevel = 0;
-    };
-
-    // ReferenceHealth { nonTank, tank } is defined in MechanicMath.h.
+    // ContentKey { level, heroic, empoweredLevel } is defined in MechanicRefHealth.h, ReferenceHealth { nonTank, tank }
+    // in MechanicMath.h.
 
     class ReferenceHealthProvider
     {
@@ -50,24 +46,29 @@ namespace BossMechanics
         virtual Role Get(Unit const* owner, Player const* player) const = 0;     // owner may be nullptr
     };
 
-    // nullptr restores the stub. The getters never return nullptr.
+    // nullptr restores the default. The getters never return nullptr.
     void SetReferenceHealthProvider(ReferenceHealthProvider* provider);
     void SetContentKeyProvider(ContentKeyProvider* provider);
     void SetRoleProvider(RoleProvider* provider);
     ReferenceHealthProvider const& GetReferenceHealthProvider();
     ContentKeyProvider const& GetContentKeyProvider();
     RoleProvider const& GetRoleProvider();
-    bool IsReferenceHealthStubActive();
+    bool IsConfigReferenceHealthActive();
 
-    // Stub: rows from BossMechanics.ReferenceHealth.Rows, linear by level, clamped; heroic/empowered ignored.
-    class StubReferenceHealthProvider final : public ReferenceHealthProvider
+    // The default content key (RefHealth::ResolveContentKey): heroic = map->IsHeroic() (the open world and the sim are
+    // normal), level = the map's BossMechanics.ReferenceHealth.MapLevels pin for that difficulty, else the owner's
+    // level (0 without one), empoweredLevel = 0. E4's provider calls this and sets the empowered level.
+    ContentKey DefaultContentKey(Map const* map, Unit const* owner);
+
+    // Default: the keyed rows of BossMechanics.ReferenceHealth.Rows (RefHealth::Lookup).
+    class ConfigReferenceHealthProvider final : public ReferenceHealthProvider
     {
     public:
         ReferenceHealth Get(ContentKey const& key) const override;
     };
 
-    // Stub: level = owner level, heroic = map->IsHeroic(), empoweredLevel = 0.
-    class StubContentKeyProvider final : public ContentKeyProvider
+    // Default: DefaultContentKey.
+    class DefaultContentKeyProvider final : public ContentKeyProvider
     {
     public:
         ContentKey Get(Map const* map, Unit const* owner) const override;

@@ -14,8 +14,6 @@ namespace BossMechanics
 {
     namespace
     {
-        constexpr char const* kDefaultRows = "20:1000:1500 60:5000:8000";
-
         ModuleConfig sConfig;
 
         // Reads an unsigned key and clamps it into [lo, hi], warning when the configured value was out of range.
@@ -112,7 +110,9 @@ namespace BossMechanics
 
     ModuleConfig::ModuleConfig()
     {
-        ParseReferenceHealthRows(referenceHealthText, referenceHealthRows);
+        std::string err;
+        RefHealth::ParseTable(referenceHealthText, referenceHealth, err);
+        RefHealth::ParseMapLevels(referenceHealthMapLevelsText, referenceHealthMapLevels, err);
     }
 
     ModuleConfig const& GetConfig()
@@ -126,13 +126,24 @@ namespace BossMechanics
         c.enable = sConfigMgr->GetOption<bool>("BossMechanics.Enable", true);
         c.debug = sConfigMgr->GetOption<bool>("BossMechanics.Debug", false);
 
-        c.referenceHealthText = sConfigMgr->GetOption<std::string>("BossMechanics.ReferenceHealth.Rows", kDefaultRows);
-        if (!ParseReferenceHealthRows(c.referenceHealthText, c.referenceHealthRows))
+        std::string err;
+        c.referenceHealthText = sConfigMgr->GetOption<std::string>("BossMechanics.ReferenceHealth.Rows",
+            kDefaultReferenceHealthRows);
+        if (!RefHealth::ParseTable(c.referenceHealthText, c.referenceHealth, err))
         {
-            LOG_WARN("module.bossmechanics", "BossMechanics.ReferenceHealth.Rows '{}' is malformed (want "
-                "'level:nonTank:tank ...'); using '{}'", c.referenceHealthText, kDefaultRows);
-            c.referenceHealthText = kDefaultRows;
-            ParseReferenceHealthRows(c.referenceHealthText, c.referenceHealthRows);
+            LOG_WARN("module.bossmechanics", "BossMechanics.ReferenceHealth.Rows '{}' is malformed: {}; using '{}'",
+                c.referenceHealthText, err, kDefaultReferenceHealthRows);
+            c.referenceHealthText = kDefaultReferenceHealthRows;
+            RefHealth::ParseTable(c.referenceHealthText, c.referenceHealth, err);
+        }
+        c.referenceHealthMapLevelsText = sConfigMgr->GetOption<std::string>("BossMechanics.ReferenceHealth.MapLevels",
+            kDefaultReferenceHealthMapLevels);
+        if (!RefHealth::ParseMapLevels(c.referenceHealthMapLevelsText, c.referenceHealthMapLevels, err))
+        {
+            LOG_WARN("module.bossmechanics", "BossMechanics.ReferenceHealth.MapLevels '{}' is malformed: {}; using "
+                "'{}'", c.referenceHealthMapLevelsText, err, kDefaultReferenceHealthMapLevels);
+            c.referenceHealthMapLevelsText = kDefaultReferenceHealthMapLevels;
+            RefHealth::ParseMapLevels(c.referenceHealthMapLevelsText, c.referenceHealthMapLevels, err);
         }
 
         uint32 const mode = sConfigMgr->GetOption<uint32>("BossMechanics.Telegraph.FollowMode", 0);
@@ -173,8 +184,13 @@ namespace BossMechanics
             LOG_INFO("module.bossmechanics.bots", "mod-boss-mechanics: bot fallibility on, seed {}{}",
                 sConfig.bots.fallibility.effectiveSeed, sConfig.bots.fallibility.seed ? "" : " (random)");
 
-        if (!reload && IsReferenceHealthStubActive())
-            LOG_INFO("module.bossmechanics", "mod-boss-mechanics: reference health stub active ('{}'); placeholder "
-                "numbers until the difficulties work installs measured ones", sConfig.referenceHealthText);
+        if (!reload && IsConfigReferenceHealthActive())
+        {
+            std::string const rows = RefHealth::Format(sConfig.referenceHealth);
+            LOG_INFO("module.bossmechanics", "mod-boss-mechanics: reference health rows '{}', map levels '{}'{}", rows,
+                sConfig.referenceHealthMapLevelsText, rows == kDefaultReferenceHealthRows
+                || rows == kLegacyStubReferenceHealthRows ? " (placeholder numbers: paste the measured rows from "
+                "mod-dpssim tools/refhealth.py)" : "");
+        }
     }
 }
