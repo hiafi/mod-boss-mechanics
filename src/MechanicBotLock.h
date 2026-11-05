@@ -45,7 +45,8 @@
  * the target's reach on the bot's side, a jump on its center, Shadowstep behind it; a position cast is not judged),
  * and the stock melee chase (`reach melee`) only while no point of the melee ring round its target is safe, or the
  * brain found no way round the hazard its last end failed on. Refused chases feed the brain's recovery solve and the
- * chase valve (BossMechanics.Bots.ChaseReleaseMs): a melee bot or tank refused that long is released to the stock AI.
+ * chase valve (BossMechanics.Bots.ChaseReleaseMs): a melee bot or tank refused that long walks in on a short horizon
+ * (M5 CD; it is not released). Facing-only actions are refused in Escape (M5 CD, LockRules::FacingOnlyRefused).
  *
  * Multipliers are per engine, so the strategy registers this in the combat and the non-combat engine alike.
  */

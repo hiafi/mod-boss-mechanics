@@ -317,7 +317,7 @@ namespace
 
     // WP-F2 (R2 M-1): the melee chase toward `dest` is refused while no point of the melee ring (the bot's melee band
     // round dest) is safe over the horizon. A refusal goes on the chase clock: the brain releases a bot refused for
-    // BossMechanics.Bots.ChaseReleaseMs (the safety valve), and the lock then allows everything (Released). The
+    // BossMechanics.Bots.ChaseReleaseMs (the safety valve, a walk-in on a short horizon since M5 CD). The
     // brain's view (st.input) is current: the brain steps before the engine picks actions in the same AI tick.
     bool ChaseRefused(Player* bot, MechanicBotState& st, Unit* dest, Milliseconds now)
     {
@@ -352,6 +352,7 @@ namespace
         LeakKind leak = LeakKind::None;
         bool pull = false;          // X8: a pull request refused
         bool landing = false;       // WP-Q2: a gap closer (or the melee chase) refused for its landing
+        bool escapeFacing = false;  // M5 CD (C6): a facing-only action refused in Escape (not look-away)
     };
 
     Judgement Allow(bool unknownCast = false)
@@ -419,6 +420,16 @@ namespace
         MechanicBotMode mode = st.mode;
         if (mode == MechanicBotMode::Watch && st.pendingEscape)
             mode = MechanicBotMode::Escape;
+        // M5 CD (C6): a facing-only action while the brain walks the bot (LockRules::FacingOnlyRefused): it would not
+        // stop the escape, but broadcasts a heartbeat that snaps the walk on observers' clients on every AI tick the
+        // bot walks away from its target ("not facing target"), and spends an action slot and a react delay.
+        if (LockRules::FacingOnlyRefused(mode == MechanicBotMode::Escape, false)
+            && (dynamic_cast<SetFacingTargetAction*>(action) || action->getName() == "set facing"))
+        {
+            Judgement j = Blocked(LockVerdict::BlockFacing);
+            j.escapeFacing = true;
+            return j;
+        }
         bool const afterBreak = now < st.noCastUntil;
         bool const frozen = mode == MechanicBotMode::Freeze;
         bool const idleOrWatch = mode == MechanicBotMode::Idle || mode == MechanicBotMode::Watch;
@@ -479,7 +490,8 @@ namespace
         // Spells.
         CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action);
         if (!cast)
-            return Allow();     // facing ("set facing" is a plain Action; blocked above under look-away), items, chat
+            return Allow();     // facing ("set facing" is a plain Action; blocked above under look-away and in
+                                // Escape), items, chat
         uint32 const spellId = CastSpellIdOf(botAI, cast);
         SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
         // The cast target, read once: the look-away test and Ambush's stealth rule need it.
@@ -606,9 +618,10 @@ namespace
                 ++st.counters.lockCasts;
                 return 0.f;
             case LockVerdict::BlockFacing:
-                // Look-away (decision §7.6): an action that would turn the bot off its chosen facing.
+                // Look-away (decision §7.6): an action that would turn the bot off its chosen facing; M5 CD (C6): a
+                // facing-only action while the brain walks it.
                 ++st.counters.lockBlocks;
-                ++st.counters.facingBlocks;
+                ++(j.escapeFacing ? st.counters.escapeFacingBlocks : st.counters.facingBlocks);
                 return 0.f;
         }
         return 1.f;

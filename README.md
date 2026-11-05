@@ -849,11 +849,17 @@ earlier than the bare margin would allow.
   points at the bot's melee band, its own side first) is safe over the horizon, or while Watch found no way round the
   hazard the last chase ended in (a blocked band, below). A refused melee bot gets a role solve toward the band every
   0.5 s (2 s after one that found nothing closer), and its time out of reach goes to `msChaseRefused`. After
-  `ChaseReleaseMs` of refusals out of reach (a tank half of it) the chase valve releases it to the stock AI for as long,
-  so it walks into melee and fights there; only while some ring point stays clear for that time + 2 s, so the valve
-  never walks the melee into a zone about to resolve (alexei's Out of bounds at its Hold still). Tanks follow the same
-  rules: they are exempt from a Frontal only while they are its source's current victim (not at the pull, nor after
-  an aggro loss), and never from a Zone.
+  `ChaseReleaseMs` of refusals out of reach (a tank half of it) the chase valve lets it walk in for as long, so it
+  walks into melee and fights there; only while some ring point stays clear for that time + 2 s, so the valve never
+  walks the melee into a zone about to resolve (alexei's Out of bounds at its Hold still). The walk-in (M5) is not a
+  release: the bot stays in Watch with its horizon cut to that window, so a hazard registered meanwhile (a barrage
+  donut on it, a mine on its chase line) is dodged at once, and the lasting hazard behind the refusal is seen again in
+  time to leave. A melee bot out of melee range for `ChaseReleaseMs` while some ring point is clear and the chase is
+  not refused is stranded (its chase line runs into a lasting hazard on its side): `msChaseStranded` counts it, and
+  it routes round the hazard to the first ring point safe over the horizon (the route search; `strandRoutes`).
+  Facing-only actions (`set facing`) are refused while the brain walks the bot (Escape). Tanks follow the same rules:
+  they are exempt from a Frontal only while they are its source's current victim (not at the pull, nor after an aggro
+  loss), and never from a Zone.
 - **Watch** also stops a stock motion whose end fails TargetOk from its arrival, not only one whose path does (the
   chase back into alexei's Out of bounds). A melee bot or tank beyond its band re-routes toward the band; every other
   bot (a ranged bot too close to its target, a healer walking to its patient) toward the motion's end, which then
@@ -903,13 +909,14 @@ named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `s
 | `MinSolveIntervalMs` | 150 | per bot, except the first solve after a registry change |
 | `MovingAnchorRecheckMs` | 250 | re-view cadence while a hazard is unit-anchored |
 | `RoleSlackMs` | 1000 | out of the role band this long while holding -> release the hold |
-| `ChaseReleaseMs` | 3000 | chase valve: a melee bot refused its chase this long is released as long (a tank: half) |
+| `ChaseReleaseMs` | 3000 | chase valve: refused this long, a melee bot walks in as long (a tank: half); strand wait |
 | `RangedDistanceYd` | 22 | ranged and healer band [8, this + 6] (melee: melee range - 0.5) |
 | `FacingSlackDeg` | 15 | turning cones and lines are checked at +-this |
 | `Debug` | 0 | one log line per solve with why it failed, the view self-check (`module.bossmechanics.bots`) |
 | `Fallibility.Enable` | 0 | D1 human-like mistakes, deterministic under `Fallibility.Seed` (0 = random per load) |
 | `HumanSlackYd` | 1.0 | uncertainty added to a human's current spot (M3) |
 | `RegionComfortWeight` | 1.5 | score per yard short of 1 yd inside a get-in region |
+| `SpacingWeight` | 1.5 | ranged and healers: score per yard closer than 6 yd to another member (0 = off; M5) |
 | `TrackSlackYd` | 0.75 | re-solve a region on a moving unit this close to its inner edge |
 | `LookAway.MarginDeg` | 10 | extra angle kept between a carried cone or line and an ally |
 | `TankFacing.Enable` | 1 | the tank keeps a Frontal's source faced away from the group |
@@ -962,7 +969,8 @@ brain left Idle: playerbots' pull would zero every other action for up to 15 s, 
 and forced leak passes. A fifth, `m4 routes and bands`, counts the region routes (and those found) and the out-of-band
 time (ms; and the part of it inside a task window). A sixth, `m4 landings` (WP-Q2), counts the gap closers and chases
 refused for their landing (per candidate judged), the Watch motions stopped for their end, and (WP-F2) the time out
-of reach with the chase refused (`msChaseRefused`), the chase valve's releases and the recovery solves.
+of reach with the chase refused (`msChaseRefused`; M5: a hold on a blocked band too), the chase valve's walk-ins, the
+recovery solves and (M5) the stranded time and its strand routes.
 `BossMechanics.Bots.ForceLeaks = N` (debug only, never on a live realm) proves the leak detectors fire: the lock lets
 the blocks they can see through (a foreign mover, a cast-time spell or item in Escape or Hold, a look-away turn) until
 each detector has counted N since the counters' last reset, and every leak is logged as `lock leak in ...`. Passes

@@ -2,7 +2,8 @@
 // WP-X; STAGE-M4-L-REPORT §6.3, §10 X1-X3): the scripted-mover table and its conditions, the named movers and the
 // turning self casts, and the look-away cast rule; WP-X2: the waker's cast facing step (X6), the pull requests (X8) and
 // the forced-leak passes (BossMechanics.Bots.ForceLeaks); WP-Q2: the gap closers' landings and the waker's fast tick;
-// WP-F2: where each closer stops, the chase clock and its valve, and the measured wake lead; WP-Q3: the mover auras.
+// WP-F2: where each closer stops, the chase clock and its valve, and the measured wake lead; WP-Q3: the mover auras;
+// M5 CD: the valve's walk-in horizon, the stranding clock, facing-only actions in Escape and the descriptor wakes.
 // Build: tests/run.sh.
 
 #include "check.h"
@@ -321,6 +322,66 @@ namespace
         CHECK(ChaseValveDue(c, 23500, 3000, stale));
     }
 
+    // M5 CD (C3 A): the walk-in's horizon, before, during and after the walk-in (10 s horizon, 3 s walk-in from 5 s).
+    void TestWalkInHorizon()
+    {
+        int64_t const horizon = 10000;
+        int64_t const until = 5000 + 3000;
+        CHECK(WalkInHorizonMs(0, 4000, horizon) == horizon);              // none running
+        CHECK(WalkInHorizonMs(until, 5000, horizon) == 3000 + kChaseValveSlackMs);
+        CHECK(WalkInHorizonMs(until, 5000, horizon) == ChaseValveWindowMs(3000));  // the window the valve checked
+        CHECK(WalkInHorizonMs(until, 7000, horizon) == 1000 + kChaseValveSlackMs);
+        CHECK(WalkInHorizonMs(until, 7999, horizon) == 1 + kChaseValveSlackMs);
+        CHECK(WalkInHorizonMs(until, until, horizon) == horizon);         // over: the full horizon again
+        CHECK(WalkInHorizonMs(until, 9000, horizon) == horizon);
+        // Never longer than the horizon (a short configured HorizonMs, a long release).
+        CHECK(WalkInHorizonMs(5000 + 30000, 5000, horizon) == horizon);
+        CHECK(WalkInHorizonMs(until, 5000, 2000) == 2000);
+        // Shorter all along the walk-in.
+        for (int64_t t = 5000; t < until; t += 100)
+            CHECK(WalkInHorizonMs(until, t, horizon) < horizon);
+    }
+
+    // M5 CD (C5): the stranding clock's wait (ChaseReleaseMs out of range).
+    void TestStranded()
+    {
+        CHECK(!StrandedFor(0, 5000, 3000));         // no reference yet
+        CHECK(!StrandedFor(1000, 3999, 3000));
+        CHECK(StrandedFor(1000, 4000, 3000));
+        CHECK(StrandedFor(1000, 20000, 3000));
+        CHECK(kStrandRingInsetYd > 0.f && kStrandRingInsetYd < 0.5f);   // inside the band, short of its slack
+    }
+
+    // M5 CD (C6): facing-only actions are refused while the brain walks the bot and under look-away; allowed standing.
+    void TestFacingOnly()
+    {
+        CHECK(FacingOnlyRefused(true, false));      // Escape (a route, a deferred escape)
+        CHECK(FacingOnlyRefused(false, true));      // look-away, as before
+        CHECK(FacingOnlyRefused(true, true));
+        CHECK(!FacingOnlyRefused(false, false));    // Watch, Hold, Freeze
+    }
+
+    // M5 CD (E): the descriptor wakes.
+    void TestDescriptorWake()
+    {
+        CHECK(!SignatureWakeDue(0, 0));
+        uint64_t const a = MixWakeSignature(0, 11, 205010, 0x1000);
+        uint64_t const b = MixWakeSignature(0, 12, 205011, 0x2000);
+        CHECK(a != 0 && b != 0 && a != b);
+        // Order-free: the same casts in another order give the same signature.
+        CHECK(MixWakeSignature(a, 12, 205011, 0x2000) == MixWakeSignature(b, 11, 205010, 0x1000));
+        // Another instance of the same cast (a recast) is new.
+        CHECK(MixWakeSignature(0, 11, 205010, 0x1001) != a);
+        CHECK(SignatureWakeDue(0, a));              // a cast started
+        CHECK(!SignatureWakeDue(a, a));             // still the same: no second wake
+        CHECK(SignatureWakeDue(a, MixWakeSignature(a, 12, 205011, 0x2000)));   // another one joined
+        CHECK(!SignatureWakeDue(a, 0));             // it ended
+        CHECK(DescriptorWakeDue(5, 6, true));
+        CHECK(!DescriptorWakeDue(6, 6, true));
+        CHECK(!DescriptorWakeDue(5, 6, false));     // no descriptor applies to the bot
+        CHECK(!DescriptorWakeDue(0, 6, true));      // the view was never built
+    }
+
     // WP-Q2: the waker's fast tick counts the wake's lead in, so the brain steps every FastTickMs on any map update
     // interval, not every FastTickMs + one update. WP-F2 (STAGE-M4-R2-REPORT m-2): the lead is measured.
     void TestFastTickDue()
@@ -467,5 +528,9 @@ int main()
     TestChaseClock();
     TestFastTickDue();
     TestFastTickCadence();
+    TestWalkInHorizon();
+    TestStranded();
+    TestFacingOnly();
+    TestDescriptorWake();
     return Report("lock_rules_test");
 }

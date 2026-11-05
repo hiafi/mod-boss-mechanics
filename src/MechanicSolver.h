@@ -149,6 +149,9 @@ namespace BossMechanics::Solver
     {
         float path = 1.f, role = 2.f, edge = 1.5f, crowd = 1.f, slackPerMs = 0.01f, stay = -1.f;
         float region = 1.5f;                // per yard short of 1 yd inside a region (RegionComfortWeight)
+        // M5 CD (C3 B): per yard closer than Params::spacingYd to a standing member (Input::standing), for a bot with
+        // no melee band while no hard region is live (BossMechanics.Bots.SpacingWeight; 0 = off).
+        float spacing = 1.5f;
     };
 
     struct RoleBand
@@ -179,6 +182,9 @@ namespace BossMechanics::Solver
         // Entry points round a circle region's edge (M4 WP-Q, Detail::kRegionEdgeArcDeg). Only a test switches them
         // off (to prove they are needed).
         bool regionEdgeArcs = true;
+        // M5 CD (C3 B): the spacing term's radius. The barrage's largest circle and Spread are 6 yd, and a donut's
+        // ring reaches its hole from 3-8 yd: two ranged bots inside this of each other are both caught by one shot.
+        float spacingYd = 6.f;
     };
 
     struct Input
@@ -190,6 +196,10 @@ namespace BossMechanics::Solver
         std::vector<LaneFrame> lanes;
         RoleBand role;
         std::vector<Geo::Vec3> crowd;       // other bots' targets
+        // M5 CD (C3 B): where every other group member will stand: its plan target in Escape, Hold or Freeze, else
+        // its position (a bot in Idle or Watch, a human). The spacing term (Weights::spacing) keeps a bot with no
+        // melee band Params::spacingYd away from them; the crowd term (2.5 yd, escape targets only) stays.
+        std::vector<Geo::Vec3> standing;
         Params params;
         // The bot's spot is safe but its current motion (follow, chase) is not: solve anyway, without the bot's own
         // spot as a candidate and only with targets params.rerouteGainYd closer to the role anchor (the motion's
@@ -2008,6 +2018,18 @@ namespace BossMechanics::Solver
             return a.p.y < b.p.y;
         }
 
+        // M5 CD (C3 B): the spacing term is for bots with no melee band (melee share the boss), and off while a hard
+        // region (a Stack, Cluster, Bait or Soak) is live: grouping mechanics stay as they are.
+        inline bool SpacingApplies(Input const& in)
+        {
+            if (in.role.present && in.role.minYd <= 0.f)
+                return false;
+            for (Region const& r : in.regions)
+                if (r.hard && RegionLive(in, r))
+                    return false;
+            return true;
+        }
+
         inline float Score(Input const& in, Geo::Vec3 const& c, float dist, Ms arrival, Ms deadline, bool isBot)
         {
             Weights const& w = in.params.w;
@@ -2040,6 +2062,13 @@ namespace BossMechanics::Solver
                 for (Geo::Vec3 const& q : in.crowd)
                     nearest = std::min(nearest, Dist2(q, c));
                 score += w.crowd * std::max(0.f, kCrowdComfortYd - nearest);
+            }
+            if (w.spacing > 0.f && !in.standing.empty() && SpacingApplies(in))
+            {
+                float nearest = kInf;
+                for (Geo::Vec3 const& q : in.standing)
+                    nearest = std::min(nearest, Dist2(q, c));
+                score += w.spacing * std::max(0.f, in.params.spacingYd - nearest);
             }
             if (deadline < kForever && deadline > in.now)
             {

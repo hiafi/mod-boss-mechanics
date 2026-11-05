@@ -47,6 +47,11 @@ namespace BossMechanics
 
         // The cast and aura hooks (from AddSC_boss_mechanics_bots).
         void AddScripts();
+
+        // M5 CD (E): the waker's dispel signature (LockRules::MixWakeSignature): the listed auras on the group (and
+        // its pets) that are urgent now (an `urgent` entry, or a deadline entry inside its deadline) and of a type the
+        // bot can cure; 0 = none, or no such entry, or no cure. Bot's map thread.
+        uint64 WakeSignature(Player* bot, MechanicBotState const& st);
     }
 }
 

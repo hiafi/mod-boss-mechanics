@@ -25,6 +25,7 @@
 #include "MechanicBotState.h"
 #include "MechanicDescriptorView.h"
 #include "MechanicKickRules.h"
+#include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
 #include "Pet.h"
@@ -36,6 +37,7 @@
 #include "SpellMgr.h"
 #include "StringFormat.h"
 #include <algorithm>
+#include <cstdint>
 
 using namespace BossMechanics;
 
@@ -584,6 +586,40 @@ void BotKick::OnBotSpellCast(Player* player, Spell const* spell)
         LOG_INFO(kLog, "Bot {}: kick {} on {} ({}): {}", player->GetName(), spell->GetSpellInfo()->Id,
             target->GetName(), j.first.spellId, kNames[static_cast<std::size_t>(outcome)]);
     }
+}
+
+uint64 BotKick::WakeSignature(Player* bot, MechanicBotState const& st)
+{
+    Kick::KickState const& k = st.kick;
+    DescriptorView const& v = st.descriptor;
+    if (!bot || !k.active || k.cooldown <= Milliseconds(0) || !v.Active() || v.descriptor.interrupts.empty())
+        return 0;
+    uint64 sig = 0;
+    auto scan = [&](ObjectGuid guid)
+    {
+        Unit* u = ObjectAccessor::GetUnit(*bot, guid);
+        if (!u || !u->IsAlive() || !u->IsInWorld())
+            return;
+        for (CurrentSpellTypes slot : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+        {
+            Spell const* spell = u->GetCurrentSpell(slot);
+            SpellInfo const* info = spell ? spell->GetSpellInfo() : nullptr;
+            if (!info)
+                continue;
+            for (InterruptEntry const& e : v.descriptor.interrupts)
+            {
+                if (e.priority == 0 || e.spellId != info->Id || (e.casterEntry && e.casterEntry != u->GetEntry()))
+                    continue;
+                sig = LockRules::MixWakeSignature(sig, guid.GetRawValue(), info->Id,
+                    reinterpret_cast<std::uintptr_t>(spell));
+                break;
+            }
+        }
+    };
+    scan(v.owner);
+    for (EncounterUnit const& u : v.units)
+        scan(u.guid);
+    return sig;
 }
 
 std::string BotKick::ReportLine(MechanicBotState const& st)

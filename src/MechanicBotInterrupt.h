@@ -62,6 +62,12 @@ namespace BossMechanics
 
         // The `.mech bots` line of the interrupt counters and the current plan.
         std::string ReportLine(MechanicBotState const& st);
+
+        // M5 CD (E): the waker's kick signature (LockRules::MixWakeSignature): the casts in progress on the
+        // encounter's units that the bot's interrupt list lists with a priority (caster entry and spell; the `when`
+        // condition and interruptibility are left to the kick plan), when the bot has a kick (its last plan); 0 =
+        // none. Cheap: the owner and the tracked units, two spell slots each. Bot's map thread.
+        uint64 WakeSignature(Player* bot, MechanicBotState const& st);
     }
 }
 

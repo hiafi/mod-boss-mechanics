@@ -27,6 +27,7 @@
 #include "MechanicBotState.h"
 #include "MechanicDescriptorView.h"
 #include "MechanicDispelRules.h"
+#include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
 #include "Pet.h"
@@ -42,6 +43,7 @@
 #include "StringFormat.h"
 #include "UnitScript.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <optional>
@@ -548,6 +550,60 @@ namespace
 
 namespace BossMechanics::BotDispel
 {
+    uint64 WakeSignature(Player* bot, MechanicBotState const& st)
+    {
+        DescriptorView const& v = st.descriptor;
+        if (!bot || !v.Active())
+            return 0;
+        Descriptor const& d = v.descriptor;
+        bool urgentListed = false;
+        for (DispelEntry const& e : d.dispels)
+            urgentListed = urgentListed || e.urgent || e.deadline > Ms(0);
+        if (!urgentListed)
+            return 0;
+        uint32 mask = 0;
+        for (DispelRules::Owned const& o : OwnedSpells(bot, DispelRules::Use::Friendly))
+            mask |= o.types;
+        if (!mask)
+            return 0;
+        uint64 sig = 0;
+        auto look = [&](Unit* u)
+        {
+            if (!u || !u->IsAlive() || !u->IsInWorld() || !u->IsInMap(bot))
+                return;
+            for (DispelEntry const& e : d.dispels)
+            {
+                if (!e.urgent && e.deadline <= Ms(0))
+                    continue;
+                Aura const* aura = u->GetAura(e.auraId);
+                if (!aura || aura->IsRemoved())
+                    continue;
+                SpellInfo const* info = aura->GetSpellInfo();
+                if (!info || info->IsPositive() || !(mask & DispelRules::Bit(info->Dispel))
+                    || !Desc::IsUrgent(e, Remaining(aura)))
+                    continue;
+                sig = LockRules::MixWakeSignature(sig, u->GetGUID().GetRawValue(), e.auraId,
+                    reinterpret_cast<std::uintptr_t>(aura));
+            }
+        };
+        auto withPet = [&](Player* p)
+        {
+            look(p);
+            if (Pet* pet = p->GetPet())
+                look(pet);
+        };
+        Group* group = bot->GetGroup();
+        if (!group)
+        {
+            withPet(bot);
+            return sig;
+        }
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            if (Player* p = ref->GetSource())
+                withPet(p);
+        return sig;
+    }
+
     std::string ReportLine(PlayerbotAI* botAI, MechanicBotState const& st)
     {
         MechanicBotCounters const& c = st.counters;

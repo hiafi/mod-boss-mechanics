@@ -29,6 +29,9 @@
 // WP-Q3 (optional, World::moverHop): a mover aura on a bot (Killing Spree, Bot::moverAuraUntil) puts it at the hop
 // point every Config::moverHop before its move; Config::moverAuraBreak cancels it once the brain step leaves the bot
 // in Escape or Hold (the brain's BreakMoverAuras).
+// M5 CD (STAGE-M5-CD-REPORT fix spec): the chase valve's walk-in (Config::walkIn), the stranding clock and its route
+// (Config::strandRoute), the solver's spacing term fed with Input::standing (Config::standing) and the lock's refusal
+// of facing-only actions in Escape (Config::escapeFacingBlock, a counter only: the model has no facing).
 #ifndef MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 #define MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 
@@ -116,6 +119,20 @@ namespace BrainModel
         // cancels a running one in Escape or Hold (LockRules::MoverAuraBreaks; false = the WP-F2 build).
         Ms moverHop{ 500 };
         bool moverAuraBreak = true;
+        // M5 CD (C3 A): the chase valve starts a walk-in (Bot::walkInUntil): Watch on a horizon capped by
+        // LockRules::WalkInHorizonMs, no valve and no recovery solve meanwhile; false = the WP-F2 build, a release to
+        // the stock AI whose chase nothing polices.
+        bool walkIn = true;
+        // M5 CD (C5): a melee bot out of melee range for its release time while a ring point is clear over the
+        // valve's window counts msChaseStranded (always); with strandRoute it asks the route search for the first ring
+        // point safe over the horizon (the brain's StepStrandRoute).
+        bool strandRoute = true;
+        // M5 CD (C3 B): Input::standing holds every other bot (its plan target in Escape or Hold, else where it
+        // stands), for the solver's spacing term (Weights::spacing); false = empty, the term off.
+        bool standing = true;
+        // M5 CD (C6): the lock refuses facing-only actions in Escape (LockRules::FacingOnlyRefused). The model counts
+        // the Escape steps whose walk points away from World::chaseTarget, where stock `set facing` would run.
+        bool escapeFacingBlock = true;
     };
 
     enum class Mode { Watch, Escape, Hold };
@@ -129,6 +146,8 @@ namespace BrainModel
         std::uint32_t motionEndStops = 0, roleReleases = 0;
         std::uint32_t msChaseRefused = 0, chaseReleases = 0, chaseSolves = 0, landingBlocks = 0;
         std::uint32_t moverBreaks = 0, moverHops = 0;
+        // M5 CD: msChaseStranded and the strand routes (C5); `set facing` run or refused in Escape (C6).
+        std::uint32_t msChaseStranded = 0, strandRoutes = 0, escapeFacingRuns = 0, escapeFacingBlocks = 0;
         std::array<std::uint32_t, 5> outcomes{};
         std::int64_t solveUsMax = 0, solveUsTotal = 0, routeUsMax = 0;
         // Per Fallback: pass 1 spent its whole MaxPathChecks budget (a budget stop) or not.
@@ -163,6 +182,10 @@ namespace BrainModel
             landingBlocks += o.landingBlocks;
             moverBreaks += o.moverBreaks;
             moverHops += o.moverHops;
+            msChaseStranded += o.msChaseStranded;
+            strandRoutes += o.strandRoutes;
+            escapeFacingRuns += o.escapeFacingRuns;
+            escapeFacingBlocks += o.escapeFacingBlocks;
             for (std::size_t i = 0; i < outcomes.size(); ++i)
                 outcomes[i] += o.outcomes[i];
             solveUsMax = std::max(solveUsMax, o.solveUsMax);
@@ -204,7 +227,9 @@ namespace BrainModel
         LockRules::ChaseClock chase;
         Ms lastChaseSolveAt{ -100000 }, nextChaseSolveAt{ 0 }, bandBlockedUntil{ 0 };
         std::uint32_t bandBlockedBy = 0;
-        bool releaseForChase = false;
+        bool releaseForChase = false;           // Config::walkIn false: the valve's blind release
+        Ms walkInUntil{ 0 };                    // Config::walkIn: the valve's walk-in runs until this
+        Ms lastInRangeAt{ 0 };                  // the last step within melee range (or with no melee band)
         bool followMoved = false;               // stock follow moved the bot in the last step (a spline in flight)
         // WP-Q3: a mover aura runs until moverAuraUntil; its next hop is due at nextMoverHopAt.
         Ms moverAuraUntil{ 0 }, nextMoverHopAt{ 0 };
@@ -300,6 +325,8 @@ namespace BrainModel
             in.now = now;
             in.speed = cfg.speed;
             in.params = cfg.params;
+            in.params.horizon = Ms(LockRules::WalkInHorizonMs(b.walkInUntil.count(), now.count(),
+                cfg.params.horizon.count()));
             for (Solver::Hazard const& h : hazards)
                 if (Solver::Detail::HazardEnd(h) + cfg.params.marginMs >= now)
                     in.hazards.push_back(h);
@@ -307,6 +334,10 @@ namespace BrainModel
                 for (std::size_t j = 0; j < bots.size(); ++j)
                     if (j != i && (bots[j].mode == Mode::Escape || bots[j].mode == Mode::Hold))
                         in.crowd.push_back(bots[j].plan.target);
+            if (cfg.standing)
+                for (std::size_t j = 0; j < bots.size(); ++j)
+                    if (j != i)
+                        in.standing.push_back(bots[j].mode == Mode::Watch ? bots[j].pos : bots[j].plan.target);
             tasks.clear();
             if (kinds)
                 kinds(i, in, now, tasks);
@@ -456,10 +487,15 @@ namespace BrainModel
             b.bandBlockedUntil = Ms(0);
             b.bandBlockedBy = 0;
             ++b.c.chaseReleases;
-            ++b.c.releases;
             b.mode = Mode::Watch;
             b.plan = Solver::Plan();
             b.routePending = false;
+            if (cfg.walkIn)
+            {
+                b.walkInUntil = now + Ms(release);
+                return true;
+            }
+            ++b.c.releases;
             b.releaseUntil = now + Ms(release);
             b.releaseForChase = true;
             return true;
@@ -494,6 +530,7 @@ namespace BrainModel
             Bot& b = bots[i];
             Ms const horizonEnd = now + in.params.horizon;
             bool const released = now < b.releaseUntil;
+            bool const walkIn = now < b.walkInUntil;
             if (!Solver::TargetOk(in, b.pos, now, horizonEnd))
             {
                 b.mode = Mode::Watch;
@@ -519,7 +556,7 @@ namespace BrainModel
                 }
             }
             b.mode = Mode::Watch;
-            if (!released && ChaseValve(i, in, now))
+            if (!released && !walkIn && ChaseValve(i, in, now))
                 return;
             if (released && b.releaseForChase)
                 return;
@@ -529,7 +566,7 @@ namespace BrainModel
             bool const noMotion = cfg.chaseLanding && !b.followMoved;
             if (noMotion || !follow || !follow(i, end) || Dist(b.pos, end) <= cfg.followSlackYd)
             {
-                if (!released)
+                if (!released && !walkIn)
                     ChaseRecovery(b, in, now, budget);
                 return;
             }
@@ -543,7 +580,7 @@ namespace BrainModel
                 || Solver::TargetOk(in, end, arrival, std::max(arrival, horizonEnd));
             if (pc.ok && endOk)
             {
-                if (!released)
+                if (!released && !walkIn)
                     ChaseRecovery(b, in, now, budget);
                 return;
             }
@@ -725,6 +762,8 @@ namespace BrainModel
                 b.mode = Mode::Watch;
                 b.plan = Solver::Plan();
                 b.routePending = false;
+                b.walkInUntil = Ms(0);
+                b.lastInRangeAt = Ms(0);
                 return;
             }
             Ms const horizonEnd = now + in.params.horizon;
@@ -735,6 +774,8 @@ namespace BrainModel
                 b.bandBlockedUntil = Ms(0);
                 b.bandBlockedBy = 0;
             }
+            if (cfg.chaseLanding)
+                StepStranded(i, in, now, tasks);
             if (b.routePending && now > b.routeAskedAt)
             {
                 b.routePending = false;
@@ -806,7 +847,8 @@ namespace BrainModel
                         if (CanSolve(b, now, budget))
                             SolveAndApply(b, in, now);
                     }
-                    else if (TaskHoldUntil(tasks, now) <= now && now < b.bandBlockedUntil && ChaseValve(i, in, now))
+                    else if (TaskHoldUntil(tasks, now) <= now && now < b.bandBlockedUntil && now >= b.walkInUntil
+                        && ChaseValve(i, in, now))
                     {
                         // StepHold: the chase valve also ends a hold on a blocked band.
                     }
@@ -830,6 +872,57 @@ namespace BrainModel
                         }
                     }
                     break;
+            }
+        }
+
+        // M5 CD (C5): the brain's TickBandClock additions and StepStrandRoute. A hold on a blocked band refuses the
+        // chase too (msChaseRefused). A melee bot out of melee range (the band + Landing::kMeleeBandSlackYd) for its
+        // release time, with some ring point clear over the valve's window, is stranded (msChaseStranded); with
+        // strandRoute it routes to the first ring point safe over the horizon (the route search runs in this step, as
+        // in the brain). A whole-ring block is never counted.
+        void StepStranded(std::size_t i, Solver::Input const& in, Ms now, std::vector<Task> const& tasks)
+        {
+            Bot& b = bots[i];
+            if (b.mode == Mode::Hold && now < b.bandBlockedUntil && OutOfMeleeBand(in, b.pos)
+                && now >= b.releaseUntil)
+                b.c.msChaseRefused += static_cast<std::uint32_t>(cfg.step.count());
+            bool const melee = in.role.present && in.role.minYd <= 0.f;
+            if (!melee || Dist(b.pos, in.role.anchor) <= in.role.maxYd + Landing::kMeleeBandSlackYd
+                || b.lastInRangeAt == Ms(0))
+            {
+                b.lastInRangeAt = now;
+                return;
+            }
+            // ChaseReleaseMs for tanks too (the valve's half time made a tank's routes twice as eager: +12-15% barrage
+            // hits in the host model).
+            std::int64_t const release = cfg.chaseRelease.count();
+            if (!LockRules::StrandedFor(b.lastInRangeAt.count(), now.count(), release) || b.mode == Mode::Escape
+                || now < b.walkInUntil || now < b.releaseUntil || TaskHoldUntil(tasks, now) > now
+                || LockRules::ChaseRefusedNow(b.chase, now.count()))
+                return;
+            if (!Landing::RingSafe(in, chaseTarget, b.pos, in.role.maxYd, now,
+                now + Ms(LockRules::ChaseValveWindowMs(release))))
+                return;
+            b.c.msChaseStranded += static_cast<std::uint32_t>(cfg.step.count());
+            if (!cfg.strandRoute || !cfg.routeEnable || b.routePending || now - b.lastRouteAt < cfg.routeRetry)
+                return;
+            Ms const horizonEnd = now + in.params.horizon;
+            for (std::uint32_t k = 0; k < Landing::kRingPoints; ++k)
+            {
+                Vec3 const q = Landing::RingPoint(chaseTarget, b.pos, in.role.maxYd - LockRules::kStrandRingInsetYd, k);
+                if (!Solver::PointSafe(in, q, now, horizonEnd))
+                    continue;
+                b.routeGoal = q;
+                b.routePending = true;
+                b.routeAskedAt = now - Ms(1);
+                b.plan = Solver::Plan();
+                b.plan.target = b.pos;
+                b.plan.path = { b.pos };
+                b.plan.arriveAt = now;
+                b.plan.holdUntil = now + Ms(250);
+                b.mode = Mode::Hold;
+                ++b.c.strandRoutes;
+                return;
             }
         }
 
@@ -883,6 +976,17 @@ namespace BrainModel
             {
                 float const d = Dist(b.pos, to);
                 b.moving = d > 0.01f;
+                // C6: an escape step walking away from its target: stock `set facing` ("not facing target") would run
+                // on this AI tick, unless the lock refuses it.
+                float const away = (to.x - b.pos.x) * (chaseTarget.x - b.pos.x)
+                    + (to.y - b.pos.y) * (chaseTarget.y - b.pos.y);
+                if (b.moving && b.mode == Mode::Escape && away < 0.f)
+                {
+                    if (cfg.escapeFacingBlock && LockRules::FacingOnlyRefused(true, false))
+                        ++b.c.escapeFacingBlocks;
+                    else
+                        ++b.c.escapeFacingRuns;
+                }
                 float const stepYd = cfg.speed * static_cast<float>((end - from).count()) / 1000.f;
                 if (d > 0.f)
                 {

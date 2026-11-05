@@ -111,12 +111,25 @@ namespace BossMechanics
         uint32 landingBlocks = 0;
         uint32 motionEndStops = 0;
         // M4 WP-F2 (STAGE-M4-R2-REPORT M-1, m-3): ms in Idle or Watch out of the melee band while the lock refuses the
-        // melee chase (no point of the melee ring is safe), sampled by the brain; the times the safety valve
+        // melee chase (no point of the melee ring is safe), sampled by the brain (M5 CD: also in a hold on a blocked
+        // band, which refuses the chase too); the times the safety valve (a walk-in since M5 CD)
         // (BossMechanics.Bots.ChaseReleaseMs) let a refused chase through; the recovery role solves run for a refused
         // chase (also in roleSolves).
         uint32 msChaseRefused = 0;
         uint32 chaseReleases = 0;
         uint32 chaseSolves = 0;
+        // M5 CD (C5): ms a melee bot or tank spent out of melee range for longer than ChaseReleaseMs while a point of
+        // the melee ring stayed clear over the valve's window and the chase was not refused (stranded on its chase
+        // line; whole-ring blocks are never counted), sampled by the brain; and the strand routes that asked the
+        // route search for a clear ring point.
+        uint32 msChaseStranded = 0;
+        uint32 strandRoutes = 0;
+        // M5 CD (C6): facing-only actions (`set facing`) the lock refused while the brain walked the bot (Escape),
+        // also in lockBlocks; facingBlocks stays the look-away count.
+        uint32 escapeFacingBlocks = 0;
+        // M5 CD (E): waker wakes for the descriptor (its revision moved since the bot's view, a listed cast it can
+        // kick started, a listed urgent or deadline aura it can dispel appeared), also in wakes.
+        uint32 descriptorWakes = 0;
         // M4 WP-Q3: mover auras (LockRules::kMoverAuras, Killing Spree) cancelled because the brain walked, held or
         // froze the bot while one ran.
         uint32 moverBreaks = 0;

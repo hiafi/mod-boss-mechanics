@@ -1300,6 +1300,74 @@ namespace
         CHECK(!FallbackWalkCap(Ms(0), 0, 10.f, 1, 1.f).walk);
     }
 
+    // M5 CD (C3 B): the spacing term. At equal path cost a spot 0.5 yd from a standing member scores worse than one
+    // 6.5 yd away by spacing x (spacingYd - 0.5); with a melee band, or while a hard region is live, the term is off.
+    void TestSpacing()
+    {
+        using Solver::Detail::Score;
+        Input in = MakeInput({ 0.f, 0.f, 0.f });
+        Vec3 const member{ 10.f, 0.f, 0.f };
+        Vec3 const nearSpot{ 9.5f, 0.f, 0.f };
+        Vec3 const farSpot{ 3.5f, 0.f, 0.f };
+        Ms const at = kNow + Ms(1000);
+        auto delta = [&](Input const& base, Vec3 const& c)
+        {
+            Input with = base;
+            with.standing = { member };
+            return Score(with, c, 5.f, at, Solver::kForever, false) - Score(base, c, 5.f, at, Solver::kForever, false);
+        };
+        float const w = in.params.w.spacing;
+        CHECK(w > 0.f && in.params.spacingYd == 6.f);
+        CHECK(std::fabs(delta(in, nearSpot) - w * 5.5f) < 1e-3f);
+        CHECK(std::fabs(delta(in, farSpot)) < 1e-6f);
+        Input with = in;
+        with.standing = { member };
+        CHECK(Score(with, farSpot, 5.f, at, Solver::kForever, false)
+            < Score(with, nearSpot, 5.f, at, Solver::kForever, false));
+        // A ranged band keeps the term.
+        Input ranged = in;
+        ranged.role.present = true;
+        ranged.role.anchor = { 30.f, 0.f, 0.f };
+        ranged.role.minYd = 8.f;
+        ranged.role.maxYd = 28.f;
+        CHECK(delta(ranged, nearSpot) > 1.f);
+        // A melee band: off.
+        Input melee = in;
+        melee.role.present = true;
+        melee.role.anchor = { 9.f, 0.f, 0.f };
+        melee.role.minYd = 0.f;
+        melee.role.maxYd = 4.f;
+        CHECK(std::fabs(delta(melee, nearSpot)) < 1e-6f);
+        // A live hard region (a Stack): off; once it is over, on again; a soft one keeps it.
+        Input stack = in;
+        Solver::Region r;
+        r.id = 7;
+        r.shape = Shape::Circle(4.f);
+        r.poses = { Pose{ 9.f, 0.f, 0.f, 0.f } };
+        r.from = kNow;
+        r.to = kNow + Ms(3000);
+        stack.regions.push_back(r);
+        CHECK(std::fabs(delta(stack, nearSpot)) < 1e-6f);
+        stack.regions[0].to = kNow - Ms(1000);
+        CHECK(delta(stack, nearSpot) > 1.f);
+        stack.regions[0].to = kNow + Ms(3000);
+        stack.regions[0].hard = false;
+        CHECK(delta(stack, nearSpot) > 1.f);
+        // Weight 0: off.
+        Input off = in;
+        off.params.w.spacing = 0.f;
+        CHECK(std::fabs(delta(off, nearSpot)) < 1e-6f);
+
+        // A solve: a circle on the bot, a member standing 3 yd east. The escape ends at least spacingYd from it.
+        Input solve = MakeInput({ 0.f, 0.f, 0.f });
+        solve.hazards.push_back(MakeHazard(1, Shape::Circle(3.f), Pose{}, InstantIn(3000)));
+        solve.standing = { { 3.f, 0.f, 0.f } };
+        StraightOracle oracle;
+        Plan const plan = Solver::Solve(solve, oracle);
+        CHECK(IsMove(plan));
+        CHECK(Dist(plan.target, { 3.f, 0.f, 0.f }) >= solve.params.spacingYd - 0.01f);
+    }
+
     // STAGE-M4-R-REPORT m-4: a Fallback that breaks a hard region never holds through the Escape re-check.
     void TestFallbackHoldsNeverViolating()
     {
@@ -1462,6 +1530,7 @@ int main()
     TestTrueEnclosure();
     TestFallbackWalkCap();
     TestFallbackHoldsNeverViolating();
+    TestSpacing();
     Benchmark();
     return Report("solver_test");
 }

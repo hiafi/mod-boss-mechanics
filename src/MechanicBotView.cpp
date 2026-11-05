@@ -1030,6 +1030,7 @@ namespace BossMechanics
         o.lookAwayMarginDeg = cfg.lookAwayMarginDeg;
         o.freezeSettle = Milliseconds(cfg.freezeSettleMs);
         o.params.w.region = cfg.regionComfortWeight;
+        o.params.w.spacing = cfg.spacingWeight;
         o.params.startDelay = Milliseconds(cfg.startDelayMs);
         o.params.marginMs = Milliseconds(cfg.safetyMarginMs);
         o.params.horizon = Milliseconds(cfg.horizonMs);

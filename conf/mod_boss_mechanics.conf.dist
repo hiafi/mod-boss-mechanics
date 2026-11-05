@@ -346,7 +346,9 @@ BossMechanics.Bots.RoleSlackMs = 1000
 #        Description: A melee bot out of reach of its target whose way back into melee is refused because the
 #                     whole melee ring round the target is in a warned danger walks back in anyway after this long,
 #                     and fights there for as long, in milliseconds (500-60000). Only while some spot of the ring
-#                     stays clear for that time plus 2 s. Tanks wait half of it.
+#                     stays clear for that time plus 2 s, and meanwhile it still dodges what threatens it within
+#                     that window. Tanks wait half of it. A melee bot or tank out of reach this long while some spot
+#                     of the ring is clear (its own way in runs into a lasting danger) is routed round it.
 #        Default:     3000
 #
 
@@ -481,6 +483,18 @@ BossMechanics.Bots.HumanSlackYd = 1.0
 #
 
 BossMechanics.Bots.RegionComfortWeight = 1.5
+
+#
+#    BossMechanics.Bots.SpacingWeight
+#        Description: Ranged bots and healers (no melee band): score per yard a spot is closer than 6 yards to
+#                     another group member (where it stands, or where it is going) (0-20; 0 = off). Keeps two bots
+#                     out of one barrage shot or one donut: standing together, a shot on either catches both. Off
+#                     for melee and tanks (they share the boss) and while a get-in shape (Stack, Soak, Bait, a
+#                     lane) is live.
+#        Default:     1.5
+#
+
+BossMechanics.Bots.SpacingWeight = 1.5
 
 #
 #    BossMechanics.Bots.TrackSlackYd
