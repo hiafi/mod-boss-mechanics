@@ -1690,7 +1690,12 @@ namespace BossMechanics
             if (d >= role.minYd && d <= role.maxYd)
                 return;
             uint32 const ms = static_cast<uint32>((now - last).count());
-            if (stranded)
+            // M5 CD (S2): a hold on a blocked band refuses the chase as well (its refusals feed the valve), and was
+            // never counted. M5 WP-F (R m-12): that time is refused, not also stranded (the two clocks are disjoint;
+            // the strand route still runs).
+            bool const refusedHold = bot && st.mode == MechanicBotMode::Hold && now < st.bandBlockedUntil
+                && OutOfMeleeBand(bot, role, st.input.bot) && !(now < st.releaseUntil);
+            if (stranded && !refusedHold)
                 st.counters.msChaseStranded += ms;
             // WP-F2 (R2 m-3): Idle or Watch out of the melee band with the chase refused (not released): what the
             // lock's chase refusal costs a melee bot, which msOutOfBand does not see.
@@ -1701,10 +1706,7 @@ namespace BossMechanics
                     st.counters.msChaseRefused += ms;
                 return;
             }
-            // M5 CD (S2): a hold on a blocked band refuses the chase as well (its refusals feed the valve), and was
-            // never counted.
-            if (bot && st.mode == MechanicBotMode::Hold && now < st.bandBlockedUntil
-                && OutOfMeleeBand(bot, role, st.input.bot) && !(now < st.releaseUntil))
+            if (refusedHold)
                 st.counters.msChaseRefused += ms;
             st.counters.msOutOfBand += ms;
             if (TaskHoldUntil(st, now) > now)

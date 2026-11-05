@@ -19,8 +19,10 @@
  *   "purify" prefixes), so the 50% gate does not hold it (decision §7.1 #3). Normal entries stay on the stock rows.
  * - `boss purge`: a listed buff (PurgeEntry) on the encounter's owner or one of its tracked units, in range, with the
  *   class's purge (Purge, offensive Dispel Magic, Spellsteal, Tranquilizing Shot, the Felhunter's Devour Magic).
- * - Counters (MechanicBotCounters, WP-P block): counted when the cast happens (a cast hook for the bot's own spells,
- *   the action for its pet's), whichever row cast it; deadline misses on the member whose aura expired (an aura hook).
+ * - Counters (MechanicBotCounters, WP-P block): the cast is noted (a cast hook for the bot's own spells, the action
+ *   for its pet's), whichever row cast it, and counted by the aura its dispel removed (an aura hook; the core picks
+ *   that aura at random among the target's auras of the type, M5 WP-F); deadline misses on the member whose aura
+ *   expired (the same hook).
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_BOT_DISPEL_H
@@ -32,6 +34,7 @@
 
 #include "Action.h"
 #include "MechanicBotStrategy.h"
+#include "ObjectGuid.h"
 #include "PartyMemberToDispel.h"
 #include "Trigger.h"
 #include <string>
@@ -60,8 +63,14 @@ class MechanicBotDispelTargetValue : public PartyMemberToDispel
 public:
     explicit MechanicBotDispelTargetValue(PlayerbotAI* botAI);
 
+    Unit* Get() override;
+
 protected:
     Unit* Calculate() override;
+
+private:
+    ObjectGuid _pick;       // the listed pick of the last Calculate (empty: none, or the stock answer)
+    uint32 _pickAura = 0;
 };
 
 class MechanicBotDispelUrgentTrigger : public Trigger

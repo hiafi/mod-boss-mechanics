@@ -179,6 +179,8 @@ namespace BossMechanics
         // M5 CD (E): the waker's descriptor signatures at its last look (LockRules::SignatureWakeDue).
         uint64 kickWakeSignature = 0;
         uint64 dispelWakeSignature = 0;
+        // M5 WP-F (R m-6): `boss dispel urgent` plans nothing before this (a cast it planned was refused).
+        Milliseconds dispelRetryAt{ 0 };
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

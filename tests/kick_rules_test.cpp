@@ -265,6 +265,44 @@ namespace
         CHECK(!Assign(lowLate, one, 0, due, now, defer).cast);
     }
 
+    // M5 WP-F (R m-9): another kicker covers a due cast only when it reaches that cast's caster.
+    void TestAssignHoldReach()
+    {
+        Ms const defer = ms(600);
+        Ms const now = ms(30000);
+        std::vector<KickerFacts> two = { { 1, now, ms(10000) }, { 2, now + ms(3000), ms(10000) } };
+        std::vector<CandidateFacts> lowTwo = { Cand(1, now, { true, true }) };
+        // The high cast due in 5 s comes from caster 77.
+        std::vector<DueCast> const due = { { 3, now + ms(5000), 77 } };
+        // Kicker 2 reaches caster 77: it covers it, kicker 1 kicks the low cast now (the plain rule's answer).
+        std::vector<Desc::DueReach> reach = { { 77, { 1, 2 } } };
+        CHECK(Assign(lowTwo, two, 0, due, now, defer, reach).cast == std::optional<std::size_t>(0));
+        CHECK(Assign(lowTwo, two, 0, due, now, defer).cast == std::optional<std::size_t>(0));
+        // Kicker 2 is out of range of caster 77: no cover, kicker 1 holds its kick for the high cast.
+        reach = { { 77, { 1 } } };
+        Assignment const a = Assign(lowTwo, two, 0, due, now, defer, reach);
+        CHECK(!a.cast);
+        CHECK(a.held.size() == 1 && a.held[0] == 0);
+        // A due cast whose caster the list does not name (only noted, no unit) keeps the plain rule.
+        reach = { { 88, { 1 } } };
+        CHECK(Assign(lowTwo, two, 0, due, now, defer, reach).cast == std::optional<std::size_t>(0));
+    }
+
+    // M5 WP-F (R M-2): the spells that stop a cast besides the kick table.
+    void TestStopsCasts()
+    {
+        CHECK(StopsCasts(kEffectInterruptCast, 0));
+        CHECK(StopsCasts(kEffectApplyAura, kAuraModStun));          // Hammer of Justice, Bash, Kidney Shot
+        CHECK(StopsCasts(kEffectApplyAura, kAuraModSilence));       // Silence, Arcane Torrent
+        CHECK(StopsCasts(kEffectApplyAura, kAuraModPacifySilence));
+        CHECK(StopsCasts(kEffectApplyAura, kAuraModConfuse));       // Polymorph, Sap, Repentance
+        CHECK(StopsCasts(kEffectApplyAura, kAuraModFear));          // Psychic Scream, Fear
+        CHECK(!StopsCasts(kEffectApplyAura, 3));                    // a periodic damage aura
+        CHECK(!StopsCasts(kEffectApplyAura, 26));                   // root (MOD_ROOT): the cast goes on
+        CHECK(!StopsCasts(2, kAuraModStun));                        // school damage, the aura field unused
+        CHECK(!StopsCasts(0, 0));
+    }
+
     // ---- stock kicks and counters ------------------------------------------------------------------------------
 
     void TestStockVerdict()
@@ -346,6 +384,8 @@ int main()
     TestAssignDefer();
     TestAlternation();
     TestAssignHold();
+    TestAssignHoldReach();
+    TestStopsCasts();
     TestStockVerdict();
     TestClassify();
     TestMissed();

@@ -26,6 +26,7 @@
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
 #include "MechanicBotState.h"
+#include "MechanicBotTargets.h"
 #include "MechanicLanding.h"
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
@@ -353,6 +354,7 @@ namespace
         bool pull = false;          // X8: a pull request refused
         bool landing = false;       // WP-Q2: a gap closer (or the melee chase) refused for its landing
         bool escapeFacing = false;  // M5 CD (C6): a facing-only action refused in Escape (not look-away)
+        bool quiet = false;         // M5 WP-F (R m-1): refused without a count (`boss focus` while the bot walks)
     };
 
     Judgement Allow(bool unknownCast = false)
@@ -405,11 +407,16 @@ namespace
         if (BotBrain::TankOwned(st) && (typeid(*action) == typeid(TankFaceAction) || action->getName() == "tank face"))
             return Blocked(LockVerdict::BlockMove);
         bool const lookAway = BotFacing::LookAwayActive(st, now);
+        // M5 WP-F (R m-1): `boss focus` attacks the descriptor's pick (st.targets.focus), not its target value.
+        bool const focus = dynamic_cast<MechanicBotFocusAction*>(action) != nullptr;
         if (lookAway)
         {
             if (dynamic_cast<SetFacingTargetAction*>(action) || dynamic_cast<CastFacingUnitAction*>(action))
                 return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
             if (IsAttackOnly(action) && BotFacing::WouldTurnAway(bot, st, now, action->GetTarget()))
+                return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
+            if (focus && st.targets.focus.target && BotFacing::WouldTurnAway(bot, st, now,
+                botAI->GetUnit(ObjectGuid(st.targets.focus.target))))
                 return Blocked(LockVerdict::BlockFacing, LeakKind::Turn);
         }
 
@@ -466,6 +473,19 @@ namespace
         // Idle or Watch after a break or under look-away: only casts are judged (cast-time after a break, facing casts
         // under look-away).
         bool const castsOnly = mode == MechanicBotMode::Idle || mode == MechanicBotMode::Watch;
+
+        // M5 WP-F (R m-1): `boss focus` is an AttackAction (so a MovementAction) that only picks a target and starts
+        // the swing: allowed where the bot stands (Hold, Freeze), as the stock pickers are; in Escape Attack() would
+        // clear the walk (MotionMaster::Clear), so it waits, uncounted (its trigger stays true every tick of the
+        // escape).
+        if (focus)
+        {
+            if (mode != MechanicBotMode::Escape)
+                return Allow();
+            Judgement j = Blocked(LockVerdict::BlockMove);
+            j.quiet = true;
+            return j;
+        }
 
         // Foreign movers (Freeze: every one, decision §7.4).
         if (IsAttackOnly(action))
@@ -599,6 +619,8 @@ namespace
     // Counts a judgement: 1 to allow, 0 to drop.
     float CountJudgement(MechanicBotState& st, Judgement const& j)
     {
+        if (j.quiet && j.verdict != LockVerdict::Allow)
+            return 0.f;
         if (j.unknownCast)
             ++st.counters.unknownCasts;
         if (j.pull && j.verdict != LockVerdict::Allow)

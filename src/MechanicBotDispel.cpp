@@ -24,7 +24,9 @@
 #include "Log.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
+#include "MechanicBotFacing.h"
 #include "MechanicBotState.h"
+#include "MechanicBotTargets.h"
 #include "MechanicDescriptorView.h"
 #include "MechanicDispelRules.h"
 #include "MechanicLockRules.h"
@@ -60,8 +62,25 @@ namespace
     constexpr Ms kPermanent{ std::numeric_limits<int32>::max() };
     constexpr float kPurgeScanYd = 60.f;    // tracked units further than this are not looked at
     // A bot that casts on a listed aura claims it this long (the registry's kick claims, keyed by the afflicted unit
-    // and the aura id), so the other bots do not spend a GCD on the same aura; a failed cast releases it at once.
+    // and the aura id), so the other bots do not spend a GCD on the same aura; a failed cast releases it at once, and
+    // so does a cast that resolved and left the aura on (the core removed another aura of the type, or it resisted):
+    // the next bot's dispel follows at once (M5 WP-F, R M-1).
     constexpr Milliseconds kClaimMs{ 1000 };
+    // After `boss dispel urgent` failed to cast (CastSpell refused what Usable passed), the bot waits this long before
+    // it plans another (R m-6: no interrupt-and-fail on every tick).
+    constexpr Milliseconds kUrgentRetryMs{ 500 };
+
+    Milliseconds Now()
+    {
+        return GameTime::GetGameTimeMS();
+    }
+
+    // The cures and purges cast on this map thread, matched to the auras they remove (R M-1).
+    DispelRules::PendingCures& Pending()
+    {
+        thread_local DispelRules::PendingCures book;
+        return book;
+    }
 
     // Playerbots.DispelAuraDuration: HasAuraToDispel passes over auras with less than this left.
     Ms StockSkip()
@@ -145,6 +164,25 @@ namespace
         return out;
     }
 
+    // The caster lacks the spell's power cost (mana for every cure; KickOf's test, no Spell built).
+    bool ShortOfPower(Unit const* caster, SpellInfo const* info)
+    {
+        return info->PowerType < MAX_POWERS && int32(caster->GetPower(Powers(info->PowerType)))
+            < info->CalcPowerCost(caster, info->GetSchoolMask());
+    }
+
+    // CheckCast of the spell on the target, as PlayerbotAI::CanCastSpell runs it (no power: ShortOfPower does that
+    // without consuming spell-mod charges), but also while the bot casts or channels: what the urgent path asks before
+    // it interrupts the cast. Facing results pass (a friendly cure needs none; PlayerbotAI::CastSpell turns the bot).
+    bool CheckCastPasses(Player* bot, SpellInfo const* info, Unit* target)
+    {
+        Spell* spell = new Spell(bot, info, TRIGGERED_IGNORE_POWER_AND_REAGENT_COST);
+        spell->m_targets.SetUnitTarget(target);
+        SpellCastResult const result = spell->CheckCast(true);
+        delete spell;
+        return result == SPELL_CAST_OK || result == SPELL_FAILED_NOT_INFRONT || result == SPELL_FAILED_UNIT_NOT_INFRONT;
+    }
+
     // Can the bot (or its pet) cast this spell on the target now? `mayInterrupt`: a cast in progress is not a reason
     // to wait (the urgent path interrupts it).
     bool Usable(PlayerbotAI* botAI, Player* bot, MechanicBotState const& st, DispelRules::Owned const& o, Unit* target,
@@ -157,8 +195,8 @@ namespace
         {
             Creature* pet = FindPet(bot);
             return pet && pet->HasSpell(o.spellId) && !pet->HasSpellCooldown(o.spellId)
-                && !pet->HasUnitState(UNIT_STATE_CASTING) && pet->IsWithinDistInMap(target, info->GetMaxRange(!hostile,
-                pet)) && pet->IsWithinLOSInMap(target);
+                && !pet->HasUnitState(UNIT_STATE_CASTING) && !ShortOfPower(pet, info)
+                && pet->IsWithinDistInMap(target, info->GetMaxRange(!hostile, pet)) && pet->IsWithinLOSInMap(target);
         }
         if (bot->HasUnitState(UNIT_STATE_LOST_CONTROL) || bot->HasSpellCooldown(o.spellId)
             || bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
@@ -172,9 +210,17 @@ namespace
         if (target != bot && (!bot->IsWithinDistInMap(target, info->GetMaxRange(!hostile, bot))
             || !bot->IsWithinLOSInMap(target)))
             return false;
-        // CanCastSpell builds a Spell and runs CheckCast (power, immunity, ...); a cast in progress would fail it.
+        // R m-6: CanCastSpell checks without the power cost (TRIGGERED_IGNORE_POWER_AND_REAGENT_COST), so a bot short
+        // of mana would interrupt its cast for a cure that then fails, on every tick.
+        if (ShortOfPower(bot, info))
+            return false;
+        // R m-8: a cure or purge that turns the bot (Tranquilizing Shot) keeps out of a look-away window.
+        if (target != bot && BotFacing::TurnsCaster(info) && BotFacing::WouldTurnAway(bot, st, Now(), target))
+            return false;
+        // A cast in progress: the urgent path interrupts it only for a cure CheckCast accepts (CanCastSpell refuses
+        // during a channel, so the check runs here).
         if (bot->IsNonMeleeSpellCast(false, false, true))
-            return mayInterrupt;
+            return mayInterrupt && CheckCastPasses(bot, info, target);
         return botAI->CanCastSpell(o.spellId, target, true);
     }
 
@@ -272,15 +318,20 @@ namespace
         Aura const* aura = nullptr;
     };
 
+    bool ClaimedByOther(Player* bot, Unit const* unit, uint32 auraId);
+
     // The listed harmful auras of the types in `typeMask` on one member. `stockSkip`: pass over a not-yet-urgent
-    // aura with less than the stock skip left, as HasAuraToDispel does.
+    // aura with less than the stock skip left, as HasAuraToDispel does. `claimer`: pass over an aura another bot
+    // cures right now (R m-7; nullptr: keep them).
     void Gather(Descriptor const& view, Unit* member, DispelRules::MemberRank rank, uint32 typeMask, bool stockSkip,
-        std::vector<Desc::Affliction>& afflictions, std::vector<Listed>& where)
+        std::vector<Desc::Affliction>& afflictions, std::vector<Listed>& where, Player* claimer = nullptr)
     {
         for (DispelEntry const& e : view.dispels)
         {
             Aura const* aura = member->GetAura(e.auraId);
             if (!aura || aura->IsRemoved())
+                continue;
+            if (claimer && ClaimedByOther(claimer, member, e.auraId))
                 continue;
             SpellInfo const* info = aura->GetSpellInfo();
             if (!info || info->IsPositive() || !(typeMask & DispelRules::Bit(info->Dispel)))
@@ -326,6 +377,8 @@ namespace
     // `boss dispel urgent`: the first urgent pick the bot can cure now.
     std::optional<Plan> PlanUrgent(PlayerbotAI* botAI, Player* bot, MechanicBotState& st)
     {
+        if (Now() < st.dispelRetryAt)
+            return std::nullopt;
         Descriptor const* d = ActiveDescriptor(bot, st);
         if (!d || d->dispels.empty())
             return std::nullopt;
@@ -369,6 +422,10 @@ namespace
         if (!mask)
             return std::nullopt;
 
+        Registry const* reg = Registry::Get(bot->GetMap());
+        if (!reg)
+            return std::nullopt;
+        Milliseconds const now = Now();
         std::vector<ObjectGuid> guids{ st.descriptor.owner };
         for (EncounterUnit const& u : st.descriptor.units)
             guids.push_back(u.guid);
@@ -378,6 +435,9 @@ namespace
         {
             Unit* unit = ObjectAccessor::GetUnit(*bot, guid);
             if (!AliveHere(unit, bot) || !bot->IsWithinDistInMap(unit, kPurgeScanYd) || !bot->IsValidAttackTarget(unit))
+                continue;
+            // R m-3: never a hostile spell on a unit the ignore list holds now.
+            if (BotTargets::IsIgnoredNow(st, *reg, bot, unit, now))
                 continue;
             for (PurgeEntry const& e : d->purges)
             {
@@ -408,8 +468,10 @@ namespace
         return std::nullopt;
     }
 
-    // Counts one cure or purge cast by `caster` (or its pet) of `spellId` on `target`, before it lands.
-    void CountCast(Player* caster, MechanicBotState& st, uint32 spellId, Unit* target)
+    // Notes one cure or purge cast by `caster` (or its pet) of `spellId` on `target`, before it lands (R M-1): it is
+    // counted by the aura it removes (CountRemoval). Nothing is noted when the target carries no listed aura of the
+    // spell's types (nothing to count).
+    void NoteCure(Player* caster, MechanicBotState& st, uint32 spellId, Unit* target)
     {
         if (!target || !target->IsInWorld())
             return;
@@ -419,63 +481,103 @@ namespace
         uint32 const types = SpellTypes(sSpellMgr->GetSpellInfo(spellId));
         if (!types)
             return;
-        MechanicBotCounters& c = st.counters;
-        if (caster->IsFriendlyTo(target))
+        DispelRules::PendingCure cure;
+        cure.caster = caster->GetGUID().GetRawValue();
+        cure.target = target->GetGUID().GetRawValue();
+        cure.types = types;
+        cure.at = Now();
+        cure.friendly = caster->IsFriendlyTo(target);
+        if (cure.friendly)
         {
             if (d->dispels.empty())
                 return;
             std::vector<DispelRules::TargetAura> auras;
-            std::vector<Aura const*> handles;
             for (DispelEntry const& e : d->dispels)
                 if (Aura const* aura = target->GetAura(e.auraId))
                     if (!aura->IsRemoved() && !aura->GetSpellInfo()->IsPositive())
-                    {
-                        auras.push_back({ e.auraId, aura->GetSpellInfo()->Dispel, Ms(aura->GetDuration()) });
-                        handles.push_back(aura);
-                    }
-            DispelRules::CastClass const cls = DispelRules::ClassifyCast(DispelRules::UrgentView(*d, StockSkip()),
-                types, auras);
-            switch (cls.kind)
-            {
-                case DispelRules::CastKind::Urgent:
-                {
-                    ++c.urgentDispels;
-                    Aura const* aura = handles[cls.aura];
-                    if (aura->GetMaxDuration() > 0)
-                        c.urgentLatencyMsMax = std::max<uint32>(c.urgentLatencyMsMax,
-                            static_cast<uint32>(std::max(0, aura->GetMaxDuration() - aura->GetDuration())));
-                    break;
-                }
-                case DispelRules::CastKind::Deadline:
-                    ++c.deadlineDispels;
-                    break;
-                case DispelRules::CastKind::Normal:
-                    ++c.listedDispels;
-                    break;
-                case DispelRules::CastKind::None:
-                    return;
-            }
-            if (GetConfig().bots.debug)
-                LOG_INFO(kLog, "Bot {}: dispel {} on {} ({}, aura {})", caster->GetName(), spellId, target->GetName(),
-                    cls.kind == DispelRules::CastKind::Urgent ? "urgent" : cls.kind == DispelRules::CastKind::Deadline
-                    ? "deadline" : "listed", auras[cls.aura].auraId);
-            return;
+                        auras.push_back({ e.auraId, aura->GetSpellInfo()->Dispel, Remaining(aura) });
+            Descriptor const view = DispelRules::UrgentView(*d, StockSkip());
+            if (DispelRules::ClassifyCast(view, types, auras).kind == DispelRules::CastKind::None)
+                return;
+            cure.urgentTypes = DispelRules::UrgentTypes(view, types, auras);
         }
-        if (d->purges.empty())
-            return;
-        std::vector<DispelRules::EnemyAura> auras;
-        for (PurgeEntry const& e : d->purges)
-            if (Aura const* aura = target->GetAura(e.auraId))
-                if (!aura->IsRemoved())
-                    auras.push_back({ e.auraId, aura->GetSpellInfo()->Dispel });
-        if (!DispelRules::CountsAsPurge(*d, target->GetEntry(), types, auras))
-            return;
-        ++c.purges;
+        else
+        {
+            if (d->purges.empty())
+                return;
+            std::vector<DispelRules::EnemyAura> auras;
+            for (PurgeEntry const& e : d->purges)
+                if (Aura const* aura = target->GetAura(e.auraId))
+                    if (!aura->IsRemoved())
+                        auras.push_back({ e.auraId, aura->GetSpellInfo()->Dispel });
+            if (!DispelRules::CountsAsPurge(*d, target->GetEntry(), types, auras))
+                return;
+        }
+        Pending().Note(cure);
         if (GetConfig().bots.debug)
-            LOG_INFO(kLog, "Bot {}: purge {} on {}", caster->GetName(), spellId, target->GetName());
+            LOG_INFO(kLog, "Bot {}: {} {} on {} (counted by what it removes)", caster->GetName(),
+                cure.friendly ? "cure" : "purge", spellId, target->GetName());
     }
 
-    // Claims the aura and casts the plan's spell; the pet's casts are counted here, the bot's own by the cast hook.
+    // An aura removed by an enemy spell (a dispel, a purge, Spellsteal): counted on the bot whose noted cure removed
+    // it (R M-1). Cheap when nothing is noted on this map thread.
+    void CountRemoval(Unit* unit, Aura const* aura)
+    {
+        DispelRules::PendingCures& book = Pending();
+        if (book.Empty() || !unit || !aura)
+            return;
+        SpellInfo const* info = aura->GetSpellInfo();
+        std::optional<DispelRules::PendingCure> const cure = info ? book.Take(unit->GetGUID().GetRawValue(),
+            info->Dispel, Now()) : std::nullopt;
+        if (!cure || !unit->IsInWorld())
+            return;
+        Player* caster = ObjectAccessor::GetPlayer(*unit, ObjectGuid(cure->caster));
+        PlayerbotAI* botAI = caster ? GET_PLAYERBOT_AI(caster) : nullptr;
+        MechanicBotState* st = botAI ? BotBrain::StateOf(botAI) : nullptr;
+        Descriptor const* d = st ? ActiveDescriptor(caster, *st) : nullptr;
+        if (!d)
+            return;
+        MechanicBotCounters& c = st->counters;
+        uint32 const auraId = aura->GetId();
+        if (!cure->friendly)
+        {
+            if (!DispelRules::CountsAsPurge(*d, unit->GetEntry(), DispelRules::Bit(info->Dispel),
+                { { auraId, info->Dispel } }))
+                return;
+            ++c.purges;
+            if (GetConfig().bots.debug)
+                LOG_INFO(kLog, "Bot {}: purged {} from {}", caster->GetName(), auraId, unit->GetName());
+            return;
+        }
+        DispelRules::RemovalCount const r = DispelRules::ClassifyRemoval(DispelRules::UrgentView(*d, StockSkip()),
+            auraId, Remaining(aura), (cure->urgentTypes & DispelRules::Bit(info->Dispel)) != 0);
+        switch (r.kind)
+        {
+            case DispelRules::CastKind::Urgent:
+                ++c.urgentDispels;
+                if (aura->GetMaxDuration() > 0)
+                    c.urgentLatencyMsMax = std::max<uint32>(c.urgentLatencyMsMax,
+                        static_cast<uint32>(std::max(0, aura->GetMaxDuration() - aura->GetDuration())));
+                break;
+            case DispelRules::CastKind::Deadline:
+                ++c.deadlineDispels;
+                break;
+            case DispelRules::CastKind::Normal:
+                ++c.listedDispels;
+                break;
+            case DispelRules::CastKind::None:
+                break;
+        }
+        if (r.wrongAura)
+            ++c.dispelWrongAura;
+        if (GetConfig().bots.debug && (r.kind != DispelRules::CastKind::None || r.wrongAura))
+            LOG_INFO(kLog, "Bot {}: dispel removed {} from {} ({}{})", caster->GetName(), auraId, unit->GetName(),
+                r.kind == DispelRules::CastKind::Urgent ? "urgent" : r.kind == DispelRules::CastKind::Deadline
+                ? "deadline" : r.kind == DispelRules::CastKind::Normal ? "listed" : "unlisted",
+                r.wrongAura ? ", the urgent aura stayed" : "");
+    }
+
+    // Claims the aura and casts the plan's spell; the pet's casts are noted here, the bot's own by the cast hook.
     bool CastPlan(PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Plan const& plan, bool interrupt)
     {
         Registry* reg = Registry::Get(bot->GetMap());
@@ -485,9 +587,11 @@ namespace
         bool ok = false;
         if (plan.pet)
         {
+            // Noted first: an instant pet spell lands inside prepare.
+            NoteCure(bot, st, plan.spellId, plan.target);
             ok = CastPetSpell(bot, plan.spellId, plan.target);
-            if (ok)
-                CountCast(bot, st, plan.spellId, plan.target);
+            if (!ok)
+                Pending().Forget(bot->GetGUID().GetRawValue(), plan.target->GetGUID().GetRawValue());
         }
         else
         {
@@ -495,9 +599,19 @@ namespace
                 bot->InterruptNonMeleeSpells(false);
             ok = botAI->CastSpell(plan.spellId, plan.target);
         }
-        if (!ok && reg)
+        if (!reg)
+            return ok;
+        if (!ok)
+        {
             reg->ReleaseCast(key, bot->GetGUID());
-        return ok;
+            return false;
+        }
+        // An instant spell without travel has landed by now: if the aura is still on (the core removed another aura
+        // of the type, or the dispel was resisted), free it for the next bot's dispel at once (R M-1).
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(plan.spellId);
+        if (info && info->Speed <= 0.f && plan.target->IsInWorld() && plan.target->HasAura(plan.auraId))
+            reg->ReleaseCast(key, bot->GetGUID());
+        return true;
     }
 
     // The bot's own casts of a table spell (whichever action cast it: ours, a stock cure row, a YAML row).
@@ -514,11 +628,12 @@ namespace
             PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
             MechanicBotState* st = botAI ? BotBrain::StateOf(botAI) : nullptr;
             if (st)
-                CountCast(player, *st, spell->GetSpellInfo()->Id, spell->m_targets.GetUnitTarget());
+                NoteCure(player, *st, spell->GetSpellInfo()->Id, spell->m_targets.GetUnitTarget());
         }
     };
 
-    // Deadline misses: a deadline entry's aura that ran out on a bot, counted on that bot.
+    // The removals a noted cure made (R M-1), and deadline misses: a deadline entry's aura that ran out on a bot,
+    // counted on that bot. Runs for every aura removal on the server: the cheap tests come first (R m-10).
     class BossMechanicsDispelUnitScript : public UnitScript
     {
     public:
@@ -527,12 +642,20 @@ namespace
 
         void OnAuraRemove(Unit* unit, AuraApplication* aurApp, AuraRemoveMode mode) override
         {
-            if (mode != AURA_REMOVE_BY_EXPIRE || !unit || !aurApp || !unit->IsPlayer())
+            if (!unit || !aurApp)
+                return;
+            if (mode == AURA_REMOVE_BY_ENEMY_SPELL)
+            {
+                CountRemoval(unit, aurApp->GetBase());
+                return;
+            }
+            if (mode != AURA_REMOVE_BY_EXPIRE || !unit->IsPlayer() || aurApp->GetBase()->GetSpellInfo()->IsPositive()
+                || !unit->IsInWorld() || !Registry::Get(unit->GetMap()))
                 return;
             Player* player = unit->ToPlayer();
             PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
             MechanicBotState* st = botAI ? BotBrain::StateOf(botAI) : nullptr;
-            if (!st || !player->IsInWorld())
+            if (!st)
                 return;
             Descriptor const* d = ActiveDescriptor(player, *st);
             if (!d)
@@ -632,6 +755,8 @@ MechanicBotDispelTargetValue::MechanicBotDispelTargetValue(PlayerbotAI* botAI) :
 
 Unit* MechanicBotDispelTargetValue::Calculate()
 {
+    _pick = ObjectGuid::Empty;
+    _pickAura = 0;
     MechanicBotState* st = BotBrain::StateOf(botAI);
     Descriptor const* d = st && bot ? ActiveDescriptor(bot, *st) : nullptr;
     if (!d || d->dispels.empty())
@@ -643,13 +768,32 @@ Unit* MechanicBotDispelTargetValue::Calculate()
     std::vector<Listed> where;
     ForEachMember(botAI, bot, [&](Unit* member, DispelRules::MemberRank rank)
     {
+        // R m-7: an aura another bot cures right now (its claim) is not offered to the stock cure rows.
         if (AliveHere(member, bot) && Check(member))
-            Gather(view, member, rank, DispelRules::Bit(type), true, afflictions, where);
+            Gather(view, member, rank, DispelRules::Bit(type), true, afflictions, where, bot);
     });
     std::vector<Desc::DispelPick> const picks = Desc::OrderDispels(view, afflictions);
     if (!picks.empty())
-        return where[picks.front().affliction].unit;
+    {
+        Unit* unit = where[picks.front().affliction].unit;
+        _pick = unit->GetGUID();
+        _pickAura = afflictions[picks.front().affliction].auraId;
+        return unit;
+    }
     return PartyMemberToDispel::Calculate();
+}
+
+Unit* MechanicBotDispelTargetValue::Get()
+{
+    // R m-7: the value is cached 1 s; a listed pick another bot claimed since (it cures that aura now) or that is gone
+    // is recalculated at once, so a stock cure row does not cure the same aura from the stale pick.
+    if (lastCheckTime && !_pick.IsEmpty() && bot)
+    {
+        Unit* unit = ObjectAccessor::GetUnit(*bot, _pick);
+        if (!unit || !unit->HasAura(_pickAura) || ClaimedByOther(bot, unit, _pickAura))
+            Reset();
+    }
+    return PartyMemberToDispel::Get();
 }
 
 bool MechanicBotDispelUrgentTrigger::IsActive()
@@ -672,6 +816,8 @@ bool MechanicBotDispelUrgentAction::Execute(Event /*event*/)
     if (!plan)
         return false;
     bool const ok = CastPlan(botAI, bot, *st, *plan, true);
+    if (!ok)
+        st->dispelRetryAt = Now() + kUrgentRetryMs;
     if (GetConfig().bots.debug)
         LOG_INFO(kLog, "Bot {}: boss dispel urgent {} on {} for aura {} ({}) - {}", bot->GetName(), plan->spellId,
             plan->target->GetName(), plan->auraId, plan->urgentEntry ? "loss of control" : "deadline",

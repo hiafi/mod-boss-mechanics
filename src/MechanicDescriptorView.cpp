@@ -51,6 +51,8 @@ namespace BossMechanics
         if (this == &other)
             return *this;
         seenRevision = other.seenRevision;
+        mapId = other.mapId;
+        instanceId = other.instanceId;
         owner = other.owner;
         stamp = other.stamp;
         descriptor = other.descriptor;
@@ -94,15 +96,25 @@ namespace BossMechanics
     {
         if (!reg || !bot || !bot->IsInWorld())
         {
-            bool const had = view.Active() || view.seenRevision != 0;
+            // R n-3: every strategy bot on a map without a registry passes here on every tick.
+            if (!view.Active() && view.seenRevision == 0)
+                return false;
             Clear(view);
             view.seenRevision = 0;
-            return had;
+            return true;
         }
         uint32 const revision = reg->DescriptorRevision();
-        if (revision == view.seenRevision)
+        Map const* map = bot->GetMap();
+        // R m-5: a bot that changed maps (a graveyard run, a teleport, an instance swap) and landed on a registry at
+        // the same revision number must not keep the old map's descriptor.
+        bool const sameMap = view.mapId == map->GetId() && view.instanceId == map->GetInstanceId();
+        if (sameMap && revision == view.seenRevision)
             return false;
         view.seenRevision = revision;
+        view.mapId = map->GetId();
+        view.instanceId = map->GetInstanceId();
+        if (!sameMap)
+            view.owner = ObjectGuid::Empty;     // the copy below is retaken, even at the same owner guid and stamp
 
         bool const instance = bot->GetMap()->IsDungeon();
         Encounter const* best = nullptr;
@@ -182,8 +194,15 @@ namespace BossMechanics
             if (ActiveMechanic const* m = reg.Find(id))
                 if (!m->cancelled && !m->finished && reg.ContainsUnit(*m, unit))
                     f.zones.push_back(id);
-        for (Condition const* c : view.refs.custom)
-            f.custom.emplace_back(c, c->fn(unit));
+        // R m-4: a script's lambda may capture its boss; not once the owner left the world (the encounter ends one
+        // registry tick later). A Custom condition not evaluated does not hold.
+        if (!view.refs.custom.empty())
+        {
+            Unit const* owner = ObjectAccessor::GetUnit(*unit, view.owner);
+            if (owner && owner->IsInWorld())
+                for (Condition const* c : view.refs.custom)
+                    f.custom.emplace_back(c, c->fn(unit));
+        }
         return f;
     }
 

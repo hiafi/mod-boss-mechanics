@@ -469,6 +469,49 @@ namespace
         // :n is clamped like drill cycles.
         p = Drill::ParseProgram("ignore:50", err);
         CHECK(p && p->entries.size() == 3 * Drill::kMaxDrillCycles);
+
+        // M5 WP-F (R M-1): debuff apart=1 and with=<aura>.
+        p = Drill::ParseProgram("debuff 205018 apart=1,debuff 205018 with=205014 n=2,debuff 205018 apart=0,wait:1",
+            err);
+        CHECK(p && p->entries.size() == 4);
+        if (p && p->entries.size() == 4)
+        {
+            CHECK(p->entries[0].apart && p->entries[0].withAura == 0);
+            CHECK(!p->entries[1].apart && p->entries[1].withAura == 205014 && p->entries[1].count == 2);
+            CHECK(!p->entries[2].apart);
+        }
+        for (std::string_view bad : { "debuff 205018 apart=2", "debuff 205018 with=0", "debuff 205018 apart=x",
+            "debuff 205018 with=1 with=2", "add 300405 apart=1", "cast 205010 with=205014", "hold 300407 apart=1" })
+        {
+            err.clear();
+            CHECK(!Drill::ParseProgram(bad, err));
+            CHECK(!err.empty());
+        }
+        // The `dispels` drill keeps the urgent stun and the deadline debuff apart from other Magic debuffs, but for
+        // its last case, which puts the stun on a Magic Affliction on purpose (the follow-up dispel).
+        p = Drill::ParseProgram("dispels", err);
+        CHECK(p.has_value());
+        if (p)
+        {
+            int apart = 0;
+            int with = 0;
+            for (Drill::ProgramEntry const& e : p->entries)
+            {
+                if (e.kind != Drill::EntryKind::Debuff || (e.spellId != 205018 && e.spellId != 205019))
+                    continue;
+                if (e.withAura)
+                {
+                    ++with;
+                    CHECK(e.spellId == 205018 && e.withAura == 205014);
+                }
+                else
+                {
+                    ++apart;
+                    CHECK(e.apart);
+                }
+            }
+            CHECK(apart == 4 && with == 1);
+        }
     }
 
     // What the presets mean, checked with the descriptor rules (MechanicDescriptor.h).

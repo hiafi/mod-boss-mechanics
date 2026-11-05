@@ -9,6 +9,8 @@
  * FactsOf turns a unit into the Desc::UnitFacts the pure rules read (MechanicDescriptor.h), cached per bot per tick:
  * the referenced auras, the nearest live unit of each NearUnit entry, the referenced zones and every Custom
  * condition, each evaluated once per unit and tick (§6: the `when` lambdas run on the map thread for every bot tick).
+ * Custom conditions run only while the encounter owner is in the world (M5 WP-F, R m-4): a boss that despawned ends its
+ * encounter one registry tick later, and a script's lambda must not run on its stale copy meanwhile.
  *
  * AzerothCore only: no playerbots types, so WP-I/P/T call it from their values and the module builds without
  * mod-playerbots. Runs on the bot's map thread, like every registry read.
@@ -42,6 +44,8 @@ namespace BossMechanics
         DescriptorView& operator=(DescriptorView&& other) = default;
 
         uint32 seenRevision = 0;            // Registry::DescriptorRevision() of the copy (0: never built)
+        uint32 mapId = 0;                   // the map the copy was taken on (R m-5: every map's registry counts its
+        uint32 instanceId = 0;              // revisions from 1, so a revision alone does not tell two maps apart)
         ObjectGuid owner;                   // the active encounter (empty: no descriptor applies to the bot)
         uint32 stamp = 0;                   // the encounter's descriptorStamp the copy was taken at
         Descriptor descriptor;              // the copy (phase included)

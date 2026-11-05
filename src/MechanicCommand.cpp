@@ -60,6 +60,7 @@
 #include "Player.h"
 #include "Random.h"
 #include "SpellAuras.h"
+#include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "StringConvert.h"
 #include "TemporarySummon.h"
@@ -1782,11 +1783,44 @@ namespace
 
     // WP-K: the module's drill creatures (300404-300407) are level 80 in their template; at the owner's level (the
     // dummy plays its scope player's level, SimTarget its configured one) kicks, hits and debuffs land on them as on
-    // the boss. Other entries keep their own level.
+    // the boss. Other entries keep their own level. M5 WP-F (R m-11): Unit::SetLevel writes the level field only, so
+    // the base stats of the new level are set as Creature::SelectLevel and UpdateEntry set them (health and mana
+    // scaled by the new level's base over the old one, which keeps the rank rate and HealthModifier; weapon damage,
+    // attack power and armor from the new level's base), then the totals are recomputed.
     void MatchOwnerLevel(Creature const* owner, Creature* unit)
     {
-        if (Ids::InCreatureBlock(unit->GetEntry()) && unit->GetLevel() != owner->GetLevel())
-            unit->SetLevel(owner->GetLevel());
+        uint8 const from = unit->GetLevel();
+        uint8 const to = owner->GetLevel();
+        if (!Ids::InCreatureBlock(unit->GetEntry()) || from == to)
+            return;
+        CreatureTemplate const* cInfo = unit->GetCreatureTemplate();
+        CreatureBaseStats const* was = sObjectMgr->GetCreatureBaseStats(from, cInfo->unit_class);
+        CreatureBaseStats const* now = sObjectMgr->GetCreatureBaseStats(to, cInfo->unit_class);
+        unit->SetLevel(to);
+        auto rescale = [](uint32 value, uint32 oldBase, uint32 newBase)
+        {
+            return oldBase ? static_cast<uint32>(uint64(value) * newBase / oldBase) : value;
+        };
+        uint32 const health = std::max<uint32>(1, rescale(unit->GetCreateHealth(), was->GenerateHealth(cInfo),
+            now->GenerateHealth(cInfo)));
+        uint32 const mana = rescale(unit->GetCreateMana(), was->GenerateMana(cInfo), now->GenerateMana(cInfo));
+        unit->SetCreateHealth(health);
+        unit->SetStatFlatModifier(UNIT_MOD_HEALTH, BASE_VALUE, float(health));
+        unit->SetCreateMana(mana);
+        unit->SetStatFlatModifier(UNIT_MOD_MANA, BASE_VALUE, float(mana));
+        float const damage = now->GenerateBaseDamage(cInfo);
+        for (WeaponAttackType att : { BASE_ATTACK, OFF_ATTACK, RANGED_ATTACK })
+        {
+            unit->SetBaseWeaponDamage(att, MINDAMAGE, damage);
+            unit->SetBaseWeaponDamage(att, MAXDAMAGE, damage * 1.5f);
+        }
+        unit->SetStatFlatModifier(UNIT_MOD_ATTACK_POWER, BASE_VALUE, float(now->AttackPower));
+        unit->SetStatFlatModifier(UNIT_MOD_ATTACK_POWER_RANGED, BASE_VALUE, float(now->RangedAttackPower));
+        unit->SetStatFlatModifier(UNIT_MOD_ARMOR, BASE_VALUE, now->GenerateArmor(cInfo));
+        unit->UpdateAllStats();
+        unit->SetFullHealth();
+        if (mana)
+            unit->SetPower(POWER_MANA, unit->GetMaxPower(POWER_MANA));
     }
 
     // `add`: n adds 4-8 yd around the owner, tracked on its encounter (despawned at its end), each with the aura and
@@ -1820,11 +1854,35 @@ namespace
         }
     }
 
-    // `debuff`: the aura on n random scope group members.
+    // The member carries a harmful aura of dispel type `type` other than `except`.
+    bool HasHarmfulOfType(Player const* p, uint32 type, uint32 except)
+    {
+        for (auto const& [id, app] : p->GetAppliedAuras())
+        {
+            SpellInfo const* info = app->GetBase()->GetSpellInfo();
+            if (id != except && !app->IsPositive() && info && info->Dispel == type)
+                return true;
+        }
+        return false;
+    }
+
+    // `debuff`: the aura on n random scope group members (apart= / with= narrow the pool first; M5 WP-F, R M-1).
     void RunDebuff(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e, std::string& err)
     {
-        std::vector<Player*> const members = PickMembers(GroupMembers(owner, run.scope, run.opt.includeScopePlayer),
-            e.count, nullptr, *run.rng);
+        std::vector<Player*> pool = GroupMembers(owner, run.scope, run.opt.includeScopePlayer);
+        if (e.apart || e.withAura)
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(e.spellId);
+            uint32 const type = info ? info->Dispel : 0;
+            std::vector<Player*> fit;
+            for (Player* p : pool)
+                if ((!e.withAura || p->HasAura(e.withAura)) && (!e.apart || !type || !HasHarmfulOfType(p, type,
+                    e.spellId)))
+                    fit.push_back(p);
+            if (!fit.empty())
+                pool = std::move(fit);
+        }
+        std::vector<Player*> const members = PickMembers(std::move(pool), e.count, nullptr, *run.rng);
         if (members.empty())
         {
             err = kNoMemberMessage;

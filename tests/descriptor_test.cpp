@@ -228,6 +228,8 @@ namespace
         {
             CHECK(due[0].priority == 3 && due[0].at == ms(9000));
             CHECK(due[1].priority == 1 && due[1].at == ms(7000));
+            // M5 WP-F (R m-9): each due cast names its caster.
+            CHECK(due[0].caster == 1 && due[1].caster == 2);
         }
         ctx.ownerHealthPct = 30.f;
         CHECK(DueCasts(d, notes, ctx, ms(2000), noFacts).size() == 3);
@@ -261,6 +263,21 @@ namespace
         CHECK(HoldKick(1, ms(0), cd, due, { ms(6000) }));
         // The top priority never holds.
         CHECK(!HoldKick(3, ms(0), cd, due, {}));
+
+        // M5 WP-F (R m-9): cover per due cast. Kicker 9 is ready by then but does not reach caster 1: no cover.
+        std::vector<DueCast> const fromOne = { { 3, ms(5000), 1 } };
+        std::vector<CoverKick> const nine = { { 9, ms(4000) } };
+        CHECK(!HoldKickCovered(1, ms(0), cd, fromOne, nine, {}));                   // no reach list: plain rule
+        CHECK(!HoldKickCovered(1, ms(0), cd, fromOne, nine, { { 1, { 9 } } }));    // reaches: covered
+        CHECK(HoldKickCovered(1, ms(0), cd, fromOne, nine, { { 1, { 8 } } }));     // out of reach: hold
+        CHECK(HoldKickCovered(1, ms(0), cd, fromOne, nine, { { 1, {} } }));
+        CHECK(!HoldKickCovered(1, ms(0), cd, fromOne, nine, { { 2, {} } }));       // another caster's list
+        // An unknown caster (0) keeps the plain rule; DueReaches answers the same.
+        CHECK(!HoldKickCovered(1, ms(0), cd, { { 3, ms(5000), 0 } }, nine, { { 1, {} } }));
+        CHECK(DueReaches({ { 1, { 9 } } }, 0, 4));
+        CHECK(DueReaches({ { 1, { 9 } } }, 1, 9));
+        CHECK(!DueReaches({ { 1, { 9 } } }, 1, 4));
+        CHECK(DueReaches({ { 1, { 9 } } }, 2, 4));
 
         // Timeline: Repairs every 24 s from 6 s (noted), Volley every 4 s from 0; the kicker follows the rules.
         // Expect every Repairs kicked, Volleys let through when a Repairs comes before the kick is back.

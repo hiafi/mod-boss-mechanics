@@ -104,8 +104,11 @@ namespace BossMechanics::Drill
                         // notes each next cast (Mechanic::NoteNextCast)
         Add,            // `add <entry> [n=<k>] [ttl=<ms>] [aura=<id>]`: k adds around the owner, tracked on the
                         // encounter (despawned at its end), each with the aura; ttl 0: the rest of the loop
-        Debuff,         // `debuff <spell> [n=<k>] [hp=<pct>]`: the aura on k random scope group members (hp=: each
-                        // of them wounded down to that percent of health, a drill's "someone is under 50%")
+        Debuff,         // `debuff <spell> [n=<k>] [hp=<pct>] [apart=1] [with=<aura>]`: the aura on k random scope group
+                        // members (hp=: each of them wounded down to that percent of health, a drill's "someone is
+                        // under 50%"; apart=1: only members with no harmful aura of the spell's dispel type, so one
+                        // dispel removes it; with=: only members carrying that aura; either falls back to any member
+                        // when none qualifies)
         Buff,           // `buff <unit> <spell>`: the aura on every live add of entry <unit> (the owner's entry: the
                         // owner)
         Swap,           // `swap <entry>`: the owner trades places with a random live add of the entry
@@ -137,6 +140,10 @@ namespace BossMechanics::Drill
         Desc::Preset const* preset = nullptr;   // Describe
         // M5 WP-K
         std::uint32_t woundPct = 0;     // Debuff hp= (0: no wound)
+        // M5 WP-F (R M-1): a dispel removes a random aura of its type, so a drill keeps an urgent debuff apart from
+        // the member's other debuffs of its type (apart=1), or puts it together on purpose (with=<aura>).
+        bool apart = false;             // Debuff apart=1
+        std::uint32_t withAura = 0;     // Debuff with=
         std::optional<std::uint32_t> phase;     // Describe phase=
         std::uint32_t followEntry = 0;  // Describe follow=
         std::uint32_t endMs = 0;        // set inside a descriptor drill (MechanicDescriptorDrills.h): what the entry
@@ -343,6 +350,10 @@ namespace BossMechanics::Drill
                 e.auraId = *n;
             else if (key == "hp" && kind == EntryKind::Debuff && *n >= 1 && *n <= 99)
                 e.woundPct = *n;
+            else if (key == "apart" && kind == EntryKind::Debuff && *n <= 1)
+                e.apart = *n == 1;
+            else if (key == "with" && kind == EntryKind::Debuff && *n && !e.withAura)
+                e.withAura = *n;
             else
                 return fail("bad option '" + std::string(t[i]) + "'");
         }

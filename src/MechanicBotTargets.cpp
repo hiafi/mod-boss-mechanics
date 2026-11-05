@@ -226,14 +226,15 @@ namespace
             Player* owner = attacker->GetCharmerOrOwnerPlayerOrPlayerItself();
             if (!owner || owner->GetMap() != victim->GetMap())
                 return;
+            // M5 WP-F (R m-10): the map's registry first (most maps have none), then the bot lookups.
+            Registry const* reg = Registry::Get(victim->GetMap());
+            if (!reg)
+                return;
             PlayerbotAI* botAI = GET_PLAYERBOT_AI(owner);
             if (!botAI)
                 return;
             MechanicBotState* st = BotBrain::StateOf(botAI);
-            if (!st || !HasIgnores(st->descriptor))
-                return;
-            Registry const* reg = Registry::Get(victim->GetMap());
-            if (!reg || !BotTargets::IsIgnoredNow(*st, *reg, owner, victim, Now()))
+            if (!st || !HasIgnores(st->descriptor) || !BotTargets::IsIgnoredNow(*st, *reg, owner, victim, Now()))
                 return;
             MechanicBotCounters& c = st->counters;
             if (attacker == owner)

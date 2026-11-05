@@ -94,6 +94,40 @@ namespace BossMechanics::Kick
         return nullptr;
     }
 
+    // ---- other cast stoppers (M5 WP-F, R M-2) ----------------------------------------------------------------------
+    // A spell outside the table that still stops its target's cast, judged by the stock-kick multiplier and the cast
+    // hook like a kick (Hammer of Justice and Bash on the stock `... interrupt` triggers, rotation stuns, Polymorph,
+    // Psychic Scream): an interrupt effect, or an aura that silences, stuns, confuses (incapacitate, polymorph, sap)
+    // or fears. Unit::SetControlled stops every cast on a stun, confuse or fear; a silence stops a silenceable cast,
+    // which every cast a kick stops is. The glue reads the effects from SpellInfo and checks the target's immunity
+    // per effect; these are the SharedDefines.h / SpellAuraDefines.h values.
+    constexpr std::uint32_t kEffectApplyAura = 6;
+    constexpr std::uint32_t kEffectInterruptCast = 68;
+    constexpr std::uint32_t kAuraModConfuse = 5;
+    constexpr std::uint32_t kAuraModFear = 7;
+    constexpr std::uint32_t kAuraModStun = 12;
+    constexpr std::uint32_t kAuraModSilence = 27;
+    constexpr std::uint32_t kAuraModPacifySilence = 60;
+
+    inline bool StopsCasts(std::uint32_t effect, std::uint32_t auraType)
+    {
+        if (effect == kEffectInterruptCast)
+            return true;
+        if (effect != kEffectApplyAura)
+            return false;
+        switch (auraType)
+        {
+            case kAuraModConfuse:
+            case kAuraModFear:
+            case kAuraModStun:
+            case kAuraModSilence:
+            case kAuraModPacifySilence:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     inline bool SameKick(KickSpell const& a, KickSpell const& b)
     {
         return a.caster == b.caster && std::string_view(a.name) == std::string_view(b.name);
@@ -220,21 +254,24 @@ namespace BossMechanics::Kick
     // is not ready. Deferral: once a cast has run `deferAfter` without a claim, any eligible bot may take it (the
     // claim book keeps it to one kick), so a picked bot that cannot act (it was casting, it lost control) costs at
     // most that much. `due` holds the casts the notes predict plus every unclaimed listed cast in progress (at now).
+    // `reach` (M5 WP-F, R m-9): which kickers reach each due cast's caster; another kicker covers a due cast only when
+    // it reaches it (Desc::HoldKickCovered). Empty: any kicker covers any due cast.
     inline Assignment Assign(std::vector<CandidateFacts> const& casts, std::vector<KickerFacts> const& kickers,
-        std::size_t self, std::vector<Desc::DueCast> const& due, Ms now, Ms deferAfter)
+        std::size_t self, std::vector<Desc::DueCast> const& due, Ms now, Ms deferAfter,
+        std::vector<Desc::DueReach> const& reach = {})
     {
         Assignment out;
         if (self >= kickers.size())
             return out;
         std::vector<bool> used(kickers.size(), false);
-        std::vector<Ms> others;
+        std::vector<Desc::CoverKick> others;
         auto holds = [&](std::size_t k, std::uint8_t priority)
         {
             others.clear();
             for (std::size_t j = 0; j < kickers.size(); ++j)
                 if (j != k)
-                    others.push_back(kickers[j].readyAt);
-            return Desc::HoldKick(priority, now, kickers[k].cooldown, due, others);
+                    others.push_back({ kickers[j].bot, kickers[j].readyAt });
+            return Desc::HoldKickCovered(priority, now, kickers[k].cooldown, due, others, reach);
         };
         for (std::size_t c = 0; c < casts.size(); ++c)
         {
@@ -283,7 +320,7 @@ namespace BossMechanics::Kick
         bool listed = false;            // one is listed (priority > 0)
         bool claimedByOther = false;    // a listed one is claimed by another bot
         bool listedDue = false;         // unlisted only: a listed cast is due before this bot's kick is back and no
-                                        // other kicker covers it (Desc::HoldKick(0, ...))
+                                        // other kicker covers it (Desc::HoldKickCovered(0, ...))
     };
 
     enum class StockVerdict : std::uint8_t
@@ -386,7 +423,8 @@ namespace BossMechanics::Kick
         std::vector<Desc::DueCast> due;
         Ms cooldown{ 0 };                   // this bot's kick (0: it has none)
         Ms readyAt{ 0 };
-        std::vector<Ms> othersReady;        // the other kickers of the group
+        std::vector<Desc::CoverKick> others;    // the other kickers of the group
+        std::vector<Desc::DueReach> dueReach;   // which kickers reach each due cast's caster (R m-9)
         // Miss detection: the group's observer (lowest key among its bots with the strategy) counts.
         bool observer = false;
         std::vector<SeenCast> seen;

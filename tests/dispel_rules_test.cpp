@@ -255,6 +255,82 @@ namespace
         CHECK(ClassifyCast(v, Bit(kMagic), {}).kind == CastKind::None);
     }
 
+    // M5 WP-F (R M-1): a cure is counted by the aura its dispel removed (the core picks it at random).
+    void TestClassifyRemoval()
+    {
+        Descriptor d;
+        d.dispels.push_back(DispelEntry(100, 1, true));                 // stun, Magic
+        d.dispels.push_back(DispelEntry(200, 2, false, Ms(4000)));      // deadline, Magic
+        d.dispels.push_back(DispelEntry(300, 5));                       // Slow, Magic
+        Descriptor const v = UrgentView(d, Ms(700));
+
+        // The stun removed: urgent; Slow removed while the stun stayed: listed and the wrong aura.
+        RemovalCount r = ClassifyRemoval(v, 100, Ms(5000), true);
+        CHECK(r.kind == CastKind::Urgent && !r.wrongAura);
+        r = ClassifyRemoval(v, 300, Ms(9000), true);
+        CHECK(r.kind == CastKind::Normal && r.wrongAura);
+        r = ClassifyRemoval(v, 300, Ms(9000), false);
+        CHECK(r.kind == CastKind::Normal && !r.wrongAura);
+        // The deadline aura inside its deadline counts as one; outside it as a normal cure.
+        CHECK(ClassifyRemoval(v, 200, Ms(3000), true).kind == CastKind::Deadline);
+        CHECK(!ClassifyRemoval(v, 200, Ms(3000), true).wrongAura);
+        CHECK(ClassifyRemoval(v, 200, Ms(6000), false).kind == CastKind::Normal);
+        // An unlisted aura removed next to the stun: nothing listed, the wrong aura.
+        r = ClassifyRemoval(v, 999, Ms(1000), true);
+        CHECK(r.kind == CastKind::None && r.wrongAura);
+        CHECK(!ClassifyRemoval(v, 999, Ms(-1), false).wrongAura);
+
+        // The urgent types a cure sees at the cast: Magic for the stun or an urgent deadline, not for Slow alone.
+        std::vector<TargetAura> auras{ { 300, kMagic, Ms(9000) }, { 100, kMagic, Ms(3000) } };
+        CHECK(UrgentTypes(v, Bit(kMagic), auras) == Bit(kMagic));
+        CHECK(UrgentTypes(v, Bit(kCurse), auras) == 0);         // the spell cannot remove Magic
+        auras = { { 300, kMagic, Ms(9000) }, { 200, kMagic, Ms(6000) } };
+        CHECK(UrgentTypes(v, Bit(kMagic), auras) == 0);
+        auras = { { 200, kMagic, Ms(3000) } };
+        CHECK(UrgentTypes(v, Bit(kMagic) | Bit(kDisease), auras) == Bit(kMagic));
+    }
+
+    // The pending cures: matched by target and type, oldest first, one aura per type, kept kPendingKeep.
+    void TestPendingCures()
+    {
+        PendingCures book;
+        CHECK(book.Empty());
+        CHECK(!book.Take(5, kMagic, Ms(1000)));
+        // Two bots cure member 5 (a Cleanse: Magic + Disease; a Dispel Magic), one member 6.
+        book.Note({ 1, 5, Bit(kMagic) | Bit(kDisease), Bit(kMagic), true, Ms(1000) });
+        book.Note({ 2, 5, Bit(kMagic), 0, true, Ms(1100) });
+        book.Note({ 3, 6, Bit(kMagic), 0, true, Ms(1100) });
+        CHECK(book.Size() == 3);
+        // A Poison removal on 5: nobody's.
+        CHECK(!book.Take(5, kPoison, Ms(1200)));
+        // The first Magic removal on 5 is the oldest cure's; its Magic is spent, its Disease effect stays.
+        std::optional<PendingCure> c = book.Take(5, kMagic, Ms(1200));
+        CHECK(c && c->caster == 1 && c->urgentTypes == Bit(kMagic));
+        CHECK(book.Size() == 3);
+        c = book.Take(5, kDisease, Ms(1200));
+        CHECK(c && c->caster == 1);
+        CHECK(book.Size() == 2);
+        // The second Magic removal on 5 is bot 2's.
+        c = book.Take(5, kMagic, Ms(1300));
+        CHECK(c && c->caster == 2);
+        CHECK(!book.Take(5, kMagic, Ms(1300)));
+        // Bot 3's cure on 6 is forgotten (its cast failed); nothing left.
+        book.Forget(3, 6);
+        CHECK(book.Empty());
+        // Old cures go: one noted at 2 s is not matched at 2 s + kPendingKeep + 1.
+        book.Note({ 4, 7, Bit(kMagic), 0, false, Ms(2000) });
+        CHECK(!book.Take(7, kMagic, Ms(2000) + kPendingKeep + Ms(1)));
+        CHECK(book.Empty());
+        book.Note({ 4, 7, Bit(kMagic), 0, false, Ms(2000) });
+        CHECK(book.Take(7, kMagic, Ms(2000) + kPendingKeep));
+        // The book is bounded.
+        for (std::uint32_t i = 0; i < kPendingMax + 10; ++i)
+            book.Note({ i, 8, Bit(kMagic), 0, true, Ms(3000) });
+        CHECK(book.Size() == kPendingMax);
+        c = book.Take(8, kMagic, Ms(3000));
+        CHECK(c && c->caster == 10);        // the 10 oldest were dropped
+    }
+
     void TestPurgeCount()
     {
         Descriptor d;
@@ -314,6 +390,8 @@ int main()
     TestDeadlineTimeline();
     TestNormalSkip();
     TestClassifyCast();
+    TestClassifyRemoval();
+    TestPendingCures();
     TestPurgeCount();
     TestRankAndOrder();
     return Report("dispel_rules_test");

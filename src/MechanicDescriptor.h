@@ -12,7 +12,8 @@
  * The descriptor lives on the registry encounter (Encounter::descriptor, cleared at its end), set through
  * Mechanic::Describe / EditDescriptor / SetPhase (BossMechanics.h) or the program entry `describe <preset>`
  * (MechanicDescriptorPresets.h). Bots read a copy through their DescriptorView and decide with the rules below:
- * - interrupts (WP-I): MatchInterrupt, OrderInterrupts, NextDue, DueCasts, HoldKick, PickKicker, ClaimBook;
+ * - interrupts (WP-I): MatchInterrupt, OrderInterrupts, NextDue, DueCasts, HoldKick(Covered), PickKicker,
+ *   ClaimBook;
  * - dispels and purges (WP-P): IsUrgent, OrderDispels, PickPurge;
  * - targets and the ignore list (WP-T): Fits, PickTarget, IsIgnored.
  */
@@ -47,6 +48,9 @@ namespace BossMechanics
         Phase,          // the descriptor's phase is `id`
         OwnerBelowPct,  // the encounter owner's health is below `value` percent
         Custom          // fn(unit), scripts only (programs use the kinds above); evaluated once per unit and tick
+                        // while the encounter owner is in the world. The lambda may still run on a bot's stale copy
+                        // for one map update after the boss despawned: capture guids only (never `this`, a
+                        // Creature* or an InstanceScript*) and resolve them through the passed unit's map.
     };
 
     // A condition on one unit: the caster of an interrupt entry, the candidate of a target or ignore entry.
@@ -519,6 +523,7 @@ namespace BossMechanics::Desc
     {
         std::uint8_t priority = 0;
         Ms at{ 0 };
+        Key caster = 0;     // its caster (M5 WP-F, m-9: who can cover it; 0: unknown, any other kicker covers it)
     };
 
     // The listed casts the notes predict, with their priorities (do-not-kick left out). `factsOf(Key)` gives the
@@ -537,7 +542,7 @@ namespace BossMechanics::Desc
             if (!entry || d.interrupts[*entry].priority == 0)
                 continue;
             if (std::optional<Ms> const at = NextDue(d.interrupts[*entry], &n, now))
-                out.push_back({ d.interrupts[*entry].priority, *at });
+                out.push_back({ d.interrupts[*entry].priority, *at, n.caster });
         }
         return out;
     }
@@ -545,22 +550,60 @@ namespace BossMechanics::Desc
     // The overload hold (§3.3, decision §7.1 #2). A bot whose kick is ready now and back at now + cooldown holds it
     // for a cast of `candidatePriority` (0 = an unlisted cast) when a listed cast of higher priority (any listed cast
     // for an unlisted one) is due before the kick is back, unless another kicker's kick is ready by that time.
-    inline bool HoldKick(std::uint8_t candidatePriority, Ms now, Ms cooldown, std::vector<DueCast> const& due,
-        std::vector<Ms> const& otherKicksReadyAt)
+    // Another kicker of the group, as cover for a due cast.
+    struct CoverKick
+    {
+        Key bot = 0;
+        Ms readyAt{ 0 };    // its kick is ready here
+    };
+
+    // M5 WP-F (R m-9): the kickers whose kick reaches one due cast's caster (range; the kick lands on it).
+    struct DueReach
+    {
+        Key caster = 0;
+        std::vector<Key> kickers;
+    };
+
+    // Does `kicker` reach `caster`? A caster the list does not name (0, or only noted, with no unit to measure)
+    // keeps the plain rule: any kicker covers it.
+    inline bool DueReaches(std::vector<DueReach> const& reach, Key caster, Key kicker)
+    {
+        if (!caster)
+            return true;
+        for (DueReach const& r : reach)
+            if (r.caster == caster)
+                return std::find(r.kickers.begin(), r.kickers.end(), kicker) != r.kickers.end();
+        return true;
+    }
+
+    // HoldKick with the cover judged per due cast: another kicker covers a due cast only when its kick is ready by
+    // then and reaches that cast's caster (DueReaches).
+    inline bool HoldKickCovered(std::uint8_t candidatePriority, Ms now, Ms cooldown, std::vector<DueCast> const& due,
+        std::vector<CoverKick> const& others, std::vector<DueReach> const& reach)
     {
         Ms const back = now + cooldown;
         for (DueCast const& c : due)
         {
             if (c.priority <= candidatePriority || c.at >= back)
                 continue;
-            bool const covered = std::any_of(otherKicksReadyAt.begin(), otherKicksReadyAt.end(), [&c](Ms ready)
+            bool const covered = std::any_of(others.begin(), others.end(), [&](CoverKick const& o)
             {
-                return ready <= c.at;
+                return o.readyAt <= c.at && DueReaches(reach, c.caster, o.bot);
             });
             if (!covered)
                 return true;
         }
         return false;
+    }
+
+    inline bool HoldKick(std::uint8_t candidatePriority, Ms now, Ms cooldown, std::vector<DueCast> const& due,
+        std::vector<Ms> const& otherKicksReadyAt)
+    {
+        std::vector<CoverKick> others;
+        others.reserve(otherKicksReadyAt.size());
+        for (Ms ready : otherKicksReadyAt)
+            others.push_back({ 0, ready });
+        return HoldKickCovered(candidatePriority, now, cooldown, due, others, {});
     }
 
     // One bot with a kick for the cast.

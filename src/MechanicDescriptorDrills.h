@@ -62,11 +62,14 @@ namespace BossMechanics::Drill
             // Normal debuffs of every type, the urgent stun among them (first, past the gate), the deadline debuff
             // (dispelled before it expires), then normal Magic on two members wounded to 40% (the healers' 50% gate
             // holds it until they are healed) with an urgent stun and a deadline debuff that still go at once.
+            // M5 WP-F (R M-1): a dispel removes a random aura of its type, so the stun and the deadline debuff (both
+            // Magic) go on members without another Magic debuff (apart=1); the last case puts the stun on a member
+            // with Magic Affliction on purpose: the first dispel may take the Affliction, a second one follows.
             { "dispels",
                 "urgent stun first, deadline debuff before expiry, normal ones held while someone is under 50%",
-                "describe dispels,debuff 205014,debuff 205015,debuff 205016,debuff 205017,wait:2,debuff 205018,"
-                "wait:8,debuff 205019,wait:10,debuff 205014 n=2 hp=40,debuff 205018,wait:10,debuff 205019 hp=40,"
-                "wait:15" },
+                "describe dispels,debuff 205014,debuff 205015,debuff 205016,debuff 205017,wait:2,debuff 205018 apart=1,"
+                "wait:8,debuff 205019 apart=1,wait:10,debuff 205014 n=2 hp=40,debuff 205018 apart=1,wait:10,"
+                "debuff 205019 hp=40 apart=1,wait:10,debuff 205014,debuff 205018 with=205014,wait:8" },
 
             // ---- purges ----
             // Two Drill Adds with the purgeable Magic buff and the Enrage buff, both put back every 10 s; the adds
@@ -119,10 +122,11 @@ namespace BossMechanics::Drill
             // The dummy's default loop and the sim slice: every list at once in 60 s, on the combined preset.
             { "descriptor", "every list at once (60 s): kicks, dispels, purges, targets, prisons, copies",
                 "describe descriptor,add 300404 n=2,cast 205010 unit=300404 every=3000,add 300406 n=2,"
-                "cast 205011 every=12000,debuff 205014,debuff 205018,wait:3,cast 205013 every=12000,wait:3,"
-                "cast 205012 every=12000,debuff 205019,wait:9,add 300405 n=1 aura=205021,buff 300405 205022,"
-                "debuff 205015 hp=40,debuff 205016,wait:10,add 300405 n=1 aura=205023,debuff 205017,debuff 205018,"
-                "wait:10,hold 300407 n=2 ttl=20000 pick=tank aura=205009,debuff 205019,wait:25" },
+                "cast 205011 every=12000,debuff 205014,debuff 205018 apart=1,wait:3,cast 205013 every=12000,wait:3,"
+                "cast 205012 every=12000,debuff 205019 apart=1,wait:9,add 300405 n=1 aura=205021,buff 300405 205022,"
+                "debuff 205015 hp=40,debuff 205016,wait:10,add 300405 n=1 aura=205023,debuff 205017,"
+                "debuff 205018 apart=1,wait:10,hold 300407 n=2 ttl=20000 pick=tank aura=205009,debuff 205019 apart=1,"
+                "wait:25" },
             { "descriptor-drills", "every descriptor drill in turn (about 7 minutes)",
                 "interrupts,dispels,purges,targets,ignore" },
         };

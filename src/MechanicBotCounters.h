@@ -149,14 +149,18 @@ namespace BossMechanics
         uint32 ignoreBlocks = 0;        // actions the focus multiplier zeroed because their target is ignored
         uint32 ignoreDrops = 0;         // ignored current targets, melee victims and cast targets dropped
         uint32 petRecalls = 0;          // minions pulled off an ignored victim (onto the bot's target, or recalled)
-        // M5 WP-P (dispels and purges, MechanicBotDispel.cpp): counted at the cast, whichever row cast it (the bot's
-        // own spells by a cast hook, its pet's by `boss purge`).
+        // M5 WP-P (dispels and purges, MechanicBotDispel.cpp), whichever row cast them. M5 WP-F (R M-1): a dispel
+        // removes a random aura of its type, so the cures and purges are counted on the dispeller when the listed
+        // aura is removed by its cast (the aura hook, AURA_REMOVE_BY_ENEMY_SPELL), not at the cast; a dispel that
+        // only takes a stack off counts nothing.
         uint32 urgentDispels = 0;       // cures of a listed loss-of-control aura (an `urgent` entry)...
-        uint32 urgentLatencyMsMax = 0;  // ...the longest time from that aura's application to the cure
+        uint32 urgentLatencyMsMax = 0;  // ...the longest time from that aura's application to its removal
         uint32 deadlineDispels = 0;     // cures of a deadline entry inside its deadline (floored at skip + lead)
         uint32 deadlineMisses = 0;      // deadline entries' auras that ran out on this bot (aura hook, by expiry)
         uint32 listedDispels = 0;       // cures of a listed aura that was not urgent (stock rows, our target order)
         uint32 purges = 0;              // listed enemy buffs stripped (Purge, Dispel Magic, Spellsteal, Tranq, Devour)
+        uint32 dispelWrongAura = 0;     // cures cast while an urgent or deadline aura was on the member that removed
+                                        // another aura (the core's random pick; a second dispel follows)
         // M5 WP-I (interrupts, MechanicBotInterrupt.cpp): kicks are judged at the cast, whichever row cast them (the
         // bot's own by the player cast hook, its Felhunter's Spell Lock by `boss kick`).
         uint32 kicksLanded = 0;         // kicks on a listed cast this bot held the claim of
@@ -166,6 +170,10 @@ namespace BossMechanics
         uint32 overloadHolds = 0;       // casts this bot could kick but held for a higher one due (once per cast)
         uint32 listedMissed = 0;        // listed casts that completed (counted by one bot per group: sum the group)
         uint32 stockKicksDropped = 0;   // stock kick rows the kick multiplier zeroed (once per cast)
+        // M5 WP-F (R M-2): stuns, silences, incapacitates and fears outside the kick table that stopped (or would
+        // have stopped) a cast and were judged as kicks (also in kicksLanded, duplicateKicks, doNotKickKicks or
+        // kicksWasted).
+        uint32 castStops = 0;
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;

@@ -251,6 +251,122 @@ namespace BossMechanics::DispelRules
         return best;
     }
 
+    // ---- counting a removal (M5 WP-F, R M-1) -------------------------------------------------------------------
+    // The core's dispel (Spell::EffectDispel) removes a random aura of the effect's type from the target, whatever
+    // the descriptor's priority says; a dispel can strip the member's other Magic debuff and leave the urgent stun.
+    // So a cure is counted by what it removed: the cast is noted (PendingCures, at the cast hook, before the effects),
+    // and each aura the core removes by an enemy spell within kPendingKeep is matched to the oldest noted cure on that
+    // unit that removes its type. Each effect removes one aura of its own type, so a matched type is spent.
+
+    struct PendingCure
+    {
+        std::uint64_t caster = 0;       // the bot (also for its pet's cast)
+        std::uint64_t target = 0;
+        std::uint32_t types = 0;        // Bit() mask of the types its effects still remove
+        std::uint32_t urgentTypes = 0;  // Bit() mask of the types of the urgent or deadline auras on the target then
+        bool friendly = true;           // a cure (else a purge)
+        Ms at{ 0 };
+    };
+
+    // A cure that has not removed anything after this long never will (the travel time of a shot included).
+    constexpr Ms kPendingKeep{ 1500 };
+    constexpr std::size_t kPendingMax = 64;
+
+    class PendingCures
+    {
+    public:
+        bool Empty() const { return _cures.empty(); }
+        std::size_t Size() const { return _cures.size(); }
+
+        void Note(PendingCure const& c)
+        {
+            Prune(c.at);
+            if (_cures.size() >= kPendingMax)
+                _cures.erase(_cures.begin());
+            _cures.push_back(c);
+        }
+
+        // The cure that removed an aura of `type` from `target` now: the oldest live one on that unit whose effects
+        // remove the type. The type is spent on it (an effect removes one aura); nullopt: no noted cure did it.
+        std::optional<PendingCure> Take(std::uint64_t target, std::uint32_t type, Ms now)
+        {
+            Prune(now);
+            std::uint32_t const bit = Bit(type);
+            for (std::size_t i = 0; i < _cures.size(); ++i)
+            {
+                PendingCure& c = _cures[i];
+                if (c.target != target || !(c.types & bit))
+                    continue;
+                PendingCure const out = c;
+                c.types &= ~bit;
+                if (!c.types)
+                    _cures.erase(_cures.begin() + static_cast<std::ptrdiff_t>(i));
+                return out;
+            }
+            return std::nullopt;
+        }
+
+        // Drops the newest cure of `caster` on `target` (its cast failed after it was noted).
+        void Forget(std::uint64_t caster, std::uint64_t target)
+        {
+            for (std::size_t i = _cures.size(); i-- > 0;)
+                if (_cures[i].caster == caster && _cures[i].target == target)
+                {
+                    _cures.erase(_cures.begin() + static_cast<std::ptrdiff_t>(i));
+                    return;
+                }
+        }
+
+        void Prune(Ms now)
+        {
+            _cures.erase(std::remove_if(_cures.begin(), _cures.end(), [now](PendingCure const& c)
+            {
+                return now - c.at > kPendingKeep || now < c.at;
+            }), _cures.end());
+        }
+
+    private:
+        std::vector<PendingCure> _cures;
+    };
+
+    struct RemovalCount
+    {
+        CastKind kind = CastKind::None;     // what the removed aura was (None: not listed)
+        bool wrongAura = false;             // an urgent or deadline aura of its type was on the member at the cast,
+                                            // and this removal was not one
+    };
+
+    // One aura a cure removed. `d` is UrgentView'd by the caller; `remaining` < 0: a permanent aura; `urgentOfType`:
+    // the pending cure saw an urgent or deadline aura of the removed aura's type on the member.
+    inline RemovalCount ClassifyRemoval(Descriptor const& d, std::uint32_t auraId, Ms remaining, bool urgentOfType)
+    {
+        RemovalCount out;
+        if (std::optional<std::size_t> const k = Desc::FindDispel(d, auraId))
+        {
+            DispelEntry const& e = d.dispels[*k];
+            Ms const left = remaining < Ms(0) ? Ms::max() : remaining;
+            out.kind = e.urgent ? CastKind::Urgent : Desc::IsUrgent(e, left) ? CastKind::Deadline : CastKind::Normal;
+        }
+        out.wrongAura = urgentOfType && out.kind != CastKind::Urgent && out.kind != CastKind::Deadline;
+        return out;
+    }
+
+    // The urgent or deadline listed auras' types among `auras` that a cure of `spellTypes` can remove (a Bit() mask).
+    inline std::uint32_t UrgentTypes(Descriptor const& d, std::uint32_t spellTypes,
+        std::vector<TargetAura> const& auras)
+    {
+        std::uint32_t mask = 0;
+        for (TargetAura const& a : auras)
+        {
+            if (!(spellTypes & Bit(a.type)))
+                continue;
+            CastKind const kind = ClassifyRemoval(d, a.auraId, a.remaining, false).kind;
+            if (kind == CastKind::Urgent || kind == CastKind::Deadline)
+                mask |= Bit(a.type);
+        }
+        return mask;
+    }
+
     // The purge a cast on an enemy counts as: a listed buff of the spell's types on that unit.
     struct EnemyAura
     {

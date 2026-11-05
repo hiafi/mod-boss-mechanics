@@ -134,6 +134,9 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t NPC_DRILL_PRISON = 300407;          // holds a player (break-out)
     constexpr std::uint32_t NPC_BLOCK_FIRST = 300400;
     constexpr std::uint32_t NPC_BLOCK_LAST = 300419;
+    // The reworked bosses' CreatureImmunitiesId (stun, fear, root, silence ...; not interrupt), as 300403 carries it.
+    // M5 WP-F (R M-2): the sim's descriptor slice gives it to its owner, so stuns and silences stop no program cast.
+    constexpr std::int32_t REWORKED_BOSS_IMMUNITIES = -273;
 
     constexpr bool IsTrainingDummy(std::uint32_t entry)
     {

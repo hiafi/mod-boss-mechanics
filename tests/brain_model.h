@@ -883,8 +883,9 @@ namespace BrainModel
         void StepStranded(std::size_t i, Solver::Input const& in, Ms now, std::vector<Task> const& tasks)
         {
             Bot& b = bots[i];
-            if (b.mode == Mode::Hold && now < b.bandBlockedUntil && OutOfMeleeBand(in, b.pos)
-                && now >= b.releaseUntil)
+            bool const refusedHold = b.mode == Mode::Hold && now < b.bandBlockedUntil && OutOfMeleeBand(in, b.pos)
+                && now >= b.releaseUntil;
+            if (refusedHold)
                 b.c.msChaseRefused += static_cast<std::uint32_t>(cfg.step.count());
             bool const melee = in.role.present && in.role.minYd <= 0.f;
             if (!melee || Dist(b.pos, in.role.anchor) <= in.role.maxYd + Landing::kMeleeBandSlackYd
@@ -903,7 +904,9 @@ namespace BrainModel
             if (!Landing::RingSafe(in, chaseTarget, b.pos, in.role.maxYd, now,
                 now + Ms(LockRules::ChaseValveWindowMs(release))))
                 return;
-            b.c.msChaseStranded += static_cast<std::uint32_t>(cfg.step.count());
+            // M5 WP-F (R m-12): a refused hold is not also stranded (the clocks are disjoint); the route still runs.
+            if (!refusedHold)
+                b.c.msChaseStranded += static_cast<std::uint32_t>(cfg.step.count());
             if (!cfg.strandRoute || !cfg.routeEnable || b.routePending || now - b.lastRouteAt < cfg.routeRetry)
                 return;
             Ms const horizonEnd = now + in.params.horizon;
