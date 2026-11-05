@@ -16,6 +16,9 @@
  *
  * Programs (StartProgram): an entry that fails at its start is skipped and reported (LOG_ERROR, a whisper to the
  * training dummy's scope player, and Encounter::programErrors, which the sim takes with Sim::TakeProgramErrors).
+ * M5 descriptor entries (cast, add, debuff, buff, swap, hold, describe; MechanicDrillPlan.h) run on the owner itself,
+ * so a program works the same on the training dummy and on the sim's SimTarget: an unknown spell or creature fails
+ * the start (CheckProgram), adds and prisons are tracked on the encounter (Registry::TrackUnit, despawned at its end).
  *
  * Scheduler: an owner with a MarkerAI (the Mechanic Test Owner) schedules on its own TaskScheduler, exactly as
  * `.mech drill` always did (its idle clock and `.mech clear` despawn end it). Any other owner schedules on its
@@ -63,8 +66,13 @@ namespace BossMechanics
     bool StartProgram(Creature* owner, ObjectGuid scopePlayer, std::string_view program, DrillOptions const& opt,
         std::string& err);
 
-    // Ends `owner`'s encounter: pending steps, mechanics, markers, ledger and the Weakened it stacked.
+    // Ends `owner`'s encounter: pending steps, mechanics, markers, ledger and the Weakened it stacked, and (M5) the
+    // adds and prisons its descriptor entries summoned, the players they held and the descriptor.
     void StopProgram(Creature* owner);
+
+    // M5 (STAGE-M5-HANDOFF §3.2): parses `program` and checks that every spell and creature its descriptor entries
+    // name exists (StartProgram runs the same check). false with `err` set; the dummy's Configure calls it.
+    bool CheckProgram(std::string_view program, std::string& err);
 }
 
 #endif

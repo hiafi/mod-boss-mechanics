@@ -74,7 +74,8 @@ namespace BossMechanics
     };
 
     // Stub: with an owner victim, the victim is the tank and nobody else is; with none, HasTankSpec(). Then
-    // HasHealSpec() = Healer, else Damage.
+    // HasHealSpec() = Healer, else Damage. M5 C4: the same rules (MechanicRoleRules.h) on the player's own talent map
+    // and a per-thread spec cache, not Player::GetSpec's walk of the whole talent store.
     class StubRoleProvider final : public RoleProvider
     {
     public:

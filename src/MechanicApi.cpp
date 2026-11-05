@@ -984,4 +984,41 @@ namespace Mechanic
     {
         return Registry::Get(map);
     }
+
+    void Describe(Unit* owner, Descriptor descriptor)
+    {
+        if (Map* map = MapOf(owner, "Describe"))
+            Registry::GetOrCreate(map).Describe(owner->GetGUID(), std::move(descriptor));
+    }
+
+    void EditDescriptor(Unit* owner, std::function<void(Descriptor&)> const& fn)
+    {
+        if (Map* map = MapOf(owner, "EditDescriptor"))
+            Registry::GetOrCreate(map).EditDescriptor(owner->GetGUID(), fn);
+    }
+
+    void SetPhase(Unit* owner, uint32 phase)
+    {
+        if (Map* map = MapOf(owner, "SetPhase"))
+            Registry::GetOrCreate(map).SetPhase(owner->GetGUID(), phase);
+    }
+
+    void NoteNextCast(Unit* caster, uint32 spellId, Milliseconds at)
+    {
+        if (Map* map = MapOf(caster, "NoteNextCast"))
+            Registry::GetOrCreate(map).NoteNextCast(caster->GetGUID(), caster->GetEntry(), spellId, at);
+    }
+
+    void NoteNextCastIn(Unit* caster, uint32 spellId, Milliseconds in)
+    {
+        NoteNextCast(caster, spellId, GameTime::GetGameTimeMS() + in);
+    }
+
+    void TrackUnit(Unit* owner, Unit* unit)
+    {
+        Map* map = MapOf(owner, "TrackUnit");
+        if (!map || !unit || unit->GetMap() != map)
+            return;
+        Registry::GetOrCreate(map).TrackUnit(owner->GetGUID(), unit->GetGUID(), unit->GetEntry(), false);
+    }
 }

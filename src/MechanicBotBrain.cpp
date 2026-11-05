@@ -820,10 +820,18 @@ namespace BossMechanics
             ViewCtx& ctx, bool roleSolve = false)
         {
             Solver::Input& in = st.input;
-            // Timed with the allies' refresh: `.mech bots` shows what one step costs (STAGE-M3-R-REPORT n-1).
-            auto const t0 = std::chrono::steady_clock::now();
+            // M5 C4: the allies' refresh is timed apart from the solve (refreshUs*), so solveUs is the solver alone.
             if (!in.reroute)
+            {
+                CostClock::time_point const refreshT0 = CostClock::now();
                 RefreshAllies(reg, bot, now, ctx.Options(), ctx.Hooks(), in, &st.viewInfo, ctx.Filter());
+                uint32 const refreshUs = UsSince(refreshT0);
+                MechanicBotCounters& rc = st.counters;
+                ++rc.solveRefreshes;
+                rc.refreshUsLast = refreshUs;
+                rc.refreshUsMax = std::max(rc.refreshUsMax, refreshUs);
+                rc.refreshUsTotal += refreshUs;
+            }
             st.seenReservationRevision = st.viewInfo.reservationRevision;
             in.roleSolve = roleSolve;
 
@@ -831,9 +839,9 @@ namespace BossMechanics
             NavOracleStats nav;
             NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
             TimedOracle oracle(navOracle, st.cost);
+            CostClock::time_point const t0 = CostClock::now();
             Solver::Plan plan = Solver::Solve(in, oracle);
-            auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - t0).count());
+            uint32 const us = UsSince(t0);
             in.roleSolve = false;
 
             // M4 cost (§3.6) and the Fallback split (§3.7).

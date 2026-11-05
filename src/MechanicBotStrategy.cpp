@@ -10,8 +10,10 @@
 #include "GameTime.h"
 #include "MechanicBotBrain.h"
 #include "MechanicBotFacing.h"
+#include "MechanicBotInterrupt.h"
 #include "MechanicBotLock.h"
 #include "MechanicBotState.h"
+#include "MechanicBotTargets.h"
 #include "MechanicLeaks.h"
 #include "MotionMaster.h"
 #include "MoveSpline.h"
@@ -85,11 +87,26 @@ void MechanicBotStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         { NextAction("boss mechanic hold", ACTION_EMERGENCY + 5) }));
     triggers.push_back(new TriggerNode("boss mechanic face",
         { NextAction("boss mechanic face", ACTION_EMERGENCY + 4) }));
+    // M5 WP-P: urgent and deadline dispels above the stock cures, listed purges just under the kicks
+    // (MechanicBotDispel.h).
+    triggers.push_back(new TriggerNode("boss dispel urgent", { NextAction("boss dispel urgent", ACTION_DISPEL + 5) }));
+    triggers.push_back(new TriggerNode("boss purge", { NextAction("boss purge", ACTION_INTERRUPT - 1) }));
+    // M5 WP-T: attack the boss descriptor's pick (MechanicBotTargets.h).
+    triggers.push_back(new TriggerNode("boss focus", { NextAction("boss focus", ACTION_RAID + 2) }));
+    // M5 WP-I: kick the interrupt list's casts, above the stock kick rows (MechanicBotInterrupt.h).
+    triggers.push_back(new TriggerNode("boss interrupt due", { NextAction("boss kick", ACTION_INTERRUPT + 5) }));
 }
 
 void MechanicBotStrategy::InitMultipliers(std::vector<Multiplier*>& multipliers)
 {
     multipliers.push_back(new MechanicBotLockMultiplier(botAI));
+    multipliers.push_back(new MechanicBotFocusMultiplier(botAI));     // M5 WP-T
+    multipliers.push_back(new MechanicBotKickMultiplier(botAI));      // M5 WP-I
+}
+
+void MechanicBotStrategy::AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType /*type*/)
+{
+    BotTargets::AppendExclusions(botAI, exclusions);
 }
 
 bool MechanicBotRepositionTrigger::IsActive()

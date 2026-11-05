@@ -21,11 +21,14 @@
 #include "MechanicBotCounters.h"
 #include "MechanicBotView.h"
 #include "MechanicCost.h"
+#include "MechanicDescriptorView.h"
 #include "MechanicFallibility.h"
 #include "MechanicGeometry.h"
+#include "MechanicKickRules.h"
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
 #include "MechanicSolver.h"
+#include "MechanicTargetRules.h"
 #include "ObjectGuid.h"
 #include "Value.h"
 #include <array>
@@ -159,6 +162,15 @@ namespace BossMechanics
         uint32 bandBlockedBy = 0;                           // ...the hazard the motion's end failed on
         Milliseconds wakeAt{ 0 };                           // m-2: the waker's last wake (0 = none pending)
         int64 wakeLeadMs = -1;                              // ...the smallest wake-to-brain delay seen (-1 = none)
+
+        // ---- M5 (STAGE-M5-HANDOFF §3.2, WP-D) ----
+        // The active boss descriptor, its units, prisons and cast notes; WP-I/P/T bring it up to date with
+        // RefreshDescriptorView (a revision compare when nothing changed) and read facts through FactsOf.
+        DescriptorView descriptor;
+        // WP-T: the last focus, the lower-priority and break-out clocks (MechanicBotTargets.cpp).
+        TargetRules::State targets;
+        // WP-I: the kick plan, the hold's inputs and the miss tracking (MechanicBotInterrupt.cpp).
+        Kick::KickState kick;
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

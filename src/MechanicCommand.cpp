@@ -47,6 +47,7 @@
 #include "Map.h"
 #include "MechanicBarrage.h"
 #include "MechanicBotReportHook.h"
+#include "MechanicDescCommand.h"
 #include "MechanicDrill.h"
 #include "MechanicDrillPlan.h"
 #include "MechanicDrillRunner.h"
@@ -55,6 +56,7 @@
 #include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "Random.h"
 #include "SpellAuras.h"
@@ -1198,8 +1200,8 @@ namespace
             {
                 Optional<uint32> rider = Acore::StringTo<uint32>(opt.Str("rider", ""));
                 if (!rider || !Ids::RiderAllowed(*rider))
-                    return Acore::StringFormat("rider= takes only a spell of the module's block {}-{} (not Weakened "
-                        "or a resolve spell)", Ids::SPELL_RESOLVE_LAST + 1, Ids::SPELL_BLOCK_LAST);
+                    return Acore::StringFormat("rider= takes only a harmless drill aura: {} (Baited) or {} (Marked)",
+                        Ids::SPELL_BAITED_DRILL, Ids::SPELL_MARKED_DRILL);
                 if (!sSpellMgr->GetSpellInfo(*rider))
                     return Acore::StringFormat("rider={}: no such spell (spell_dbc row missing?)", *rider);
                 spec.rider = *rider;
@@ -1620,8 +1622,322 @@ namespace
                 return "minefield";
             case Drill::EntryKind::UMinefield:
                 return "uminefield";
+            case Drill::EntryKind::Wait:
+                return "wait";
+            case Drill::EntryKind::Cast:
+                return "cast";
+            case Drill::EntryKind::Add:
+                return "add";
+            case Drill::EntryKind::Debuff:
+                return "debuff";
+            case Drill::EntryKind::Buff:
+                return "buff";
+            case Drill::EntryKind::Swap:
+                return "swap";
+            case Drill::EntryKind::Hold:
+                return "hold";
+            case Drill::EntryKind::Describe:
+                return "describe";
         }
         return "?";
+    }
+
+    // M5 (STAGE-M5-HANDOFF §3.2): the spells and creatures a program's descriptor entries name must exist, or the
+    // program does not start (the dummy and the sim report it like a bad drill step).
+    bool CheckProgramIds(Drill::Program const& program, std::string& err)
+    {
+        for (Drill::ProgramEntry const& e : program.entries)
+        {
+            std::vector<uint32> spells;
+            std::vector<uint32> creatures;
+            switch (e.kind)
+            {
+                case Drill::EntryKind::Cast:
+                    spells.push_back(e.spellId);
+                    if (e.unitEntry)
+                        creatures.push_back(e.unitEntry);
+                    break;
+                case Drill::EntryKind::Debuff:
+                    spells.push_back(e.spellId);
+                    break;
+                case Drill::EntryKind::Buff:
+                    spells.push_back(e.spellId);
+                    creatures.push_back(e.unitEntry);
+                    break;
+                case Drill::EntryKind::Add:
+                case Drill::EntryKind::Hold:
+                    if (e.auraId)
+                        spells.push_back(e.auraId);
+                    creatures.push_back(e.unitEntry);
+                    break;
+                case Drill::EntryKind::Swap:
+                    creatures.push_back(e.unitEntry);
+                    break;
+                case Drill::EntryKind::Describe:
+                    if (e.followEntry)
+                        creatures.push_back(e.followEntry);
+                    break;
+                default:
+                    break;
+            }
+            for (uint32 id : spells)
+                if (!sSpellMgr->GetSpellInfo(id))
+                {
+                    err = Acore::StringFormat("program entry {}: no spell {} (spell_dbc row missing?)", EntryName(e),
+                        id);
+                    return false;
+                }
+            for (uint32 id : creatures)
+                if (!sObjectMgr->GetCreatureTemplate(id))
+                {
+                    err = Acore::StringFormat("program entry {}: no creature {} (creature_template row missing?)",
+                        EntryName(e), id);
+                    return false;
+                }
+        }
+        return true;
+    }
+
+    // ---- descriptor entries (M5) on the owner ----------------------------------------------------------------------
+    constexpr float kAddRingMinYd = 4.f;        // adds land 4-8 yd around the owner
+    constexpr float kAddRingMaxYd = 8.f;
+
+    // The live tracked units of `entry` on the owner's encounter, in the order they were added.
+    std::vector<Creature*> EncounterAdds(Creature* owner, uint32 entry)
+    {
+        std::vector<Creature*> out;
+        Registry const* reg = Registry::Get(owner->GetMap());
+        Encounter const* enc = reg ? reg->FindEncounter(owner->GetGUID()) : nullptr;
+        if (!enc)
+            return out;
+        for (EncounterUnit const& u : enc->units)
+            if (u.entry == entry)
+                if (Creature* c = owner->GetMap()->GetCreature(u.guid))
+                    if (c->IsInWorld() && c->IsAlive())
+                        out.push_back(c);
+        return out;
+    }
+
+    // `n` distinct members, random, `first` (when it is one of them) ahead of the rest.
+    std::vector<Player*> PickMembers(std::vector<Player*> members, uint32 n, Unit const* first, Dice& dice)
+    {
+        std::vector<Player*> out;
+        auto it = std::find(members.begin(), members.end(), first);
+        if (first && it != members.end())
+        {
+            out.push_back(*it);
+            members.erase(it);
+        }
+        while (out.size() < n && !members.empty())
+        {
+            std::size_t const k = dice.rng.Index(static_cast<uint32>(members.size()));
+            out.push_back(members[k]);
+            members.erase(members.begin() + static_cast<std::ptrdiff_t>(k));
+        }
+        return out;
+    }
+
+    // One `cast`: the owner, or each live add of unit=, casts at its victim (else the owner's, else the scope
+    // player), interruptibly. A caster already casting skips this one. `next` (0: none) is noted for the bots.
+    void CastOnce(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e, Milliseconds next)
+    {
+        std::vector<Creature*> const casters = e.unitEntry ? EncounterAdds(owner, e.unitEntry)
+            : std::vector<Creature*>{ owner };
+        Registry& reg = Registry::GetOrCreate(owner->GetMap());
+        for (Creature* caster : casters)
+        {
+            if (next > Milliseconds(0))
+                reg.NoteNextCast(caster->GetGUID(), caster->GetEntry(), e.spellId, next);
+            if (caster->HasUnitState(UNIT_STATE_CASTING))
+                continue;
+            Unit* target = caster->GetVictim();
+            if (!target)
+                target = owner->GetVictim();
+            if (!target)
+                target = ScopeOnMap(owner, run.scope);
+            SpellCastResult const result = caster->CastSpell(target, e.spellId, false);
+            if (result == SPELL_CAST_OK)
+                reg.NoteCastStarted(caster->GetGUID(), caster->GetEntry(), e.spellId, GameTime::GetGameTimeMS());
+            else
+                LOG_DEBUG("module.bossmechanics", "Program cast {} by {} failed ({})", e.spellId,
+                    caster->GetGUID().ToString(), static_cast<uint32>(result));
+        }
+    }
+
+    // A `cast every=` chain: this cast at `at`, the next at `at + every` while it starts before `end` (0: until the
+    // encounter ends). The chain is scheduled on the encounter, so StopProgram and the encounter's end drop it.
+    void CastChain(Creature* owner, ProgramPtr const& run, std::size_t index, Milliseconds at, Milliseconds end)
+    {
+        Drill::ProgramEntry const& e = run->program.entries[index];
+        Milliseconds const next = at + Milliseconds(e.everyMs);
+        bool const more = e.everyMs && (end == Milliseconds(0) || next < end);
+        CastOnce(owner, *run, e, more ? next : Milliseconds(0));
+        if (!more)
+            return;
+        Registry::GetOrCreate(owner->GetMap()).Schedule(owner->GetGUID(), next, [run, index, next, end](Creature* o)
+        {
+            CastChain(o, run, index, next, end);
+        });
+    }
+
+    // WP-K: the module's drill creatures (300404-300407) are level 80 in their template; at the owner's level (the
+    // dummy plays its scope player's level, SimTarget its configured one) kicks, hits and debuffs land on them as on
+    // the boss. Other entries keep their own level.
+    void MatchOwnerLevel(Creature const* owner, Creature* unit)
+    {
+        if (Ids::InCreatureBlock(unit->GetEntry()) && unit->GetLevel() != owner->GetLevel())
+            unit->SetLevel(owner->GetLevel());
+    }
+
+    // `add`: n adds 4-8 yd around the owner, tracked on its encounter (despawned at its end), each with the aura and
+    // sent at the owner's victim (an add whose AI does not attack stays put).
+    void RunAdd(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e, std::string& err)
+    {
+        uint32 const ttl = Drill::EntryTtlMs(run.program, e);
+        TempSummonType const type = ttl ? TEMPSUMMON_TIMED_OR_CORPSE_DESPAWN : TEMPSUMMON_CORPSE_DESPAWN;
+        Registry& reg = Registry::GetOrCreate(owner->GetMap());
+        Unit* victim = owner->GetVictim();
+        for (uint32 k = 0; k < e.count; ++k)
+        {
+            float const ang = run.rng->rng.Float(0.f, Geo::kTwoPi);
+            float const dist = run.rng->rng.Float(kAddRingMinYd, kAddRingMaxYd);
+            float const x = owner->GetPositionX() + dist * std::cos(ang);
+            float const y = owner->GetPositionY() + dist * std::sin(ang);
+            float const z = GroundZ(owner, x, y, owner->GetPositionZ());
+            TempSummon* add = owner->SummonCreature(e.unitEntry, x, y, z, Position::NormalizeOrientation(ang
+                + Geo::kPi), type, ttl);
+            if (!add)
+            {
+                err = Acore::StringFormat("could not summon creature {}", e.unitEntry);
+                return;
+            }
+            reg.TrackUnit(owner->GetGUID(), add->GetGUID(), e.unitEntry, true);
+            MatchOwnerLevel(owner, add);
+            if (e.auraId)
+                add->AddAura(e.auraId, add);
+            if (victim && add->IsAIEnabled && add->AI())
+                add->AI()->AttackStart(victim);
+        }
+    }
+
+    // `debuff`: the aura on n random scope group members.
+    void RunDebuff(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e, std::string& err)
+    {
+        std::vector<Player*> const members = PickMembers(GroupMembers(owner, run.scope, run.opt.includeScopePlayer),
+            e.count, nullptr, *run.rng);
+        if (members.empty())
+        {
+            err = kNoMemberMessage;
+            return;
+        }
+        uint32 applied = 0;
+        for (Player* p : members)
+        {
+            applied += owner->AddAura(e.spellId, p) ? 1 : 0;
+            // hp= (WP-K): wound the member down to that percent (never up), the dispel drill's "someone is under 50%".
+            if (e.woundPct && p->IsAlive())
+                p->SetHealth(std::min<uint32>(p->GetHealth(), std::max<uint32>(1,
+                    p->CountPctFromMaxHealth(static_cast<int32>(e.woundPct)))));
+        }
+        if (!applied)
+            err = Acore::StringFormat("spell {} put no aura on anyone (not an aura spell, or every target immune)",
+                e.spellId);
+    }
+
+    // `buff`: the aura on every live add of the entry (the owner too when it is that entry).
+    void RunBuff(Creature* owner, Drill::ProgramEntry const& e)
+    {
+        std::vector<Creature*> targets = EncounterAdds(owner, e.unitEntry);
+        if (owner->GetEntry() == e.unitEntry)
+            targets.insert(targets.begin(), owner);
+        for (Creature* t : targets)
+            t->AddAura(e.spellId, t);
+    }
+
+    // `swap`: the owner and a random live add of the entry trade places (bots that follow a guid keep their target).
+    void RunSwap(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e)
+    {
+        std::vector<Creature*> const adds = EncounterAdds(owner, e.unitEntry);
+        if (adds.empty())
+            return;
+        Creature* add = adds[run.rng->rng.Index(static_cast<uint32>(adds.size()))];
+        Position const a = owner->GetPosition();
+        Position const b = add->GetPosition();
+        owner->NearTeleportTo(b.GetPositionX(), b.GetPositionY(), b.GetPositionZ(), b.GetOrientation());
+        add->NearTeleportTo(a.GetPositionX(), a.GetPositionY(), a.GetPositionZ(), a.GetOrientation());
+    }
+
+    // `pick=tank`'s first member: the owner's victim, else (a dummy that attacks nobody) the first member the role
+    // provider calls a tank.
+    Unit const* TankOf(Creature* owner, std::vector<Player*> const& members)
+    {
+        if (Unit const* victim = owner->GetVictim())
+            return victim;
+        for (Player const* p : members)
+            if (HasRole(GetRoleProvider().Get(owner, p), Role::Tank))
+                return p;
+        return nullptr;
+    }
+
+    // `hold`: a prison of the entry on each of n members (pick=tank: the tank first, TankOf), the aura on the held
+    // player (cast by the prison) until the prison dies or despawns (Registry::NoteHeld).
+    void RunHold(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e, std::string& err)
+    {
+        std::vector<Player*> const group = GroupMembers(owner, run.scope, run.opt.includeScopePlayer);
+        std::vector<Player*> const members = PickMembers(group, e.count, e.pickTank ? TankOf(owner, group) : nullptr,
+            *run.rng);
+        if (members.empty())
+        {
+            err = kNoMemberMessage;
+            return;
+        }
+        uint32 const ttl = Drill::EntryTtlMs(run.program, e);
+        TempSummonType const type = ttl ? TEMPSUMMON_TIMED_OR_CORPSE_DESPAWN : TEMPSUMMON_CORPSE_DESPAWN;
+        Registry& reg = Registry::GetOrCreate(owner->GetMap());
+        for (Player* p : members)
+        {
+            TempSummon* prison = owner->SummonCreature(e.unitEntry, p->GetPosition(), type, ttl);
+            if (!prison)
+            {
+                err = Acore::StringFormat("could not summon creature {}", e.unitEntry);
+                return;
+            }
+            reg.TrackUnit(owner->GetGUID(), prison->GetGUID(), e.unitEntry, true);
+            MatchOwnerLevel(owner, prison);
+            // WP-K: a prison stays where it closed on the player and never fights back (the drill creature has no
+            // script; its default AI would chase whoever breaks it).
+            prison->SetReactState(REACT_PASSIVE);
+            prison->SetControlled(true, UNIT_STATE_ROOT);
+            if (e.auraId)
+                prison->AddAura(e.auraId, p);
+            reg.NoteHeld(owner->GetGUID(), prison->GetGUID(), p->GetGUID(), e.auraId);
+        }
+    }
+
+    // `describe` (WP-K options): phase= sets the preset's phase; follow= turns the preset's first target entry of
+    // that creature into the guid of its first live add (the encounter's units in the order they were added).
+    void RunDescribe(Creature* owner, Drill::ProgramEntry const& e, std::string& err)
+    {
+        Descriptor d = e.preset->build();
+        if (e.phase)
+            d.phase = *e.phase;
+        if (e.followEntry)
+        {
+            std::vector<Creature*> const adds = EncounterAdds(owner, e.followEntry);
+            auto it = std::find_if(d.targets.begin(), d.targets.end(), [&e](TargetEntry const& t)
+            {
+                return !t.guid && t.entry == e.followEntry;
+            });
+            if (adds.empty() || it == d.targets.end())
+                err = Acore::StringFormat("follow={}: {}", e.followEntry, adds.empty() ? "no live add of it"
+                    : "the preset lists no target of it");
+            else
+            {
+                it->guid = adds.front()->GetGUID().GetRawValue();
+                it->entry = 0;
+            }
+        }
+        Registry::GetOrCreate(owner->GetMap()).Describe(owner->GetGUID(), std::move(d));
     }
 
     // A failed entry is loud (STAGE-M4-R-REPORT M-1): a LOG_ERROR, a whisper to the training dummy's scope player,
@@ -1635,17 +1951,58 @@ namespace
             owner->GetGUID().ToString(), err);
         LOG_ERROR("module.bossmechanics", "{}", text);
         Registry::GetOrCreate(owner->GetMap()).NoteProgramError(owner->GetGUID(), text);
-        if (owner->GetEntry() == Ids::NPC_MECHANIC_DUMMY)
+        if (Ids::IsTrainingDummy(owner->GetEntry()))
             if (Player* scope = ScopeOnMap(owner, run.scope))
                 owner->Whisper(Acore::StringFormat("Program entry {} failed: {}", EntryName(e), err), LANG_UNIVERSAL,
                     scope);
     }
 
-    // One entry at its start; the owner is the boss stand-in. A failure (the scope player gone or dead, nobody to
-    // land on, a step that does not parse) skips the entry, reported by ReportProgramError; the program goes on.
-    void RunProgramEntry(Creature* owner, ProgramRun const& run, Drill::ProgramEntry const& e)
+    // One entry at its start (`at`); the owner is the boss stand-in. A failure (the scope player gone or dead, nobody
+    // to land on, a step that does not parse, a summon refused) skips the entry, reported by ReportProgramError; the
+    // program goes on.
+    void RunProgramEntry(Creature* owner, ProgramPtr const& runPtr, std::size_t index, Milliseconds at)
     {
+        ProgramRun const& run = *runPtr;
+        Drill::ProgramEntry const& e = run.program.entries[index];
         std::string err;
+        switch (e.kind)
+        {
+            case Drill::EntryKind::Wait:
+                return;
+            case Drill::EntryKind::Cast:
+            {
+                uint32 const window = Drill::EntryWindowMs(run.program, e);
+                CastChain(owner, runPtr, index, at, window ? at + Milliseconds(window) : Milliseconds(0));
+                return;
+            }
+            case Drill::EntryKind::Add:
+                RunAdd(owner, run, e, err);
+                break;
+            case Drill::EntryKind::Debuff:
+                RunDebuff(owner, run, e, err);
+                break;
+            case Drill::EntryKind::Buff:
+                RunBuff(owner, e);
+                break;
+            case Drill::EntryKind::Swap:
+                RunSwap(owner, run, e);
+                break;
+            case Drill::EntryKind::Hold:
+                RunHold(owner, run, e, err);
+                break;
+            case Drill::EntryKind::Describe:
+                if (e.preset && e.preset->build)
+                    RunDescribe(owner, e, err);
+                break;
+            default:
+                break;
+        }
+        if (Drill::Instant(e.kind))
+        {
+            if (!err.empty())
+                ReportProgramError(owner, run, e, err);
+            return;
+        }
         // Percent: -1 is the `.mech test` default, a percent of reference health (TestSpec::pct, 20).
         int32 const dmg = run.opt.percent ? -1 : std::max<int32>(run.opt.dmg, 0);
         Player* scope = ScopeOnMap(owner, run.scope);
@@ -1694,10 +2051,13 @@ namespace
         Registry& reg = Registry::GetOrCreate(owner->GetMap());
         ObjectGuid const guid = owner->GetGUID();
         for (std::size_t i = 0; i < run->program.entries.size(); ++i)
-            reg.Schedule(guid, start + Milliseconds(run->program.entries[i].startMs), [run, i](Creature* o)
+        {
+            Milliseconds const at = start + Milliseconds(run->program.entries[i].startMs);
+            reg.Schedule(guid, at, [run, i, at](Creature* o)
             {
-                RunProgramEntry(o, *run, run->program.entries[i]);
+                RunProgramEntry(o, run, i, at);
             });
+        }
         if (run->opt.loop && run->program.loopMs)
         {
             Milliseconds const next = start + Milliseconds(run->program.loopMs);
@@ -1730,7 +2090,7 @@ bool BossMechanics::StartProgram(Creature* owner, ObjectGuid scopePlayer, std::s
         return false;
     }
     std::optional<Drill::Program> program = Drill::ParseProgram(text, err);
-    if (!program)
+    if (!program || !CheckProgramIds(*program, err))
         return false;
     if (!ScopeOnMap(owner, scopePlayer))
     {
@@ -1747,6 +2107,12 @@ bool BossMechanics::StartProgram(Creature* owner, ObjectGuid scopePlayer, std::s
     run->rng = std::make_shared<Dice>(opt.seed ? *opt.seed : urand(1, 0x7FFFFFFF));
     ScheduleProgram(owner, run, GameTime::GetGameTimeMS());
     return true;
+}
+
+bool BossMechanics::CheckProgram(std::string_view text, std::string& err)
+{
+    std::optional<Drill::Program> program = Drill::ParseProgram(text, err);
+    return program && CheckProgramIds(*program, err);
 }
 
 void BossMechanics::StopProgram(Creature* owner)
@@ -1781,6 +2147,7 @@ public:
             { "minefield", HandleMinefield, SEC_GAMEMASTER, Console::No },
             { "drill",    HandleDrill,    SEC_GAMEMASTER, Console::No },
             { "dummy",    HandleMechDummyCommand, SEC_GAMEMASTER, Console::No },   // MechanicDummyAI.cpp
+            { "desc",     HandleMechDescCommand, SEC_GAMEMASTER, Console::No },    // MechanicDescCommand.cpp (M5)
             { "bots",     HandleBots,     SEC_GAMEMASTER, Console::No },     // [all]
         };
         static ChatCommandTable commandTable =

@@ -238,6 +238,27 @@ namespace Mechanic
     BossMechanics::PlayerLedger const* Failures(Unit* owner, ObjectGuid player);
     void OnFailure(Unit* owner, std::function<void(BossMechanics::FailureEvent const&)> fn);
     BossMechanics::Registry const* Read(Map const* map);                          // bots (M2)
+
+    // boss descriptor (M5, STAGE-M5-HANDOFF §3.2; the model is MechanicDescriptor.h): what bots kick, dispel, purge,
+    // focus and ignore. It lives on the owner's encounter (begun when needed) and goes with it; bots see a change on
+    // their next tick (Registry::DescriptorRevision).
+    //
+    //     BossMechanics::Descriptor d;
+    //     d.interrupts.push_back({ NPC_SNEED, SPELL_REPAIRS, 2 });
+    //     d.interrupts.push_back({ 0, SPELL_TAZER, 1, 8000ms });
+    //     d.targets.push_back({ NPC_SHREDDER, 0, 1 });
+    //     Mechanic::Describe(me, std::move(d));
+    //     Mechanic::NoteNextCast(me, SPELL_REPAIRS, GameTime::GetGameTimeMS() + 12s);   // from the script's scheduler
+    void Describe(Unit* owner, BossMechanics::Descriptor descriptor);       // set or replace (a phase change too)
+    void EditDescriptor(Unit* owner, std::function<void(BossMechanics::Descriptor&)> const& fn);    // in place
+    void SetPhase(Unit* owner, uint32 phase);
+    // `caster`'s next cast of `spellId` starts at `at` (absolute GameTime ms): the overload hold reads it before the
+    // entry's `every` cadence. NoteNextCastIn takes the delay from now.
+    void NoteNextCast(Unit* caster, uint32 spellId, Milliseconds at);
+    void NoteNextCastIn(Unit* caster, uint32 spellId, Milliseconds in);
+    // A script's own summon counts as a unit of the owner's encounter (casterEntry 0 interrupt entries); not despawned
+    // at the encounter's end (the script's summon list owns it).
+    void TrackUnit(Unit* owner, Unit* unit);
 }
 
 #endif

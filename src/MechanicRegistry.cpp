@@ -511,6 +511,7 @@ namespace BossMechanics
         {
             weakened.swap(it->second.weakenedPlayers);
             marked.swap(it->second.markedPlayers);
+            EndDescriptor(it->second);
         }
         _encounters.erase(owner);
         // Marked (drill), the drills' selector aura (M4 WP-F): the same rule as Weakened below.
@@ -594,6 +595,167 @@ namespace BossMechanics
         ++e->programErrorCount;
         if (e->programErrors.size() < kMaxProgramErrors)
             e->programErrors.push_back(std::move(error));
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // Registry: the boss descriptor (M5, STAGE-M5-HANDOFF §3.2, WP-D)
+    // ----------------------------------------------------------------------------------------------------------------
+    void Registry::Describe(ObjectGuid owner, Descriptor d)
+    {
+        Encounter& e = BeginEncounter(owner);
+        e.descriptor = std::move(d);
+        e.described = true;
+        BumpDescriptorRevision();
+        e.descriptorStamp = _descriptorRevision;
+    }
+
+    void Registry::EditDescriptor(ObjectGuid owner, std::function<void(Descriptor&)> const& fn)
+    {
+        if (!fn)
+            return;
+        Encounter& e = BeginEncounter(owner);
+        fn(e.descriptor);
+        e.described = true;
+        BumpDescriptorRevision();
+        e.descriptorStamp = _descriptorRevision;
+    }
+
+    void Registry::SetPhase(ObjectGuid owner, uint32 phase)
+    {
+        Encounter& e = BeginEncounter(owner);
+        if (e.described && e.descriptor.phase == phase)
+            return;
+        e.descriptor.phase = phase;
+        e.described = true;
+        BumpDescriptorRevision();
+        e.descriptorStamp = _descriptorRevision;
+    }
+
+    void Registry::NoteNextCast(ObjectGuid caster, uint32 casterEntry, uint32 spellId, Milliseconds at)
+    {
+        if (caster.IsEmpty() || !spellId)
+            return;
+        _castNotes.NoteNext(caster.GetRawValue(), casterEntry, spellId, at);
+        BumpDescriptorRevision();
+    }
+
+    void Registry::NoteCastStarted(ObjectGuid caster, uint32 casterEntry, uint32 spellId, Milliseconds start)
+    {
+        if (caster.IsEmpty() || !spellId)
+            return;
+        if (_castNotes.NoteStart(caster.GetRawValue(), casterEntry, spellId, start))
+            BumpDescriptorRevision();
+    }
+
+    bool Registry::ClaimCast(Desc::CastKey const& cast, ObjectGuid bot, Milliseconds expires)
+    {
+        if (bot.IsEmpty())
+            return false;
+        return _claims.Take(cast, bot.GetRawValue(), expires, GameTime::GetGameTimeMS());
+    }
+
+    ObjectGuid Registry::CastClaimHolder(Desc::CastKey const& cast) const
+    {
+        Desc::Key const holder = _claims.Holder(cast, GameTime::GetGameTimeMS());
+        return holder ? ObjectGuid(holder) : ObjectGuid::Empty;
+    }
+
+    void Registry::ReleaseCast(Desc::CastKey const& cast, ObjectGuid bot)
+    {
+        _claims.Release(cast, bot.GetRawValue());
+    }
+
+    void Registry::TrackUnit(ObjectGuid owner, ObjectGuid unit, uint32 entry, bool despawnAtEnd)
+    {
+        if (unit.IsEmpty() || unit == owner)
+            return;
+        Encounter& e = BeginEncounter(owner);
+        if (e.ending)
+            return;
+        for (EncounterUnit const& u : e.units)
+            if (u.guid == unit)
+                return;
+        e.units.push_back({ unit, entry, despawnAtEnd });
+        BumpDescriptorRevision();
+    }
+
+    void Registry::NoteHeld(ObjectGuid owner, ObjectGuid prison, ObjectGuid player, uint32 aura)
+    {
+        Encounter* e = FindEncounterMutable(owner);
+        if (!e || e->ending || prison.IsEmpty() || player.IsEmpty())
+            return;
+        e->held.push_back({ prison, player, aura });
+        BumpDescriptorRevision();
+    }
+
+    Encounter const* Registry::FindEncounterOfUnit(ObjectGuid unit) const
+    {
+        if (Encounter const* e = FindEncounter(unit))
+            return e->ending ? nullptr : e;
+        for (auto const& [owner, e] : _encounters)
+        {
+            if (e.ending)
+                continue;
+            for (EncounterUnit const& u : e.units)
+                if (u.guid == unit)
+                    return &e;
+        }
+        return nullptr;
+    }
+
+    void Registry::StepDescriptors(Milliseconds now)
+    {
+        bool changed = _castNotes.Prune(now);
+        _claims.Prune(now);
+        for (auto& [owner, e] : _encounters)
+        {
+            if (e.ending || (e.units.empty() && e.held.empty()))
+                continue;
+            for (auto it = e.held.begin(); it != e.held.end();)
+            {
+                Unit const* prison = FindUnit(it->prison);
+                if (prison && prison->IsAlive())
+                {
+                    ++it;
+                    continue;
+                }
+                if (it->aura)
+                    if (Player* player = ObjectAccessor::GetPlayer(_map, it->player))
+                        player->RemoveAurasDueToSpell(it->aura, it->prison);
+                it = e.held.erase(it);
+                changed = true;
+            }
+            std::size_t const before = e.units.size();
+            e.units.erase(std::remove_if(e.units.begin(), e.units.end(), [this](EncounterUnit const& u)
+            {
+                return !FindUnit(u.guid);
+            }), e.units.end());
+            changed = changed || e.units.size() != before;
+        }
+        if (changed)
+            BumpDescriptorRevision();
+    }
+
+    void Registry::EndDescriptor(Encounter& e)
+    {
+        for (HeldPlayer const& h : e.held)
+            if (h.aura)
+                if (Player* player = ObjectAccessor::GetPlayer(_map, h.player))
+                    player->RemoveAurasDueToSpell(h.aura, h.prison);
+        _castNotes.DropCaster(e.owner.GetRawValue());
+        _claims.DropCaster(e.owner.GetRawValue());
+        for (EncounterUnit const& u : e.units)
+        {
+            _castNotes.DropCaster(u.guid.GetRawValue());
+            _claims.DropCaster(u.guid.GetRawValue());
+            if (!u.despawnAtEnd)
+                continue;
+            if (Creature* c = _map->GetCreature(u.guid))
+                c->DespawnOrUnsummon();
+        }
+        e.held.clear();
+        e.units.clear();
+        BumpDescriptorRevision();
     }
 
     void Registry::Schedule(ObjectGuid owner, Milliseconds at, std::function<void(Creature* owner)> fn)
@@ -1266,6 +1428,7 @@ namespace BossMechanics
         }
 
         RunTasks(now);
+        StepDescriptors(now);
 
         _ticking = true;
         EngineBridge* bridge = GetEngineBridge();

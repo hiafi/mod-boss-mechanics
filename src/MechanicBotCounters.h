@@ -40,9 +40,14 @@ namespace BossMechanics
         uint32 lockCasts = 0;       // ...of which cast-time or channelled spells
         uint32 castBreaks = 0;      // casts and channels the waker interrupted
         uint32 wakes = 0;           // AI ticks the waker pulled forward
-        uint32 solveUsLast = 0;
+        uint32 solveUsLast = 0;     // Solver::Solve alone (M5 C4: before, it included the allies' refresh below)
         uint32 solveUsMax = 0;
         uint64 solveUsTotal = 0;
+        // M5 C4: the allies' refresh (RefreshAllies) run right before each solve that is not a re-route, timed apart.
+        uint32 solveRefreshes = 0;
+        uint32 refreshUsLast = 0;
+        uint32 refreshUsMax = 0;
+        uint64 refreshUsTotal = 0;
         // M3 (STAGE-M3-HANDOFF §3.8 telemetry).
         uint32 carrierSolves = 0;   // solves while the bot carries a shape (Spread/RunOut, a Zone on or aimed at it)
         uint32 claimSolves = 0;     // ...while it claims a Soak
@@ -120,6 +125,34 @@ namespace BossMechanics
         uint32 forcedMoves = 0;
         uint32 forcedCasts = 0;
         uint32 forcedTurns = 0;
+        // M5 WP-T (targets and the ignore list, MechanicBotTargets.cpp).
+        uint32 focusSwitches = 0;       // `boss focus` attacks that moved the bot onto its pick
+        uint32 msLowerTarget = 0;       // ms attacking something else while an engaged pick lived (waker samples)
+        uint32 breakOutMsMax = 0;       // longest a prison held its player, as this bot saw it (open ones included)
+        uint32 ignoredHits = 0;         // damage events the bot dealt to ignored units (UnitScript OnDamage)...
+        uint32 ignoredDamage = 0;       // ...and their damage
+        uint32 petIgnoredHits = 0;      // the same for its pets, guardians and totems
+        uint32 petIgnoredDamage = 0;
+        uint32 ignoreBlocks = 0;        // actions the focus multiplier zeroed because their target is ignored
+        uint32 ignoreDrops = 0;         // ignored current targets, melee victims and cast targets dropped
+        uint32 petRecalls = 0;          // minions pulled off an ignored victim (onto the bot's target, or recalled)
+        // M5 WP-P (dispels and purges, MechanicBotDispel.cpp): counted at the cast, whichever row cast it (the bot's
+        // own spells by a cast hook, its pet's by `boss purge`).
+        uint32 urgentDispels = 0;       // cures of a listed loss-of-control aura (an `urgent` entry)...
+        uint32 urgentLatencyMsMax = 0;  // ...the longest time from that aura's application to the cure
+        uint32 deadlineDispels = 0;     // cures of a deadline entry inside its deadline (floored at skip + lead)
+        uint32 deadlineMisses = 0;      // deadline entries' auras that ran out on this bot (aura hook, by expiry)
+        uint32 listedDispels = 0;       // cures of a listed aura that was not urgent (stock rows, our target order)
+        uint32 purges = 0;              // listed enemy buffs stripped (Purge, Dispel Magic, Spellsteal, Tranq, Devour)
+        // M5 WP-I (interrupts, MechanicBotInterrupt.cpp): kicks are judged at the cast, whichever row cast them (the
+        // bot's own by the player cast hook, its Felhunter's Spell Lock by `boss kick`).
+        uint32 kicksLanded = 0;         // kicks on a listed cast this bot held the claim of
+        uint32 kicksWasted = 0;         // kicks on an unlisted cast while a listed cast was due before it was back
+        uint32 doNotKickKicks = 0;      // kicks on a do-not-kick cast (a violation: should stay 0)
+        uint32 duplicateKicks = 0;      // kicks on a listed cast another bot had claimed
+        uint32 overloadHolds = 0;       // casts this bot could kick but held for a higher one due (once per cast)
+        uint32 listedMissed = 0;        // listed casts that completed (counted by one bot per group: sum the group)
+        uint32 stockKicksDropped = 0;   // stock kick rows the kick multiplier zeroed (once per cast)
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;

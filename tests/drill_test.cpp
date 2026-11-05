@@ -5,6 +5,7 @@
 #include "BossMechanicsIds.h"
 #include "check.h"
 #include "MechanicDrill.h"
+#include "MechanicDrillPlan.h"
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -305,11 +306,17 @@ namespace
         CHECK(Ids::InSpellBlock(Ids::SPELL_BAITED_DRILL));
         CHECK(Ids::InSpellBlock(205000) && Ids::InSpellBlock(205099));
         CHECK(!Ids::InSpellBlock(204999) && !Ids::InSpellBlock(205100) && !Ids::InSpellBlock(0));
-        // STAGE-M4-R-REPORT nit 2: rider= refuses Weakened and the resolve spells.
+        // STAGE-M4-R-REPORT nit 2: rider= refuses Weakened and the resolve spells; M5 WP-K: and every other spell but
+        // the two harmless drill auras (the M5 stand-ins deal damage, stun or buff enemies).
         CHECK(Ids::RiderAllowed(Ids::SPELL_BAITED_DRILL) && Ids::RiderAllowed(Ids::SPELL_MARKED_DRILL));
-        CHECK(Ids::RiderAllowed(205099) && !Ids::RiderAllowed(205100));
-        for (std::uint32_t id = Ids::SPELL_WEAKENED; id <= Ids::SPELL_RESOLVE_LAST; ++id)
-            CHECK(!Ids::RiderAllowed(id));
+        for (std::uint32_t id = 204990; id <= 205110; ++id)
+            CHECK(Ids::RiderAllowed(id) == (id == 205008 || id == 205009));
+        for (std::uint32_t id = Ids::SPELL_M5_FIRST; id <= Ids::SPELL_M5_LAST; ++id)
+            CHECK(Ids::InSpellBlock(id) && !Ids::RiderAllowed(id));
+        CHECK(Ids::SPELL_M5_FIRST == 205010 && Ids::SPELL_M5_LAST == 205023);
+        CHECK(Ids::NPC_DESCRIPTOR_DUMMY == 300403 && Ids::NPC_DRILL_PRISON == 300407);
+        CHECK(Ids::IsTrainingDummy(300402) && Ids::IsTrainingDummy(300403) && !Ids::IsTrainingDummy(300404));
+        CHECK(Ids::InCreatureBlock(300407) && !Ids::InCreatureBlock(300420) && !Ids::InCreatureBlock(300399));
         CHECK(Ids::SPELL_MARKED_DRILL != Ids::SPELL_BAITED_DRILL && Ids::InSpellBlock(Ids::SPELL_MARKED_DRILL));
     }
 
@@ -536,6 +543,22 @@ namespace
     }
 }
 
+namespace
+{
+    // M5: a program entry's first token picks a descriptor entry before a drill name, so no drill (and not the lane
+    // set) may be named like one.
+    void TestNoDrillShadowsADescriptorEntry()
+    {
+        for (Drill::Def const& d : Drill::All())
+            CHECK(!Drill::DescriptorEntryKind(d.name));
+        CHECK(!Drill::DescriptorEntryKind(Drill::Lanes().name));
+        for (std::string_view name : { "barrage", "minefield", "uminefield", "none", "all" })
+            CHECK(!Drill::DescriptorEntryKind(name));
+        for (std::string_view name : { "wait", "cast", "add", "debuff", "buff", "swap", "hold", "describe" })
+            CHECK(Drill::DescriptorEntryKind(name) && !Drill::Find(name));
+    }
+}
+
 int main()
 {
     TestCentroidAndShift();
@@ -550,5 +573,6 @@ int main()
     TestDefaultCycles();
     TestRas();
     TestNumberParsing();
+    TestNoDrillShadowsADescriptorEntry();
     return Report("drill_test");
 }
