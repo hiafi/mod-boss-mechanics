@@ -12,6 +12,7 @@
 #include "MechanicBotFacing.h"
 #include "MechanicBotLock.h"
 #include "MechanicBotState.h"
+#include "MechanicLeaks.h"
 #include "MotionMaster.h"
 #include "MoveSpline.h"
 #include "Player.h"
@@ -39,7 +40,10 @@ namespace
     {
         MechanicBotState* st = ref.Get(botAI);
         if (st)
+        {
             BotBrain::Update(botAI, *st, Now());
+            BotBrain::EndPullOnWake(botAI, *st);
+        }
         return st;
     }
 
@@ -137,6 +141,13 @@ bool MechanicBotMoveAction::Execute(Event /*event*/)
         return false;   // rooted, stunned, no path: retried after kResendAfter; the brain re-solves or releases
 
     st->escapeIssuedAt = now;
+    // M4 leak detectors (MechanicLeaks.h): the spline this MoveTo launched is ours.
+    Movement::MoveSpline const* ms = bot->movespline;
+    if (ms && ms->Initialized() && !ms->Finalized())
+    {
+        G3D::Vector3 const end = ms->FinalDestination();
+        Leaks::OwnSpline(st->leak, ms->GetId(), end.x, end.y);
+    }
     return true;
 }
 
@@ -159,12 +170,19 @@ bool MechanicBotHoldAction::Execute(Event /*event*/)
     if (st && st->faceOwed)
     {
         if (BotFacing::FacingOff(bot, st->faceAngle))
+        {
             BotFacing::Apply(bot, st->faceAngle);
+            Leaks::OwnFacing(st->leak, st->faceAngle);     // M4: our turn, not a leak
+        }
         return true;
     }
     if (Unit* face = BotBrain::FacingTarget(bot))
         if (!bot->HasInArc(CAST_ANGLE_IN_FRONT, face))
+        {
             bot->SetFacingToObject(face);
+            if (st)
+                Leaks::OwnFacing(st->leak, bot->GetAngle(face));
+        }
     return true;
 }
 
@@ -181,6 +199,7 @@ bool MechanicBotFaceAction::Execute(Event /*event*/)
     if (!st || !st->faceOwed || !BotFacing::FacingOff(bot, st->faceAngle))
         return false;
     BotFacing::Apply(bot, st->faceAngle);
+    Leaks::OwnFacing(st->leak, st->faceAngle);     // M4: our turn, not a leak
     ++st->counters.facingsApplied;
     return true;
 }

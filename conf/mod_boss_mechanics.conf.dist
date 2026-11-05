@@ -200,8 +200,9 @@ BossMechanics.Bots.AvoidAoeInInstances = 1
 
 #
 #    BossMechanics.Bots.OpenWorldTestScope
-#        Description: Outside instances, give the boss mechanics strategy to bots grouped with a GM who ran
-#                     `.mech test` on their map (for playtests in the open world).
+#        Description: Outside instances, give the boss mechanics strategy to bots grouped with a scope player
+#                     of a live encounter on their map: a GM who ran `.mech test`, a player the mechanics
+#                     training dummy runs for, the dpssim mechanics mode's actor (playtests in the open world).
 #        Default:     1 - Enabled
 #                     0 - Disabled (instances only)
 #
@@ -298,7 +299,8 @@ BossMechanics.Bots.MaxCandidates = 400
 #
 #    BossMechanics.Bots.MaxPathChecks
 #        Description: Most navmesh paths one solve pass computes (1-64). A solve runs up to three passes (clean,
-#                     clean at a reduced 0.25 yd margin, mine grace) plus one for a fallback.
+#                     clean at a reduced 0.25 yd margin, mine grace) plus one for a fallback. A larger budget does not
+#                     turn crowd Fallbacks into moves (M4: 12 and 16 gave the same outcomes as 8 under a barrage).
 #        Default:     8
 #
 
@@ -338,6 +340,17 @@ BossMechanics.Bots.MovingAnchorRecheckMs = 250
 #
 
 BossMechanics.Bots.RoleSlackMs = 1000
+
+#
+#    BossMechanics.Bots.ChaseReleaseMs
+#        Description: A melee bot out of reach of its target whose way back into melee is refused because the
+#                     whole melee ring round the target is in a warned danger walks back in anyway after this long,
+#                     and fights there for as long, in milliseconds (500-60000). Only while some spot of the ring
+#                     stays clear for that time plus 2 s. Tanks wait half of it.
+#        Default:     3000
+#
+
+BossMechanics.Bots.ChaseReleaseMs = 3000
 
 #
 #    BossMechanics.Bots.RangedDistanceYd
@@ -565,7 +578,9 @@ BossMechanics.Bots.Route.Enable = 1
 
 #
 #    BossMechanics.Bots.Route.PadYd
-#        Description: Route search: yards (0-40) added around the bot and its goal for the search box.
+#        Description: Route search: yards (0-40) added around the bot and its goal for the search box. When that box
+#                     finds no route but hazards cross its edge, it grows once round the obstacle they form (up to
+#                     32 yd per side): a bot deep in a U of mines walks back out of the mouth first.
 #        Default:     8
 #
 
@@ -611,3 +626,16 @@ BossMechanics.Bots.Route.MaxLegs = 8
 #
 
 BossMechanics.Bots.Route.RetryMs = 1000
+
+#
+#    BossMechanics.Bots.ForceLeaks
+#        Description: Debug check of the lock leak detectors (leaks in .mech bots and the mechanics sim). With N above
+#                     0, each bot's lock lets blocked moves, casts and turns through until each detector has counted
+#                     N leaks since the counters' last reset (every sim iteration resets them). A run with working
+#                     detectors then reports about N leaks of each kind its drills block (turns need a look-away
+#                     drill), and logs each one. The bots break their own rules on purpose: never set it on a live
+#                     realm (0-100).
+#        Default:     0 - Disabled
+#
+
+BossMechanics.Bots.ForceLeaks = 0

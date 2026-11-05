@@ -9,6 +9,7 @@
 #include "MechanicRegistry.h"
 #include "BossMechanicsConfig.h"
 #include "Containers.h"
+#include "Creature.h"
 #include "EngineBridge.h"
 #include "GameTime.h"
 #include "InstanceScript.h"
@@ -30,6 +31,7 @@ namespace BossMechanics
     {
         EngineBridge* sBridge = nullptr;
         std::atomic<bool> sWarnedNoBridge{ false };
+        std::atomic<FailureSinkFn> sFailureSink{ nullptr };     // M4: set once by the sim, read on the map threads
 
         Geo::Vec3 ToVec(Position const& p)
         {
@@ -96,6 +98,11 @@ namespace BossMechanics
     void SetEngineBridge(EngineBridge* bridge)
     {
         sBridge = bridge;
+    }
+
+    void SetFailureSink(FailureSinkFn fn)
+    {
+        sFailureSink.store(fn, std::memory_order_release);
     }
 
     EngineBridge* GetEngineBridge()
@@ -499,9 +506,25 @@ namespace BossMechanics
         // Weakened: only the players this encounter stacked, and not one another encounter on the map also stacked
         // (an add's or a test owner's end must not reset the boss fight's penalty).
         GuidSet weakened;
+        GuidSet marked;
         if (auto it = _encounters.find(owner); it != _encounters.end())
+        {
             weakened.swap(it->second.weakenedPlayers);
+            marked.swap(it->second.markedPlayers);
+        }
         _encounters.erase(owner);
+        // Marked (drill), the drills' selector aura (M4 WP-F): the same rule as Weakened below.
+        for (ObjectGuid const& g : marked)
+        {
+            bool const heldElsewhere = std::any_of(_encounters.begin(), _encounters.end(), [&g](auto const& kv)
+            {
+                return kv.second.markedPlayers.count(g) != 0;
+            });
+            if (heldElsewhere)
+                continue;
+            if (Player* player = ObjectAccessor::GetPlayer(_map, g))
+                player->RemoveAurasDueToSpell(Ids::SPELL_MARKED_DRILL);
+        }
         if (!bridge)
             return;
         for (ObjectGuid const& g : weakened)
@@ -546,6 +569,95 @@ namespace BossMechanics
             _deferredEnds.push_back(owner);
     }
 
+    Encounter& Registry::AddScopePlayer(ObjectGuid owner, ObjectGuid player)
+    {
+        Encounter& e = BeginEncounter(owner);
+        if (!player.IsEmpty())
+            e.testGms.insert(player);
+        e.wantsBots = true;
+        return e;
+    }
+
+    Encounter& Registry::SetScopePlayers(ObjectGuid owner, GuidSet players)
+    {
+        Encounter& e = BeginEncounter(owner);
+        e.testGms = std::move(players);
+        e.wantsBots = true;
+        return e;
+    }
+
+    void Registry::NoteProgramError(ObjectGuid owner, std::string error)
+    {
+        Encounter* e = FindEncounterMutable(owner);
+        if (!e)
+            return;
+        ++e->programErrorCount;
+        if (e->programErrors.size() < kMaxProgramErrors)
+            e->programErrors.push_back(std::move(error));
+    }
+
+    void Registry::Schedule(ObjectGuid owner, Milliseconds at, std::function<void(Creature* owner)> fn)
+    {
+        if (!fn)
+            return;
+        Encounter& e = BeginEncounter(owner);
+        if (e.ending)
+            return;
+        e.tasks.push_back({ at, _nextTaskSeq++, std::move(fn) });
+    }
+
+    void Registry::CancelScheduled(ObjectGuid owner)
+    {
+        if (Encounter* e = FindEncounterMutable(owner))
+            e->tasks.clear();
+    }
+
+    std::size_t Registry::ScheduledCount(ObjectGuid owner) const
+    {
+        Encounter const* e = FindEncounter(owner);
+        return e ? e->tasks.size() : 0;
+    }
+
+    void Registry::RunTasks(Milliseconds now)
+    {
+        // Move the due tasks out first: a task may begin or end encounters (rehashing _encounters) or schedule more.
+        struct Due
+        {
+            ObjectGuid owner;
+            Encounter::Task task;
+        };
+        std::vector<Due> due;
+        for (auto& [owner, e] : _encounters)
+        {
+            if (e.tasks.empty() || e.ending)
+                continue;
+            auto const split = std::stable_partition(e.tasks.begin(), e.tasks.end(), [now](Encounter::Task const& t)
+            {
+                return t.at > now;
+            });
+            for (auto it = split; it != e.tasks.end(); ++it)
+                due.push_back({ owner, std::move(*it) });
+            e.tasks.erase(split, e.tasks.end());
+        }
+        if (due.empty())
+            return;
+        std::sort(due.begin(), due.end(), [](Due const& a, Due const& b)
+        {
+            return a.task.at != b.task.at ? a.task.at < b.task.at : a.task.seq < b.task.seq;
+        });
+        for (Due& d : due)
+        {
+            // An earlier task may have ended the encounter (StopProgram): its remaining steps go with it.
+            Encounter const* e = FindEncounter(d.owner);
+            if (!e || e->ending)
+                continue;
+            Creature* owner = d.owner.IsCreatureOrVehicle() ? _map->GetCreature(d.owner) : nullptr;
+            if (!owner || !owner->IsInWorld() || !owner->IsAlive())
+                continue;
+            d.task.fn(owner);
+        }
+    }
+
     void Registry::ClearAll()
     {
         GuidSet owners;
@@ -582,11 +694,21 @@ namespace BossMechanics
             LOG_INFO("module.bossmechanics", "Failure {} mechanic {} (tag {}, {}) player {} damage {}",
                 FailureTypeName(e.type), e.mechanicId, e.tag, KindName(e.kind), e.player.ToString(), e.damage);
 
+        FailureSinkFn const sink = sFailureSink.load(std::memory_order_acquire);
         if (enc->onFailure && FindUnit(e.encounter))
         {
             auto const fn = enc->onFailure;     // the callback may end the encounter
+            if (sink)
+            {
+                FailureEvent const copy = e;    // `e` may live in the encounter the callback ends
+                fn(copy);
+                sink(_map, copy);
+                return;
+            }
             fn(e);
         }
+        if (sink)
+            sink(_map, e);
     }
 
     void Registry::PlayerFailure(ActiveMechanic& m, ObjectGuid player, FailureEvent::Type type, uint32 damage)
@@ -670,7 +792,9 @@ namespace BossMechanics
 
     bool Registry::IsInTestScope(ActiveMechanic const& m, Player const* player) const
     {
-        if (!m.owner.IsCreature() || m.owner.GetEntry() != Ids::NPC_MECHANIC_TEST_OWNER)
+        // Test owner and training dummy mechanics touch only their scope players' groups, never bystanders.
+        if (!m.owner.IsCreature()
+            || (m.owner.GetEntry() != Ids::NPC_MECHANIC_TEST_OWNER && m.owner.GetEntry() != Ids::NPC_MECHANIC_DUMMY))
             return true;
         Encounter const* e = FindEncounter(m.owner);
         if (!e)
@@ -1019,8 +1143,12 @@ namespace BossMechanics
             return;
         if (Player* p = target->ToPlayer())
         {
-            PlayerFailure(*m, p->GetGUID(), FailureEvent::Type::Hit, damage);
-            ApplyWeakened(*m, p);
+            // The job (the Bait's chosen player taking the landing) is neither a failure nor a Weakened stack.
+            if (!Judge::HitIsJob(m->kind, p->GetGUID() == m->baitTarget))
+            {
+                PlayerFailure(*m, p->GetGUID(), FailureEvent::Type::Hit, damage);
+                ApplyWeakened(*m, p);
+            }
         }
         if (m->onHit && OwnerPresent(*m))
         {
@@ -1136,6 +1264,8 @@ namespace BossMechanics
                         bossStateId, static_cast<uint32>(state));
             }
         }
+
+        RunTasks(now);
 
         _ticking = true;
         EngineBridge* bridge = GetEngineBridge();
@@ -1541,6 +1671,7 @@ namespace BossMechanics
         {
             ObjectGuid const target = farthest->GetGUID();
             r.picked = target;
+            m.baitTarget = target;
             Geo::Pose const tp = ToPose(farthest->GetPosition());
             Shape circle = Shape::Circle(Judge::BaitHitRadius(m.shape.radius));     // B4: Radius(yd)
             circle.zTolerance = m.shape.zTolerance;

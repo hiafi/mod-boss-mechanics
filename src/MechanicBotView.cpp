@@ -713,7 +713,8 @@ namespace BossMechanics
                     Unit const* cu = ObjectAccessor::GetUnit(*_bot, c);
                     if (!cu || !cu->IsAlive())
                         continue;
-                    if (std::optional<ViewRules::Spot> spot = SpotOf(m, c))
+                    std::optional<ViewRules::Spot> spot = SpotOf(m, c);
+                    if (spot && ViewRules::PlaceOtherCircle(*spot))
                     {
                         extra.push_back(ViewRules::CarrierHazard(m.id, r, zTol, *spot, _opt.safetyMarginYd, timing));
                         if (_opt.debug && !spot->Planned())
@@ -941,9 +942,12 @@ namespace BossMechanics
                         from, to);
                 }
                 if (!pickOnly && !pick.IsEmpty())
-                    if (std::optional<ViewRules::Spot> spot = SpotOf(m, pick))
+                {
+                    std::optional<ViewRules::Spot> spot = SpotOf(m, pick);
+                    if (spot && ViewRules::PlaceOtherCircle(*spot))
                         extra.push_back(ViewRules::CarrierHazard(m.id, hitR, zTol, *spot, _opt.safetyMarginYd,
                             timing));
+                }
                 AddTask(m, BotTaskRole::Member, from, to);
             }
 

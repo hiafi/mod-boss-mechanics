@@ -7,8 +7,12 @@
  * | Id            | What                                                              |
  * | 205000        | Weakened (debuff, 7 stacks, 30 s)                                 |
  * | 205001-205007 | Resolve damage, one per school: 205001 + SpellSchools value       |
+ * | 205008        | Baited (drill): dummy debuff, 10 stacks, 2 min (bait rotation)    |
+ * | 205009        | Marked (drill): dummy debuff, 10 stacks, 2 min (drill selector)   |
+ * | 205000-205099 | the reserved spell block (`rider=` takes 205008-205099 only)      |
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
+ * | 300402        | Mechanics Training Dummy: runs the drill program on itself (M4)   |
  *
  * Display ids (CreatureDisplayInfo id = CreatureModelData id), one block of 100 ids per color in each range:
  *
@@ -58,6 +62,31 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t SPELL_RESOLVE_BASE = 205001;        // + school (0 physical .. 6 arcane)
     constexpr std::uint32_t SPELL_RESOLVE_LAST = 205007;
     constexpr std::uint8_t WEAKENED_MAX_STACKS = 7;
+    // Baited (drill): a harmless stacking dummy debuff, the drills' stand-in for a boss's bait rotation debuff
+    // (`.mech drill fenrus`: the Bait rider and the fewest-stacks rule's aura). Not Weakened: the baiter doing the job
+    // gets no Weakened (user ruling 2026-11-04).
+    constexpr std::uint32_t SPELL_BAITED_DRILL = 205008;
+    // Marked (drill): a second harmless stacking dummy debuff, the drills' stand-in for an eligibility or order aura
+    // (Ras's Chill, the ordered soak's stacks). The drill step `marker <stacks>` sets it; drill setup never hands out
+    // Weakened (orchestrator ruling on STAGE-M4-R-REPORT M-2). Separate from 205008, so the fenrus Baited stacks never
+    // leak into ras or soaks eligibility within one program slice.
+    constexpr std::uint32_t SPELL_MARKED_DRILL = 205009;
+    constexpr std::uint8_t MARKED_DRILL_MAX_STACKS = 10;
+    // The module's reserved spell block (apps/dbc-tools source/ids.yaml `bossmechanics`).
+    constexpr std::uint32_t SPELL_BLOCK_FIRST = 205000;
+    constexpr std::uint32_t SPELL_BLOCK_LAST = 205099;
+
+    constexpr bool InSpellBlock(std::uint32_t spellId)
+    {
+        return spellId >= SPELL_BLOCK_FIRST && spellId <= SPELL_BLOCK_LAST;
+    }
+
+    // `.mech test rider=`: the block past Weakened and the resolve spells. A rider of 205000 would hand out Weakened
+    // on a job hit (around the user ruling) and outlive the encounter; a resolve spell would deal a second hit.
+    constexpr bool RiderAllowed(std::uint32_t spellId)
+    {
+        return InSpellBlock(spellId) && spellId > SPELL_RESOLVE_LAST;
+    }
 
     constexpr std::uint32_t ResolveSpellForSchool(std::uint8_t school)
     {
@@ -67,6 +96,7 @@ namespace BossMechanics::Ids
     // Creatures
     constexpr std::uint32_t NPC_MECHANIC_MARKER = 300400;
     constexpr std::uint32_t NPC_MECHANIC_TEST_OWNER = 300401;
+    constexpr std::uint32_t NPC_MECHANIC_DUMMY = 300402;          // npc_boss_mechanics_dummy (MechanicDummyAI.cpp)
 
     // Displays: a table of shape ladders inside one 100-id block per color (see the table above); the two line
     // ladders have their own ranges.

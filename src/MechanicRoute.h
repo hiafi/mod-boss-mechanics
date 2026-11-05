@@ -31,6 +31,9 @@ namespace BossMechanics::Solver
     {
         float padYd = 8.f, cellYd = 1.f;
         std::uint32_t maxCells = 4096, maxExpansions = 4096, maxLegs = 8;
+        // M4 §3.7 (the U minefield): when the box finds no route and hazards cross its edge, it grows once to hold
+        // the whole obstacle they belong to, at most this far past the first box on each side (0 = never).
+        float growYd = 32.f;
     };
 
     struct RouteStats
@@ -44,6 +47,10 @@ namespace BossMechanics::Solver
         std::uint32_t pullChecks = 0;       // CheckPath calls of the string-pull, all searches
         bool found = false;
         float cellYd = 0.f;                 // the cell size used (grows past RouteParams::cellYd for a large box)
+        std::uint32_t grown = 0;            // 1: the first box found no route and grew round the obstacle it clipped
+        // RegionRoute only: no route worked and another goal is left (try it with firstGoal = nextGoal).
+        bool moreGoals = false;
+        std::uint32_t nextGoal = 0;
     };
 
     namespace RouteDetail
@@ -105,16 +112,29 @@ namespace BossMechanics::Solver
             }
         };
 
-        // The box around bot and goal padded by padYd; the cell grows past cellYd until the grid fits maxCells.
-        inline bool MakeGrid(Geo::Vec3 const& bot, Geo::Vec3 const& goal, RouteParams const& rp, Grid& g)
+        struct Box
+        {
+            float x0 = 0.f, y0 = 0.f, x1 = 0.f, y1 = 0.f;
+        };
+
+        // The box around bot and goal padded by `pad`.
+        inline Box FollowBox(Geo::Vec3 const& bot, Geo::Vec3 const& goal, float pad)
+        {
+            pad = std::max(0.f, pad);
+            return { std::min(bot.x, goal.x) - pad, std::min(bot.y, goal.y) - pad, std::max(bot.x, goal.x) + pad,
+                std::max(bot.y, goal.y) + pad };
+        }
+
+        // The grid over `box`; the cell grows past cellYd until the grid fits maxCells.
+        inline bool MakeGrid(Box const& box, Geo::Vec3 const& bot, Geo::Vec3 const& goal, RouteParams const& rp,
+            Grid& g)
         {
             if (rp.maxCells == 0)
                 return false;
-            float const pad = std::max(0.f, rp.padYd);
-            g.x0 = std::min(bot.x, goal.x) - pad;
-            g.y0 = std::min(bot.y, goal.y) - pad;
-            float const w = std::max(bot.x, goal.x) + pad - g.x0;
-            float const h = std::max(bot.y, goal.y) + pad - g.y0;
+            g.x0 = box.x0;
+            g.y0 = box.y0;
+            float const w = box.x1 - box.x0;
+            float const h = box.y1 - box.y0;
             float cell = std::max({ kMinCellYd, rp.cellYd, std::sqrt(w * h / static_cast<float>(rp.maxCells)) });
             auto count = [&](float c)
             {
@@ -132,6 +152,88 @@ namespace BossMechanics::Solver
             g.hotTo.assign(g.Size(), -kNever);
             g.start = g.CellOf(bot.x, bot.y);
             g.goal = g.CellOf(goal.x, goal.y);
+            return true;
+        }
+
+        // The box around bot and goal padded by padYd.
+        inline bool MakeGrid(Geo::Vec3 const& bot, Geo::Vec3 const& goal, RouteParams const& rp, Grid& g)
+        {
+            return MakeGrid(FollowBox(bot, goal, rp.padYd), bot, goal, rp, g);
+        }
+
+        // Does hazard `h` count for a route timed to `horizonEnd` (Rasterize's filter)?
+        inline bool InRouteTime(Input const& in, Hazard const& h, Ms horizonEnd)
+        {
+            return !h.poses.empty() && Detail::HazardEnd(h) + in.params.marginMs >= in.now
+                && h.timing.from - in.params.marginMs <= horizonEnd;
+        }
+
+        // M4 §3.7 (the U minefield): the first box found no route. Was it the box? The hazards whose outline (bounds
+        // plus margin) crosses its edge are the seed; every hazard whose outline comes within `ring` of a member's
+        // joins (a wall of overlapping mines is one obstacle). The box grows to hold the whole obstacle plus `ring`
+        // on every side, by at most `growYd` per side. false: no hazard crosses the edge (a real enclosure: the
+        // first answer stands) or the box would not grow.
+        inline bool GrowBox(Input const& in, Ms horizonEnd, float ring, float growYd, Box& box)
+        {
+            struct Disc
+            {
+                float x = 0.f, y = 0.f, r = 0.f;
+                bool in = false;
+            };
+            std::vector<Disc> discs;
+            for (Hazard const& h : in.hazards)
+            {
+                if (!InRouteTime(in, h, horizonEnd))
+                    continue;
+                float const r = Geo::Bounds(h.shape) + std::max(0.f, h.marginYd);
+                for (Geo::Pose const& pose : h.poses)
+                    if (std::isfinite(pose.x) && std::isfinite(pose.y) && std::isfinite(r))
+                        discs.push_back({ pose.x, pose.y, r, false });
+            }
+            std::vector<std::size_t> open;
+            for (std::size_t i = 0; i < discs.size(); ++i)
+            {
+                Disc& d = discs[i];
+                bool const meets = d.x + d.r >= box.x0 && d.x - d.r <= box.x1 && d.y + d.r >= box.y0
+                    && d.y - d.r <= box.y1;
+                bool const inside = d.x - d.r >= box.x0 && d.x + d.r <= box.x1 && d.y - d.r >= box.y0
+                    && d.y + d.r <= box.y1;
+                if (meets && !inside)
+                {
+                    d.in = true;
+                    open.push_back(i);
+                }
+            }
+            if (open.empty())
+                return false;
+            Box grown = box;
+            while (!open.empty())
+            {
+                Disc const d = discs[open.back()];
+                open.pop_back();
+                grown.x0 = std::min(grown.x0, d.x - d.r - ring);
+                grown.y0 = std::min(grown.y0, d.y - d.r - ring);
+                grown.x1 = std::max(grown.x1, d.x + d.r + ring);
+                grown.y1 = std::max(grown.y1, d.y + d.r + ring);
+                for (std::size_t j = 0; j < discs.size(); ++j)
+                {
+                    Disc& o = discs[j];
+                    if (!o.in && Geo::Dist2d(d.x, d.y, o.x, o.y) <= d.r + o.r + ring)
+                    {
+                        o.in = true;
+                        open.push_back(j);
+                    }
+                }
+            }
+            grown.x0 = std::max(grown.x0, box.x0 - growYd);
+            grown.y0 = std::max(grown.y0, box.y0 - growYd);
+            grown.x1 = std::min(grown.x1, box.x1 + growYd);
+            grown.y1 = std::min(grown.y1, box.y1 + growYd);
+            constexpr float kMinGrowYd = 0.5f;
+            if (grown.x0 > box.x0 - kMinGrowYd && grown.y0 > box.y0 - kMinGrowYd && grown.x1 < box.x1 + kMinGrowYd
+                && grown.y1 < box.y1 + kMinGrowYd)
+                return false;
+            box = grown;
             return true;
         }
 
@@ -242,10 +344,7 @@ namespace BossMechanics::Solver
             constexpr float kSpanSlackYd = 1e-3f;
             for (Hazard const& src : tight.hazards)
             {
-                if (src.poses.empty())
-                    continue;
-                if (Detail::HazardEnd(src) + tight.params.marginMs < tight.now
-                    || src.timing.from - tight.params.marginMs > horizonEnd)
+                if (!InRouteTime(tight, src, horizonEnd))
                     continue;
                 Hazard h = src;
                 h.marginYd += halfDiag;
@@ -391,9 +490,14 @@ namespace BossMechanics::Solver
 
         // 8-connected A*, no corner cutting, no route longer than MaxRouteCost. A cell must be free at the time the
         // bot reaches it (moveStart + g / speed). Returns the cells from start to goal; empty = none within
-        // maxExpansions.
-        inline std::vector<std::uint32_t> Search(Grid const& g, std::uint32_t maxExpansions, std::uint32_t& expansions)
+        // maxExpansions. `edge` (M4 §3.7) is set when an empty answer ran out of cells after reaching the box's edge
+        // (the way may lie outside the box); never after maxExpansions.
+        inline std::vector<std::uint32_t> Search(Grid const& g, std::uint32_t maxExpansions, std::uint32_t& expansions,
+            bool* edge = nullptr)
         {
+            bool touched = false;
+            if (edge)
+                *edge = false;
             std::uint32_t const n = g.Size();
             std::uint32_t const maxCost = MaxRouteCost(g);
             std::int64_t const nx = g.nx;
@@ -429,6 +533,7 @@ namespace BossMechanics::Solver
                 }
                 std::int64_t const cx = cur.idx % g.nx;
                 std::int64_t const cy = cur.idx / g.nx;
+                touched = touched || cx == 0 || cy == 0 || cx == nx - 1 || cy == ny - 1;
                 for (std::int64_t dy = -1; dy <= 1; ++dy)
                 {
                     std::int64_t const y = cy + dy;
@@ -456,7 +561,11 @@ namespace BossMechanics::Solver
             }
             std::vector<std::uint32_t> cells;
             if (!reached)
+            {
+                if (edge)
+                    *edge = touched && heap.empty();
                 return cells;
+            }
             for (std::uint32_t c = g.goal; c != kNoParent; c = parent[c])
                 cells.push_back(c);
             std::reverse(cells.begin(), cells.end());
@@ -466,6 +575,34 @@ namespace BossMechanics::Solver
         inline bool IsWall(Grid const& g, std::uint32_t idx)
         {
             return g.hotFrom[idx] == -kNever && g.hotTo[idx] == kNever;
+        }
+
+        // M4 §3.7 (the U minefield's inner corners): the grid blocks a cell by its center plus half a diagonal, so a
+        // bot standing within about a cell of a hazard's margin can find every neighbor blocked although it may walk
+        // away. Each blocked cell within kStartRing cells of the start whose straight line from the bot passes
+        // CheckPath at `tight` (the grid's own margins) is freed. Cells under a rejected leg stay walls. The legs are
+        // validated on the oracle's path anyway. Returns the cells freed.
+        inline std::uint32_t FreeAroundStart(Grid& g, Input const& tight, Geo::Vec3 const& bot)
+        {
+            constexpr std::int64_t kStartRing = 2;
+            std::int64_t const sx = g.start % g.nx;
+            std::int64_t const sy = g.start / g.nx;
+            std::uint32_t freed = 0;
+            for (std::int64_t y = std::max<std::int64_t>(0, sy - kStartRing);
+                y <= std::min<std::int64_t>(g.ny - 1, sy + kStartRing); ++y)
+                for (std::int64_t x = std::max<std::int64_t>(0, sx - kStartRing);
+                    x <= std::min<std::int64_t>(g.nx - 1, sx + kStartRing); ++x)
+                {
+                    std::uint32_t const idx = g.Index(static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(y));
+                    if (idx == g.start || g.hotFrom[idx] > g.hotTo[idx] || IsWall(g, idx))
+                        continue;
+                    if (!CheckPath(tight, { bot, g.Center(idx) }, tight.now, false).ok)
+                        continue;
+                    g.hotFrom[idx] = kNever;
+                    g.hotTo[idx] = -kNever;
+                    ++freed;
+                }
+            return freed;
         }
 
         enum class Sight : std::uint8_t
@@ -672,9 +809,12 @@ namespace BossMechanics::Solver
         // Is the goal sealed off by static walls (STAGE-M3-R-REPORT m-12)? A flood fill from the goal over the cells
         // that are not static walls, with A*'s moves (8-connected, no corner cutting), at most `limit` cells: true
         // when it runs out of cells before it reaches the start (A* would expand every cell it can reach and find
-        // nothing). false when it reaches the start or passes the limit (A* decides).
-        inline bool GoalSealed(Grid const& g, std::uint32_t limit)
+        // nothing). false when it reaches the start or passes the limit (A* decides). `edge` (M4 §3.7): a sealed
+        // goal's cells reach the box's edge (the walls may open outside the box).
+        inline bool GoalSealed(Grid const& g, std::uint32_t limit, bool* edge = nullptr)
         {
+            if (edge)
+                *edge = false;
             std::uint32_t const n = g.Size();
             std::int64_t const nx = g.nx;
             std::int64_t const ny = g.ny;
@@ -697,6 +837,8 @@ namespace BossMechanics::Solver
                     return false;
                 std::int64_t const cx = cur % g.nx;
                 std::int64_t const cy = cur / g.nx;
+                if (edge && (cx == 0 || cy == 0 || cx == nx - 1 || cy == ny - 1))
+                    *edge = true;
                 for (std::int64_t dy = -1; dy <= 1; ++dy)
                     for (std::int64_t dx = -1; dx <= 1; ++dx)
                     {
@@ -733,6 +875,9 @@ namespace BossMechanics::Solver
     // through oracle.Find and CheckPath on the real path (full margin, else reduced; never grace). A leg the oracle
     // rejects (no path, or a path that fails the check) marks the cells around its straight segment and the search runs
     // once more (legs it repeats reuse their oracle path). Oracle calls are capped by in.params.maxPathChecks.
+    // No route in the box although the search (or the sealed-off goal's cells) reached its edge, while hazards cross
+    // that edge: the box grows once round the obstacle they form, at most growYd per side (RouteDetail::GrowBox,
+    // M4 §3.7), and the search runs again in it; stats.grown = 1. A real enclosure never grows.
     // Deterministic for a given input and oracle.
     inline Plan Route(Input const& in, Geo::Vec3 const& goal, PathOracle& oracle, RouteParams const& rp,
         RouteStats* stats = nullptr)
@@ -753,31 +898,20 @@ namespace BossMechanics::Solver
             || Detail::Dist2(in.bot, goal) > RouteDetail::kMaxRouteYd || rp.padYd > RouteDetail::kMaxRouteYd)
             return plan;
 
-        RouteDetail::Grid grid;
-        if (!RouteDetail::MakeGrid(in.bot, goal, rp, grid))
-            return plan;
-        st.cells = grid.Size();
-        st.cellYd = grid.cell;
-
         Input tight;
         Detail::ReducedMargins(in, tight);
         float const speed = Detail::Speed(in);
+        float const straightYd = Detail::Dist2(in.bot, goal);
+        Ms const moveStart = in.now + in.params.startDelay;
         // The hazards that matter: those hot before the bot could walk twice the way, or the way plus a detour of
         // the box padding out and back (STAGE-M3-R-REPORT q-2: a detour round a wall near the goal).
-        float const straightYd = Detail::Dist2(in.bot, goal);
-        float const walkYd = std::max(2.f * straightYd, straightYd + 2.f * std::max(0.f, rp.padYd));
-        Ms const horizonEnd = in.now + in.params.startDelay + Detail::TravelMs(walkYd, speed) + in.params.marginMs;
-        st.blocked = RouteDetail::Rasterize(tight, horizonEnd, grid);
-        Ms const moveStart = in.now + in.params.startDelay;
-        grid.moveStart = moveStart.count();
-        grid.widen = in.params.marginMs.count() + Detail::TravelMs(grid.cell, speed).count();
-        grid.msPerYd = 1000.f / speed;
-        RouteDetail::Seal(grid);
-        // A goal walled in by lasting hazards: no A* exhaustion (STAGE-M3-R-REPORT m-12).
-        if (RouteDetail::GoalSealed(grid, std::max<std::uint32_t>(64, std::min(rp.maxExpansions, grid.Size()) / 4)))
-            return plan;
+        auto horizonFor = [&](float detourYd)
+        {
+            float const walkYd = std::max(2.f * straightYd, straightYd + 2.f * std::max(0.f, detourYd));
+            return in.now + in.params.startDelay + Detail::TravelMs(walkYd, speed) + in.params.marginMs;
+        };
 
-        // Oracle paths by (from, to), kept across the retry: a leg the second search repeats costs no second call.
+        // Oracle paths by (from, to), kept across the retries: a leg a later search repeats costs no second call.
         struct Known
         {
             Geo::Vec3 from, to;
@@ -786,95 +920,229 @@ namespace BossMechanics::Solver
         };
         std::vector<Known> known;
         auto same = [](Geo::Vec3 const& a, Geo::Vec3 const& b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
-        for (std::uint32_t attempt = 0; attempt < 2; ++attempt)
+
+        RouteDetail::Box box = RouteDetail::FollowBox(in.bot, goal, rp.padYd);
+        float detourYd = std::max(0.f, rp.padYd);
+        for (std::uint32_t boxPass = 0; boxPass < 2; ++boxPass)
         {
-            if (attempt)
-                ++st.retries;
-            std::uint32_t expansions = 0;
-            std::vector<std::uint32_t> const cells = RouteDetail::Search(grid, rp.maxExpansions, expansions);
-            st.expansions += expansions;
-            if (cells.empty())
-                return plan;
-
-            std::vector<Geo::Vec3> pts;
-            pts.reserve(cells.size() + 1);
-            pts.push_back(in.bot);
-            for (std::size_t k = 1; k + 1 < cells.size(); ++k)
-                pts.push_back(grid.Center(cells[k]));
-            pts.push_back(goal);
-
-            // Legs at the full margin when the route fits maxLegs at it, else at the reduced one (the grid is blocked
-            // at the reduced margin, so a narrow gap may need it).
-            std::vector<std::size_t> ends = RouteDetail::Pull(in, grid, pts, rp.maxLegs, st.pullChecks);
-            if (ends.empty())
-                ends = RouteDetail::Pull(tight, grid, pts, rp.maxLegs, st.pullChecks);
-            st.legs = static_cast<std::uint32_t>(ends.size());
-            if (ends.empty())
-                return plan;
-
-            std::vector<Geo::Vec3> full{ in.bot };
-            std::vector<Geo::Vec3> waypoints;
-            Geo::Vec3 from = in.bot;
-            Ms at = moveStart;
-            bool allFull = true;
-            bool rejected = false;
-            std::size_t legStart = 0;
-            for (std::size_t end : ends)
+            if (boxPass)
             {
-                auto hit = std::find_if(known.begin(), known.end(), [&](Known const& k)
+                // M4 §3.7 (the U minefield): no route inside the first box, and the search (or the sealed goal's
+                // cells) reached its edge. When hazards cross the edge, the way round them may lie outside it (a bot
+                // deep in a U must first walk back out of its mouth, away from the goal): grow the box round that
+                // obstacle and search once more.
+                float const growYd = std::max(0.f, rp.growYd);
+                float const ring = 2.f * std::max(RouteDetail::kMinCellYd, rp.cellYd) + 1.f;
+                if (growYd <= 0.f || !std::isfinite(growYd)
+                    || !RouteDetail::GrowBox(in, horizonFor(detourYd + growYd), ring, growYd, box))
+                    return plan;
+                detourYd = std::max({ std::min(in.bot.x, goal.x) - box.x0, std::min(in.bot.y, goal.y) - box.y0,
+                    box.x1 - std::max(in.bot.x, goal.x), box.y1 - std::max(in.bot.y, goal.y) });
+                st.grown = 1;
+            }
+
+            RouteDetail::Grid grid;
+            if (!RouteDetail::MakeGrid(box, in.bot, goal, rp, grid))
+                return plan;
+            st.cells = grid.Size();
+            st.cellYd = grid.cell;
+            st.blocked = RouteDetail::Rasterize(tight, horizonFor(detourYd), grid);
+            grid.moveStart = moveStart.count();
+            grid.widen = in.params.marginMs.count() + Detail::TravelMs(grid.cell, speed).count();
+            grid.msPerYd = 1000.f / speed;
+            RouteDetail::Seal(grid);
+            RouteDetail::FreeAroundStart(grid, tight, in.bot);
+            // A goal walled in by lasting hazards: no A* exhaustion (STAGE-M3-R-REPORT m-12). Walled in up to the box's
+            // edge: the walls may open outside the box.
+            bool edge = false;
+            if (RouteDetail::GoalSealed(grid, std::max<std::uint32_t>(64, std::min(rp.maxExpansions, grid.Size())
+                / 4), &edge))
+            {
+                if (!edge)
+                    return plan;
+                continue;
+            }
+
+            bool noWay = false;
+            for (std::uint32_t attempt = 0; attempt < 2; ++attempt)
+            {
+                if (attempt)
+                    ++st.retries;
+                std::uint32_t expansions = 0;
+                std::vector<std::uint32_t> const cells = RouteDetail::Search(grid, rp.maxExpansions, expansions,
+                    &edge);
+                st.expansions += expansions;
+                if (cells.empty())
                 {
-                    return same(k.from, from) && same(k.to, pts[end]);
-                });
-                if (hit == known.end())
-                {
-                    if (st.oracleCalls >= in.params.maxPathChecks)
-                        return plan;
-                    ++st.oracleCalls;
-                    Known k{ from, pts[end], false, {} };
-                    k.found = oracle.Find(from, pts[end], k.path) && !k.path.empty();
-                    if (k.found)
-                        Detail::AnchorPath(from, k.path);
-                    hit = known.insert(known.end(), std::move(k));
-                }
-                std::vector<Geo::Vec3> const& leg = hit->path;
-                bool ok = hit->found;
-                if (ok)
-                {
-                    Ms const legStartAt = at - in.params.startDelay;
-                    if (!CheckPath(in, leg, legStartAt, false).ok)
-                    {
-                        allFull = false;
-                        ok = CheckPath(tight, leg, legStartAt, false).ok;
-                    }
-                }
-                if (!ok)
-                {
-                    RouteDetail::MarkSegment(grid, pts[legStart], pts[end]);
-                    rejected = true;
+                    noWay = edge;
                     break;
                 }
-                full.insert(full.end(), leg.begin() + 1, leg.end());
-                at += Detail::TravelMs(Detail::PathLength(leg), speed);
-                from = leg.back();
-                waypoints.push_back(from);
-                legStart = end;
-            }
-            if (rejected)
-                continue;
 
-            st.found = true;
-            plan.outcome = Outcome::Move;
-            plan.path = std::move(full);
-            plan.target = waypoints.back();
-            plan.arriveAt = at;
-            plan.holdUntil = at;
-            plan.pathChecks = st.oracleCalls;
-            plan.stats.pass = allFull ? 1 : 2;
-            plan.answers = Detail::Answers(in, plan.path);
-            plan.waypoints = std::move(waypoints);
-            return plan;
+                std::vector<Geo::Vec3> pts;
+                pts.reserve(cells.size() + 1);
+                pts.push_back(in.bot);
+                for (std::size_t k = 1; k + 1 < cells.size(); ++k)
+                    pts.push_back(grid.Center(cells[k]));
+                pts.push_back(goal);
+
+                // Legs at the full margin when the route fits maxLegs at it, else at the reduced one (the grid is
+                // blocked at the reduced margin, so a narrow gap may need it).
+                std::vector<std::size_t> ends = RouteDetail::Pull(in, grid, pts, rp.maxLegs, st.pullChecks);
+                if (ends.empty())
+                    ends = RouteDetail::Pull(tight, grid, pts, rp.maxLegs, st.pullChecks);
+                st.legs = static_cast<std::uint32_t>(ends.size());
+                if (ends.empty())
+                    return plan;
+
+                std::vector<Geo::Vec3> full{ in.bot };
+                std::vector<Geo::Vec3> waypoints;
+                Geo::Vec3 from = in.bot;
+                Ms at = moveStart;
+                bool allFull = true;
+                bool rejected = false;
+                std::size_t legStart = 0;
+                for (std::size_t end : ends)
+                {
+                    auto hit = std::find_if(known.begin(), known.end(), [&](Known const& k)
+                    {
+                        return same(k.from, from) && same(k.to, pts[end]);
+                    });
+                    if (hit == known.end())
+                    {
+                        if (st.oracleCalls >= in.params.maxPathChecks)
+                            return plan;
+                        ++st.oracleCalls;
+                        Known k{ from, pts[end], false, {} };
+                        k.found = oracle.Find(from, pts[end], k.path) && !k.path.empty();
+                        if (k.found)
+                            Detail::AnchorPath(from, k.path);
+                        hit = known.insert(known.end(), std::move(k));
+                    }
+                    std::vector<Geo::Vec3> const& leg = hit->path;
+                    bool ok = hit->found;
+                    if (ok)
+                    {
+                        Ms const legStartAt = at - in.params.startDelay;
+                        if (!CheckPath(in, leg, legStartAt, false).ok)
+                        {
+                            allFull = false;
+                            ok = CheckPath(tight, leg, legStartAt, false).ok;
+                        }
+                    }
+                    if (!ok)
+                    {
+                        RouteDetail::MarkSegment(grid, pts[legStart], pts[end]);
+                        rejected = true;
+                        break;
+                    }
+                    full.insert(full.end(), leg.begin() + 1, leg.end());
+                    at += Detail::TravelMs(Detail::PathLength(leg), speed);
+                    from = leg.back();
+                    waypoints.push_back(from);
+                    legStart = end;
+                }
+                if (rejected)
+                    continue;
+
+                st.found = true;
+                plan.outcome = Outcome::Move;
+                plan.path = std::move(full);
+                plan.target = waypoints.back();
+                plan.arriveAt = at;
+                plan.holdUntil = at;
+                plan.pathChecks = st.oracleCalls;
+                plan.stats.pass = allFull ? 1 : 2;
+                plan.answers = Detail::Answers(in, plan.path);
+                plan.waypoints = std::move(waypoints);
+                return plan;
+            }
+            // The search ran out of cells inside the box (a real enclosure), hit maxExpansions, or both searches
+            // ended in a leg the navmesh rejected: a bigger box would not help.
+            if (!noWay)
+                return plan;
         }
         return plan;
+    }
+
+    // Goals RegionRoute tries per call (each one Route search): one, so one call (one budget unit) never costs more
+    // than one Route (STAGE-M4-R-REPORT m-10: two Routes of the snake + pillar bench took 1.5 ms on the host, over
+    // the 1,000 µs route budget). The caller tries the next goal on a later step (`firstGoal`, RouteStats::moreGoals),
+    // up to kRegionRouteMaxGoals in all.
+    constexpr std::uint32_t kRegionRouteGoals = 1;
+    constexpr std::uint32_t kRegionRouteMaxGoals = 2;
+
+    // M4 WP-Q (G2, the Alexei Assembly): a way round the hazards into a hard region the bot cannot reach straight.
+    // Solve validates only the oracle's path, which knows walls, not hazards, so a member whose cluster lies past a
+    // lasting Zone (the Out of bounds circle on the group) that is hot by the time the straight line crosses it gets
+    // a Fallback and stands where it is until the judge. RegionRoute runs Route towards a spot that passes TargetOk:
+    // the candidates (Candidates, nearest first) that pass TargetOk at their straight arrival, the `firstGoal`-th of
+    // them and on (kRegionRouteGoals per call), and keeps the first route whose end passes TargetOk at the route's
+    // own arrival (the late rule of the regions included). Outcome Move with the route (`waypoints`, `path`,
+    // `target`; answers and holdUntil as Solve gives them, so the bot holds the region for its window); Safe (the bot
+    // stays) when the bot already passes TargetOk, no live hard region is unmet, or no route works; then
+    // stats->moreGoals says whether a goal below kRegionRouteMaxGoals is left (stats->nextGoal). Hazards only steer
+    // the route (Route ignores regions); the goal's checks bring the regions in. Deterministic for a given input and
+    // oracle.
+    inline Plan RegionRoute(Input const& in, PathOracle& oracle, RouteParams const& rp, RouteStats* stats = nullptr,
+        std::uint32_t firstGoal = 0)
+    {
+        RouteStats local;
+        RouteStats& st = stats ? *stats : local;
+        st = RouteStats();
+        Plan none;
+        none.target = in.bot;
+        none.arriveAt = in.now;
+        none.holdUntil = in.now;
+        Ms const horizonEnd = in.now + in.params.horizon;
+        if (firstGoal >= kRegionRouteMaxGoals)
+            return none;
+        if (Detail::Frozen(in) || TargetOk(in, in.bot, in.now, horizonEnd))
+            return none;
+        bool unmet = false;
+        for (Region const& r : in.regions)
+            unmet = unmet || (r.hard && Detail::RegionLive(in, r) && !Detail::InsideRegion(r, in.bot));
+        if (!unmet)
+            return none;
+        float const speed = Detail::Speed(in);
+        Ms const moveStart = in.now + in.params.startDelay;
+        std::uint32_t tried = 0;
+        std::uint32_t eligible = 0;
+        std::vector<Geo::Vec3> const cands = Candidates(in);
+        for (std::size_t i = 1; i < cands.size(); ++i)
+        {
+            Geo::Vec3 const& goal = cands[i];
+            if (!TargetOk(in, goal, moveStart + Detail::TravelMs(Detail::Dist3(in.bot, goal), speed), horizonEnd))
+                continue;
+            if (eligible++ < firstGoal)
+                continue;
+            if (tried >= kRegionRouteGoals)
+            {
+                // One more goal exists: the caller may try it on a later step.
+                st.moreGoals = firstGoal + tried < kRegionRouteMaxGoals;
+                st.nextGoal = firstGoal + tried;
+                break;
+            }
+            ++tried;
+            RouteStats rs;
+            Plan plan = Route(in, goal, oracle, rp, &rs);
+            st.cells = rs.cells;
+            st.blocked = rs.blocked;
+            st.expansions += rs.expansions;
+            st.legs = rs.legs;
+            st.oracleCalls += rs.oracleCalls;
+            st.retries += rs.retries;
+            st.pullChecks += rs.pullChecks;
+            st.cellYd = rs.cellYd;
+            st.grown = std::max(st.grown, rs.grown);
+            if (!rs.found || plan.outcome != Outcome::Move || plan.waypoints.empty()
+                || !TargetOk(in, plan.target, plan.arriveAt, std::max(plan.arriveAt, horizonEnd)))
+                continue;
+            st.found = true;
+            plan.answers = Detail::Answers(in, plan.path);
+            plan.holdUntil = Detail::HoldUntil(in, plan.answers, plan.arriveAt, plan.target);
+            return plan;
+        }
+        return none;
     }
 
     // Where stock following can take over a route (§3.8, STAGE-M3-R-REPORT m-9): the index in route.waypoints of
@@ -913,6 +1181,24 @@ namespace BossMechanics::Solver
         return route.waypoints.size() - 1;
     }
 
+    // A found route cut where stock follow takes over (§3.8): at RouteHandoff's waypoint, with `target`, `path` and
+    // `arriveAt` re-timed to it and `holdUntil` = `arriveAt` (the brain's TrimRoute; it also drops the answers that
+    // are not hazards).
+    inline void TrimToHandoff(Input const& in, Plan& plan, Geo::Vec3 const& goal)
+    {
+        std::size_t cut = 0;
+        std::size_t const keep = RouteHandoff(in, plan, goal, &cut) + 1;
+        if (keep < plan.waypoints.size() && cut + 1 < plan.path.size())
+        {
+            plan.waypoints.resize(keep);
+            plan.path.resize(cut + 1);
+            plan.target = plan.waypoints.back();
+            plan.arriveAt = in.now + in.params.startDelay + Detail::TravelMs(Detail::PathLength(plan.path),
+                Detail::Speed(in));
+        }
+        plan.holdUntil = plan.arriveAt;
+    }
+
     // May a bot walking a route go on from `pos` to the next waypoint `next` now (§3.8 waypoint mode,
     // STAGE-M3-R-REPORT M-4)? The move action paths from where the bot stands, not from the waypoint the leg was
     // validated from, so that line must pass CheckPath itself, timed from `at` with the bot already moving. `check`
@@ -923,6 +1209,20 @@ namespace BossMechanics::Solver
         if (!RouteDetail::Finite(pos) || !RouteDetail::Finite(next))
             return false;
         return CheckPath(check, { pos, next }, at - check.params.startDelay, false).ok;
+    }
+
+    // Route-loop counter (M4 §3.7, the U minefield): a route search within kRouteLoopWindow of a route's handoff to
+    // stock follow, for a goal within kRouteLoopGoalYd of that route's goal (the goal is the end of the follow motion,
+    // so it moves with the leader), is a loop: found, handed off, re-crossed by the follow, routed again.
+    constexpr Ms kRouteLoopWindow{ 5000 };
+    constexpr float kRouteLoopGoalYd = 10.f;
+
+    // handoffAt 0 = no handoff yet.
+    inline bool IsRouteLoop(Ms handoffAt, Geo::Vec3 const& handoffGoal, Ms now, Geo::Vec3 const& goal)
+    {
+        if (handoffAt <= Ms(0) || now < handoffAt || now - handoffAt > kRouteLoopWindow)
+            return false;
+        return Geo::Dist2d(handoffGoal.x, handoffGoal.y, goal.x, goal.y) <= kRouteLoopGoalYd;
     }
 }
 

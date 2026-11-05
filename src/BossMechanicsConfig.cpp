@@ -58,6 +58,7 @@ namespace BossMechanics
             b.minSolveIntervalMs = GetClampedU32("BossMechanics.Bots.MinSolveIntervalMs", 150, 0, 5000);
             b.movingAnchorRecheckMs = GetClampedU32("BossMechanics.Bots.MovingAnchorRecheckMs", 250, 50, 5000);
             b.roleSlackMs = GetClampedU32("BossMechanics.Bots.RoleSlackMs", 1000, 0, 60000);
+            b.chaseReleaseMs = GetClampedU32("BossMechanics.Bots.ChaseReleaseMs", 3000, 500, 60000);
             b.rangedDistanceYd = GetClampedFloat("BossMechanics.Bots.RangedDistanceYd", 22.f, 8.f, 40.f);
             b.facingSlackDeg = GetClampedFloat("BossMechanics.Bots.FacingSlackDeg", 15.f, 0.f, 90.f);
             b.debug = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Debug", false);
@@ -81,6 +82,7 @@ namespace BossMechanics
             b.routeMaxExpansions = GetClampedU32("BossMechanics.Bots.Route.MaxExpansions", 4096, 64, 16384);
             b.routeMaxLegs = GetClampedU32("BossMechanics.Bots.Route.MaxLegs", 8, 1, 32);
             b.routeRetryMs = GetClampedU32("BossMechanics.Bots.Route.RetryMs", 1000, 100, 60000);
+            b.forceLeaks = GetClampedU32("BossMechanics.Bots.ForceLeaks", 0, 0, 100);
 
             BotFallibilityConfig& f = b.fallibility;
             f.enable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Fallibility.Enable", false);
@@ -159,6 +161,11 @@ namespace BossMechanics
         c.bots = LoadBotConfig();
 
         sConfig = std::move(c);
+
+        if (sConfig.bots.forceLeaks)
+            LOG_WARN("module.bossmechanics.bots", "mod-boss-mechanics: BossMechanics.Bots.ForceLeaks = {}: the bots' "
+                "lock lets blocked moves, casts and turns through until each leak detector has counted {} (a debug "
+                "check; never on a live realm)", sConfig.bots.forceLeaks, sConfig.bots.forceLeaks);
 
         if (sConfig.bots.fallibility.enable)
             LOG_INFO("module.bossmechanics.bots", "mod-boss-mechanics: bot fallibility on, seed {}{}",

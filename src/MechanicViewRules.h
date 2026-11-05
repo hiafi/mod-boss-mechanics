@@ -147,6 +147,19 @@ namespace BossMechanics::ViewRules
         return out;
     }
 
+    // Whose circle this bot plans against (M4 WP-Q, G3): another player's Spread/RunOut circle, and the Bait
+    // picker's landing circle, go into the view only at a planned spot that is for this mechanic (the bot's
+    // reservation on it: every solve with a task publishes one, and a claim role holding its spot does) or at a
+    // human's spot. A group bot that has not planned for it yet stands at its current spot or walks a plan made for
+    // something else; it is about to move for the mechanic itself, and its own side keeps everyone out meanwhile
+    // (CarriedCircle and the picker's hazards see the others' planned spots). Placing it early made the others yield
+    // first and the carrier then saw them clear and stayed: a RunOut carrier in the middle of the Ras stack pushed the
+    // whole stack out of its region (MissedStack), and the picker's current spot blocked the way in of a member.
+    inline bool PlaceOtherCircle(Spot const& s)
+    {
+        return s.source == SpotSource::Reservation || s.source == SpotSource::HumanNow;
+    }
+
     // Spread/RunOut separation, the avoider's side (§3.2): the carrier's circle at its planned spot, as a hazard.
     // The spot's slack widens the margin and counts as drift (the reduced-margin pass keeps it).
     inline Solver::Hazard CarrierHazard(std::uint32_t id, float radius, float zTolerance, Spot const& carrier,

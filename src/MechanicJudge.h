@@ -114,6 +114,15 @@ namespace BossMechanics
             return radius <= 0.f;
         }
 
+        // A resolve hit is the job, not a failure, when it is the Bait landing on the player it chose: the bait taken
+        // (user ruling 2026-11-04). That player still takes the damage and any rider (the drill's Baited (drill)
+        // 205008), but no ledger failure and no Weakened stack. Anyone else inside the landing circle, and every other
+        // kind's hit, failed: a ledger Hit plus Weakened when the mechanic has it.
+        constexpr bool HitIsJob(Kind k, bool isBaitTarget)
+        {
+            return k == Kind::Bait && isBaitTarget;
+        }
+
         // Stack Cluster(n) (B3): how many of the other players stand within `circle` of `at`.
         inline std::uint32_t ClusterCount(Shape const& circle, Geo::Vec3 const& at,
             std::vector<Geo::Vec3> const& others)

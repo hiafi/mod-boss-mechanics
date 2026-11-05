@@ -26,9 +26,11 @@
 #include <list>
 #include <map>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
+class Creature;
 class Map;
 class Player;
 class Unit;
@@ -319,6 +321,7 @@ namespace BossMechanics
         bool finished = false;          // all resolves done: pruned at the end of this tick
         bool fizzled = false;           // removed without damage (mine cap or lifetime)
         bool detonateRequested = false;
+        ObjectGuid baitTarget;          // Bait: the player its landing is aimed at (Judge::HitIsJob)
         Milliseconds holdWindow{ 0 };   // HoldStill
         Geo::Pose lastPose;             // last known anchor pose (used when a unit anchor is gone)
         ResolveContext ctx;
@@ -402,6 +405,9 @@ namespace BossMechanics
         Color cells = Color::Purple;
     };
 
+    // Program entry errors kept per encounter (Encounter::programErrors); the count goes on past it.
+    constexpr std::size_t kMaxProgramErrors = 16;
+
     struct Encounter
     {
         ObjectGuid owner;
@@ -419,9 +425,31 @@ namespace BossMechanics
         // Players this encounter stacked Weakened on. Its end removes Weakened from them only, and not from a player
         // another encounter still on the map has also stacked.
         GuidSet weakenedPlayers;
-        // `.mech test` (owner = Mechanic Test Owner): the GMs who ran it. Only they and their group (raid) members
-        // are eligible for the encounter's mechanics; empty on a test owner = nobody.
+        // Players a drill `marker` step put Marked (drill) on (M4 WP-F, 205009); the end removes it the same way.
+        GuidSet markedPlayers;
+        // M4 WP-F (STAGE-M4-R-REPORT M-1): program entries that failed (RunProgramEntry), oldest first, capped at
+        // kMaxProgramErrors; programErrorCount counts every one. The sim takes them per iteration
+        // (Sim::TakeProgramErrors) into its report; the dummy whispers each to its scope player.
+        std::vector<std::string> programErrors;
+        uint32 programErrorCount = 0;
+        // The encounter's scope players (M4: the field keeps its M1 name). `.mech test` (owner = Mechanic Test
+        // Owner): the GMs who ran it; only they and their group (raid) members are eligible for the test owner's
+        // mechanics, and empty on a test owner = nobody (IsInTestScope). The training dummy (300402) is limited the
+        // same way: its scope set is the player it runs for plus the players fighting it (MechanicDummyAI::Check
+        // replaces it every second). The sim adds its actor; any other owner reaches every candidate.
         GuidSet testGms;
+        // M4: the scope players' groups want the boss-mechanics bot strategy in the open world (the bot gate reads
+        // it; set with AddScopePlayer by `.mech test`, the drill runner, the training dummy and the sim).
+        bool wantsBots = false;
+        // M4: steps scheduled on the encounter (Registry::Schedule), run at the start of a Tick at or after `at`,
+        // in (at, seq) order. They go with the encounter.
+        struct Task
+        {
+            Milliseconds at{ 0 };
+            uint64 seq = 0;
+            std::function<void(Creature* owner)> fn;
+        };
+        std::vector<Task> tasks;
     };
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -473,6 +501,20 @@ namespace BossMechanics
         // for removal mid-unload (Map::UnloadGrid asserts the remove list is empty). No-op without an encounter.
         void DeferEndEncounter(ObjectGuid owner);
         void ClearAll();                // every encounter (`.mech clear all`)
+        // M4: begins the owner's encounter (when needed), adds `player` to its scope set and marks it as wanting bots.
+        Encounter& AddScopePlayer(ObjectGuid owner, ObjectGuid player);
+        // M4 WP-F (STAGE-M4-R-REPORT m-5): replaces the owner's scope set (begins the encounter when needed, marks it
+        // as wanting bots). The training dummy prunes the players who left its fight this way.
+        Encounter& SetScopePlayers(ObjectGuid owner, GuidSet players);
+        // M4 WP-F (M-1): records a failed program entry on the owner's encounter (no-op without one).
+        void NoteProgramError(ObjectGuid owner, std::string error);
+        // M4: runs `fn(owner)` at the first Tick at or after `at` (GameTime ms), while the owner's encounter lives and
+        // the owner is an alive creature on this map (else the task is dropped). Begins the encounter when needed.
+        // Tasks run before the mechanics step, outside the tick's iteration: they may Add, Schedule and end
+        // encounters. The closure must capture guids, never unit pointers.
+        void Schedule(ObjectGuid owner, Milliseconds at, std::function<void(Creature* owner)> fn);
+        void CancelScheduled(ObjectGuid owner);     // drops the owner's pending tasks
+        std::size_t ScheduledCount(ObjectGuid owner) const;
         void Tick(Milliseconds now);    // from AllMapScript::OnMapUpdate (C2), full map updates only
         void PostFailure(FailureEvent const& e);
         // Replaces the bot's earlier reservation on that mechanic (keeping its `since`; a new one with since 0 starts
@@ -594,6 +636,7 @@ namespace BossMechanics
         void PickTargets(ActiveMechanic& m);
         void Remove(ActiveMechanic& m);     // despawn markers + fizzle callback; caller erases
         void FinishEncounter(ObjectGuid owner);
+        void RunTasks(Milliseconds now);    // M4: the due Schedule tasks (start of Tick)
         void BumpRevision()
         {
             if (++_revision == 0)
@@ -611,6 +654,7 @@ namespace BossMechanics
         uint32 _nextLaneSetId = 1;
         uint32 _revision = 1;
         uint32 _reservationRevision = 1;
+        uint64 _nextTaskSeq = 1;
         bool _ticking = false;
         std::map<uint32, ActiveMechanic> _mechanics;
         std::map<uint32, LaneSet> _laneSets;
@@ -624,6 +668,12 @@ namespace BossMechanics
     // every map with a registry. The playerbots glue installs it at startup; nullptr (the default) = no call.
     using BotAfterTickFn = void (*)(Map* map, Registry& reg, Milliseconds now);
     void SetBotAfterTick(BotAfterTickFn fn);
+
+    // M4 global failure sink (STAGE-M4-HANDOFF §3.3; Sim::SetFailureSink): every FailureEvent of every encounter on
+    // every map, after the encounter's own onFailure callback. One sink; nullptr (the default) = none. Called on the
+    // map's update thread: the sink must be safe there (the sim runs MapUpdate.Threads 0).
+    using FailureSinkFn = void (*)(Map const* map, FailureEvent const& e);
+    void SetFailureSink(FailureSinkFn fn);
 }
 
 #endif

@@ -96,11 +96,51 @@ namespace BossMechanics
             // M3: the player kinds, the tank tasks and the route search (STAGE-M3-HANDOFF §3.8 telemetry).
             handler->PSendSysMessage("  m3: carrier solves {}, claim solves {}, pick solves {}, role solves {}, "
                 "violated {}, freezes {}, facings {}, facing blocks {}, facing breaks {}, tank re-facings {} "
-                "(stopped by a warning {}), parks {}, routes {} found {} failed (us last {} max {}), sight rays {}",
+                "(stopped by a warning {}), parks {}, routes {} ({} found, {} failed, us last {} max {}), "
+                "sight rays {}",
                 c.carrierSolves, c.claimSolves, c.pickSolves, c.roleSolves, c.violatedPlans, c.freezes,
                 c.facingsApplied, c.facingBlocks, c.facingBreaks, c.tankRefacings, c.refacingStops, c.parks,
                 c.routesFound + c.routesFailed, c.routesFound, c.routesFailed, c.routeUsLast, c.routeUsMax,
                 c.sightRays);
+            // M4 (STAGE-M4-HANDOFF §3.5-§3.7, WP-C): mode time, lock leaks (spell x count), the Fallback split by
+            // exposure, route loops; then the cost counters (us; p50 and p95 are log2 bucket upper bounds).
+            auto secs = [](uint32 ms) { return ms / 1000.0; };
+            std::string leakSpells;
+            for (auto const& [spell, n] : c.leakSpells)
+                leakSpells += Acore::StringFormat("{}{} x{}", leakSpells.empty() ? "" : ", ", spell, n);
+            handler->PSendSysMessage("  m4: time (s) idle {:.1f} watch {:.1f} escape {:.1f} hold {:.1f} freeze {:.1f} "
+                "released {:.1f} | leaks: moves {}, casts {}, turns {} (spells {}) | fallback clear {} hot {} kept {} "
+                "| route loops {}", secs(c.msIdle), secs(c.msWatch), secs(c.msEscape), secs(c.msHold), secs(c.msFreeze),
+                secs(c.msReleased), c.leakMoves, c.leakCasts, c.leakTurns, leakSpells.empty() ? "-" : leakSpells,
+                c.fallbackClear, c.fallbackHot, c.fallbackKept, c.routeLoops);
+            CostStats const& k = st->cost;
+            uint32 mechanics = 0;
+            uint32 mechanicMax = 0;
+            double mechanicMean = 0.0;
+            k.PerMechanic(mechanics, mechanicMax, mechanicMean);
+            handler->PSendSysMessage("  cost: path calls {} (us mean {} p95 {} max {}), probes {} (us max {}), sight "
+                "rays {} (us max {}), lanes: {} candidates, {} path calls in {} solves, path calls per mechanic max {} "
+                "mean {:.1f} over {} (+{} unattributed)", k.pathUs.count, k.pathUs.Mean(), k.pathUs.Quantile(0.95),
+                k.pathUs.max, k.probeUs.count, k.probeUs.max, k.sightUs.count, k.sightUs.max, k.laneCandidates,
+                k.lanePathCalls, k.laneSolves, mechanicMax, mechanicMean, mechanics, k.pathCallsUnattributed);
+            handler->PSendSysMessage("  cost us: solve p50 {} p95 {} max {} | route p50 {} p95 {} max {} | brain mean "
+                "{} max {} | map update (all bots) mean {} max {} over {}", k.solveUs.Quantile(0.5),
+                k.solveUs.Quantile(0.95), k.solveUs.max, k.routeUs.Quantile(0.5), k.routeUs.Quantile(0.95),
+                k.routeUs.max, k.brainUs.Mean(), k.brainUs.max,
+                k.mapUpdates ? k.mapBrainUsTotal / k.mapUpdates : 0, k.mapBrainUsMax, k.mapUpdates);
+            // M4: the lock's by-name gate and id-less casts (STAGE-M4-HANDOFF §3.5, WP-X); X8 pulls refused and the
+            // BossMechanics.Bots.ForceLeaks debug passes (WP-X2).
+            handler->PSendSysMessage("  m4 lock: by-name blocks {}, chat do let through {}, casts with no spell id {}, "
+                "pulls refused {}, pulls ended {}, forced leak passes (moves/casts/turns) {}/{}/{}", c.specificBlocks,
+                c.doBypasses, c.unknownCasts, c.pullBlocks, c.pullsEnded, c.forcedMoves, c.forcedCasts, c.forcedTurns);
+            // M4 WP-Q's counters (STAGE-M4-R-REPORT nit 7): region routes and the out-of-band clocks.
+            handler->PSendSysMessage("  m4 routes and bands: region routes {} ({} found), out of band {} ms ({} ms "
+                "with a task)", c.regionRoutes, c.regionRoutesFound, c.msOutOfBand, c.msOutOfBandTask);
+            // WP-Q2: unsafe landings refused (gap closers, the melee chase) and Watch motions stopped for their end;
+            // WP-F2: the time out of reach with the chase refused, the safety valve and the recovery solves.
+            handler->PSendSysMessage("  m4 landings: gap closers and chases refused {}, motions stopped for their end "
+                "{}, out of reach with the chase refused {} ms, chases released {}, recovery solves {}",
+                c.landingBlocks, c.motionEndStops, c.msChaseRefused, c.chaseReleases, c.chaseSolves);
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

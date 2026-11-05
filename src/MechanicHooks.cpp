@@ -90,6 +90,9 @@ public:
     {
         if (player && player->HasAura(Ids::SPELL_WEAKENED))
             Weakened::Clear(map, player);
+        // The drills' Marked (drill) stand-in goes with the map too (M4 WP-F).
+        if (player)
+            player->RemoveAurasDueToSpell(Ids::SPELL_MARKED_DRILL);
     }
 
     void OnDestroyMap(Map* map) override

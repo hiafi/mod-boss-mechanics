@@ -1,6 +1,10 @@
 /*
  * mod-boss-mechanics: the per-bot brain of the boss-mechanics strategy (STAGE-M2-HANDOFF §3.4, WP-C;
  * STAGE-M3-HANDOFF §3.7, §3.8, WP-C).
+ *
+ * M4 (STAGE-M4-HANDOFF §3.6, §3.7, WP-C): the cost counters (MechanicCost.h: every oracle call timed through
+ * TimedOracle, solve, route and brain time, lane-frame candidates, path calls per mechanic, brain time per map
+ * update), the Fallback split by exposure and the route-loop counter.
  */
 
 #include "MechanicBotGuard.h"
@@ -17,6 +21,8 @@
 #include "MechanicBotFacing.h"
 #include "MechanicBotRole.h"
 #include "MechanicBotView.h"
+#include "MechanicLanding.h"
+#include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "MechanicRoute.h"
 #include "MotionMaster.h"
@@ -26,6 +32,7 @@
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
+#include "PullStrategy.h"
 #include "SpellAuras.h"
 #include <algorithm>
 #include <chrono>
@@ -33,6 +40,8 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace BossMechanics
 {
@@ -85,6 +94,107 @@ namespace BossMechanics
         constexpr Milliseconds kParkHold{ 500 };
         // Look-away: a new facing goes onto the reservation board when it moved more than this.
         constexpr float kRepublishFacingDeg = 5.f;
+        // WP-F2 (STAGE-M4-R2-REPORT M-1): a melee bot out of reach whose chase the lock refuses gets a role solve
+        // toward the melee band at most this often...
+        constexpr Milliseconds kChaseSolveEvery{ 500 };
+        // ...and after one that found nothing closer, no new one for this long.
+        constexpr Milliseconds kChaseSolveBackoff{ 2000 };
+
+        using CostClock = std::chrono::steady_clock;
+
+        uint32 UsSince(CostClock::time_point t0)
+        {
+            return static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(CostClock::now() - t0)
+                .count());
+        }
+
+        // M4 cost (§3.6): times every oracle call into the bot's CostStats and counts the path calls (for the
+        // per-mechanic attribution). Wraps the NavOracle of one solve, route or re-facing search.
+        class TimedOracle : public Solver::PathOracle
+        {
+        public:
+            TimedOracle(Solver::PathOracle& inner, CostStats& cost) : _inner(inner), _cost(cost) { }
+
+            bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const found = _inner.Find(from, to, out);
+                _cost.pathUs.Add(UsSince(t0));
+                ++_calls;
+                return found;
+            }
+
+            bool Walkable(Geo::Vec3& p) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const walkable = _inner.Walkable(p);
+                _cost.probeUs.Add(UsSince(t0));
+                return walkable;
+            }
+
+            bool InSight(Geo::Vec3 const& from, Geo::Vec3 const& to) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const clear = _inner.InSight(from, to);
+                _cost.sightUs.Add(UsSince(t0));
+                return clear;
+            }
+
+            uint32 Calls() const { return _calls; }
+
+        private:
+            Solver::PathOracle& _inner;
+            CostStats& _cost;
+            uint32 _calls = 0;
+        };
+
+        // The path calls of one solve or route go to every mechanic its plan answers (none: unattributed).
+        void AttributePathCalls(CostStats& cost, std::vector<uint32> const& answers, uint32 calls)
+        {
+            if (!calls)
+                return;
+            if (answers.empty())
+                cost.pathCallsUnattributed += calls;
+            for (uint32 id : answers)
+                cost.AddMechanicPathCalls(id, calls);
+        }
+
+        // Brain time of the bots on each map since the waker last took it (§3.6): bots run their brain on their map's
+        // update thread, and the waker takes the sum right after the bots' updates (BotBrain::TakeMapBrainUs). Keyed
+        // by (map id, instance id) only (STAGE-M4-R-REPORT m-2): a brain step that ran after the take, outside the
+        // map update (a command, a sim step), goes to the next take instead of being reset by the next update's
+        // first step. Per thread: a step on another thread is taken when that thread next updates the map.
+        thread_local std::unordered_map<uint64, uint64> tMapBrainUs;
+
+        uint64 MapBrainKey(uint32 mapId, uint32 instanceId)
+        {
+            return (static_cast<uint64>(mapId) << 32) | instanceId;
+        }
+
+        // Times one brain step (Update past its once-per-ms check, CastLeaveBy) into the bot's and its map's brain
+        // time.
+        class BrainTimer
+        {
+        public:
+            BrainTimer(MechanicBotState& st, Player const* bot)
+                : _st(st), _bot(bot), _t0(CostClock::now()) { }
+
+            ~BrainTimer()
+            {
+                uint32 const us = UsSince(_t0);
+                _st.cost.brainUs.Add(us);
+                if (_bot)
+                    tMapBrainUs[MapBrainKey(_bot->GetMapId(), _bot->GetInstanceId())] += us;
+            }
+
+            BrainTimer(BrainTimer const&) = delete;
+            BrainTimer& operator=(BrainTimer const&) = delete;
+
+        private:
+            MechanicBotState& _st;
+            Player const* _bot;
+            CostClock::time_point _t0;
+        };
 
         Geo::Vec3 PosOf(WorldObject const* o)
         {
@@ -94,6 +204,13 @@ namespace BossMechanics
         float Dist2d(Geo::Vec3 const& a, Geo::Vec3 const& b)
         {
             return Geo::Dist2d(a.x, a.y, b.x, b.y);
+        }
+
+        // WP-F2: the bot has a melee band (BotRole::RoleBandOf: melee and tanks in combat, [0, reach - 0.5] round the
+        // victim), and is outside it.
+        bool OutOfMeleeBand(Player const* bot, Solver::RoleBand const& role, Geo::Vec3 const& pos)
+        {
+            return bot->IsInCombat() && role.present && role.minYd <= 0.f && Dist2d(pos, role.anchor) > role.maxYd;
         }
 
         bool SameMap(Player const* a, Player const* b)
@@ -254,6 +371,13 @@ namespace BossMechanics
         // Rebuilds the view (§3.5) with the fallibility filter (§3.8) when it is enabled.
         void RebuildView(Player* bot, MechanicBotState& st, Registry const& reg, Milliseconds now, ViewCtx& ctx)
         {
+            // M4 cost: mechanic ids are per registry, so another map's live mechanics are over for this bot.
+            uint64 const registryKey = (static_cast<uint64>(bot->GetMapId()) << 32) | bot->GetInstanceId();
+            if (registryKey != st.costRegistryKey)
+            {
+                st.cost.FoldGone([](uint32) { return true; });
+                st.costRegistryKey = registryKey;
+            }
             uint32 const revision = reg.Revision();
             if (revision != st.seenRevision || !st.viewValid)
             {
@@ -261,6 +385,7 @@ namespace BossMechanics
                 // limit (§3.4 step 5).
                 std::erase_if(st.perception, [&reg](auto const& kv) { return reg.Find(kv.first) == nullptr; });
                 std::erase_if(st.loggedFallback, [&reg](uint32 id) { return reg.Find(id) == nullptr; });
+                st.cost.FoldGone([&reg](uint32 id) { return reg.Find(id) == nullptr; });
                 st.solveBypass = true;
             }
             if (now >= st.nextPerceptionAt)
@@ -591,6 +716,7 @@ namespace BossMechanics
         void ToIdle(MechanicBotState& st)
         {
             st.mode = MechanicBotMode::Idle;
+            st.pullEndChecked = false;
             st.plan = Solver::Plan();
             st.planFor.clear();
             st.leaveBy = Solver::kForever;
@@ -607,13 +733,20 @@ namespace BossMechanics
             st.parking = false;
             st.tankWarning = false;
             st.refacing = false;
+            st.regionRoutePending = false;
+            st.regionRouteGoal = 0;
+            st.regionRoute = false;
+            LockRules::ChaseInReach(st.chase);
+            st.bandBlockedUntil = Milliseconds(0);
+            st.bandBlockedBy = 0;
         }
 
         // Gives the bot back to the stock AI for `duration` (STAGE-M2-REVIEW M1): mode Watch, no plan, nothing
         // locked, no cast break; an unsafe spot is not solved again until releaseUntil (or, forRoot, until the bot can
-        // move again). Its reservations go (M3): the others plan against where it really stands.
+        // move again). Its reservations go (M3): the others plan against where it really stands. forChase (WP-F2, the
+        // chase valve): Watch does not police its stock motion either, so the chase reaches melee.
         void Release(Registry* reg, Player const* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            bool forRoot, char const* why)
+            bool forRoot, char const* why, Milliseconds duration = kReleaseFor, bool forChase = false)
         {
             st.mode = MechanicBotMode::Watch;
             st.plan = Solver::Plan();
@@ -624,12 +757,16 @@ namespace BossMechanics
             st.routePending = false;
             st.waypointIdx = 0;
             st.refacing = false;
-            st.releaseUntil = now + kReleaseFor;
+            st.regionRoutePending = false;
+            st.regionRouteGoal = 0;
+            st.regionRoute = false;
+            st.releaseUntil = now + duration;
             st.releaseForRoot = forRoot;
+            st.releaseForChase = forChase;
             ++st.counters.releases;
             DropBoard(reg, bot, st);
             if (cfg.debug)
-                LOG_INFO(kLog, "Bot {}: escape released ({}) for {} ms", bot->GetName(), why, kReleaseFor.count());
+                LOG_INFO(kLog, "Bot {}: escape released ({}) for {} ms", bot->GetName(), why, duration.count());
         }
 
         // Hold where the bot stands (its foreign motion was unsafe): until the hazard it would have crossed is over,
@@ -692,13 +829,27 @@ namespace BossMechanics
 
             // Debug = 1 only: the oracle counts why its probes and path calls failed (nothing is counted otherwise).
             NavOracleStats nav;
-            NavOracle oracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
+            NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
+            TimedOracle oracle(navOracle, st.cost);
             Solver::Plan plan = Solver::Solve(in, oracle);
             auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count());
             in.roleSolve = false;
 
+            // M4 cost (§3.6) and the Fallback split (§3.7).
+            CostStats& cost = st.cost;
+            cost.solveUs.Add(us);
+            if (!in.lanes.empty())
+            {
+                ++cost.laneSolves;
+                cost.laneCandidates += plan.stats.laneCandidates;
+                cost.lanePathCalls += plan.stats.lanePathChecks;
+            }
+            AttributePathCalls(cost, plan.answers, oracle.Calls());
+
             MechanicBotCounters& c = st.counters;
+            if (plan.outcome == Solver::Outcome::Fallback)
+                ++(plan.exposure > Milliseconds(0) ? c.fallbackHot : c.fallbackClear);
             ++c.solves;
             c.pathChecks += plan.pathChecks;
             ++c.outcomes[static_cast<std::size_t>(plan.outcome)];
@@ -721,6 +872,15 @@ namespace BossMechanics
             }
             st.lastSolveAt = now;
             st.solveBypass = false;
+            // M4 WP-Q (G2): a Fallback that breaks a hard region asks for a route round the hazards into it
+            // (StepRegionRoute, on a later brain step).
+            if (!in.reroute && !roleSolve && cfg.routeEnable && plan.violated > 0
+                && (plan.outcome == Solver::Outcome::Fallback || plan.outcome == Solver::Outcome::NoPath))
+            {
+                st.regionRoutePending = true;
+                st.regionRouteAskedAt = now;
+                st.regionRouteGoal = 0;
+            }
 
             Geo::Vec3 const from = in.bot;
             if (cfg.debug)
@@ -799,6 +959,7 @@ namespace BossMechanics
             st.pendingEscape = false;
             st.routePending = false;
             st.refacing = false;
+            st.regionRoute = false;
         }
 
         // Solve and take the plan: Move/GraceMove/Fallback/NoPath -> Escape; Safe -> Watch.
@@ -822,32 +983,48 @@ namespace BossMechanics
         // holds nothing (holdUntil = arrival): Watch takes the stock motion back, and re-routes again if it still
         // crosses. Returns false when the caller should hold instead (deferred is set when only the solve rate limit
         // or budget said no).
+        // `endUnsafe` (WP-Q2): the motion's end itself fails. A bot beyond its band (the melee chase round a puddle at
+        // the boss's reach) re-routes toward the band, anywhere in it. WP-F2 (STAGE-M4-R2-REPORT M-2): only beyond
+        // its maxYd, where closer to the anchor is toward the band. A ranged bot too close to its target (a Hunter's
+        // flee ending in a puddle) went toward the boss, and a healer (`healer`, whose band is the tank's) toward the
+        // tank instead of its patient: both re-route toward the motion's end instead, which then need not be safe
+        // (the solver offers safe targets only). Any other unsafe end holds, as before WP-Q2 (an end-anchored
+        // re-route for every bot raised the barrage crowd's hits by half, tests/crowd_test.cpp).
         bool TryReroute(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            ViewCtx& ctx, std::vector<Geo::Vec3> const& motion, bool& deferred)
+            ViewCtx& ctx, std::vector<Geo::Vec3> const& motion, bool& deferred, bool endUnsafe, bool healer)
         {
             deferred = false;
             Solver::Input& in = st.input;
             Geo::Vec3 const end = motion.back();
             float const toGo = Dist2d(in.bot, end);
-            if (toGo < kRerouteMinYd || !Solver::PointSafe(in, end, now, now + in.params.horizon))
+            Solver::RoleBand const role = in.role;
+            float const fromAnchor = role.present ? Dist2d(in.bot, role.anchor) : 0.f;
+            bool const toBand = endUnsafe && !healer && role.present && fromAnchor > role.maxYd;
+            bool const toUnsafeEnd = endUnsafe && (healer || (role.present && fromAnchor < role.minYd));
+            Geo::Vec3 const anchor = toBand ? role.anchor : end;
+            float const away = toBand ? fromAnchor : toGo;
+            if (!toBand && (toGo < kRerouteMinYd || (endUnsafe && !toUnsafeEnd)
+                || (!endUnsafe && !Solver::PointSafe(in, end, now, now + in.params.horizon))))
                 return false;
             if (!CanSolve(bot, st, now, cfg))
             {
                 deferred = true;
                 return false;
             }
-            Solver::RoleBand const role = in.role;
-            in.role.present = true;
-            in.role.anchor = end;
-            in.role.minYd = 0.f;
-            in.role.maxYd = kRerouteBandYd;
+            if (!toBand)
+            {
+                in.role.present = true;
+                in.role.anchor = end;
+                in.role.minYd = 0.f;
+                in.role.maxYd = kRerouteBandYd;
+            }
             in.reroute = true;
             Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx);
             in.role = role;
             in.reroute = false;
             bool const moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
-            // The solver offered only targets that close in on the end; its real path end (a navmesh snap) may not.
-            if (!moving || Dist2d(plan.target, end) > toGo - in.params.rerouteGainYd)
+            // The solver offered only targets that close in on the anchor; its real path end (a navmesh snap) may not.
+            if (!moving || Dist2d(plan.target, anchor) > away - in.params.rerouteGainYd)
                 return false;
             plan.holdUntil = plan.arriveAt;
             BeginEscape(st, std::move(plan), now);
@@ -861,17 +1038,7 @@ namespace BossMechanics
         // keep hazards only (a route is for following, not for a region or a carried shape, WP-A note).
         void TrimRoute(Solver::Input const& in, Solver::Plan& plan, Geo::Vec3 const& goal)
         {
-            std::size_t cut = 0;
-            std::size_t const keep = Solver::RouteHandoff(in, plan, goal, &cut) + 1;
-            if (keep < plan.waypoints.size() && cut + 1 < plan.path.size())
-            {
-                plan.waypoints.resize(keep);
-                plan.path.resize(cut + 1);
-                plan.target = plan.waypoints.back();
-                plan.arriveAt = in.now + in.params.startDelay
-                    + Solver::Detail::TravelMs(Solver::Detail::PathLength(plan.path), Solver::Detail::Speed(in));
-            }
-            plan.holdUntil = plan.arriveAt;
+            Solver::TrimToHandoff(in, plan, goal);
             std::erase_if(plan.answers, [&in](uint32 id) { return !FindHazard(in, id); });
         }
 
@@ -883,6 +1050,14 @@ namespace BossMechanics
             Solver::Input& in = st.input;
             Geo::Vec3 const goal = st.routeGoal;
             st.lastRouteAt = now;
+            // §3.7: routed again for the goal a route just handed off to stock follow (the follow re-crossed).
+            if (Solver::IsRouteLoop(st.routeHandoffAt, st.routeHandoffGoal, now, goal))
+            {
+                ++st.counters.routeLoops;
+                if (cfg.debug)
+                    LOG_INFO(kLog, "Bot {}: route loop, routed again {} ms after a handoff for ({:.1f}, {:.1f})",
+                        bot->GetName(), (now - st.routeHandoffAt).count(), goal.x, goal.y);
+            }
             Solver::RouteParams rp;
             rp.padYd = cfg.routePadYd;
             rp.cellYd = cfg.routeCellYd;
@@ -890,22 +1065,25 @@ namespace BossMechanics
             rp.maxExpansions = cfg.routeMaxExpansions;
             rp.maxLegs = cfg.routeMaxLegs;
             NavOracleStats nav;
-            NavOracle oracle(bot, cfg.debug ? &nav : nullptr, 0);
+            NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, 0);
+            TimedOracle oracle(navOracle, st.cost);
             Solver::RouteStats rs;
             auto const t0 = std::chrono::steady_clock::now();
             Solver::Plan plan = Solver::Route(in, goal, oracle, rp, &rs);
             auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count());
+            st.cost.routeUs.Add(us);
+            AttributePathCalls(st.cost, plan.answers, oracle.Calls());
             MechanicBotCounters& c = st.counters;
             c.routeUsLast = us;
             c.routeUsMax = std::max(c.routeUsMax, us);
             if (cfg.debug)
             {
                 c.debugNav.Add(nav);
-                LOG_INFO(kLog, "Bot {}: route to ({:.1f}, {:.1f}) {}: {} cells ({:.2f} yd), {} blocked, {} expansions, "
-                    "{} legs, {} oracle calls, {} retries, pass {}, {} us", bot->GetName(), goal.x, goal.y,
-                    rs.found ? "found" : "none", rs.cells, rs.cellYd, rs.blocked, rs.expansions, rs.legs,
-                    rs.oracleCalls, rs.retries, PassName(plan.stats.pass), us);
+                LOG_INFO(kLog, "Bot {}: route to ({:.1f}, {:.1f}) {}: {} cells ({:.2f} yd{}), {} blocked, {} "
+                    "expansions, {} legs, {} oracle calls, {} retries, pass {}, {} us", bot->GetName(), goal.x, goal.y,
+                    rs.found ? "found" : "none", rs.cells, rs.cellYd, rs.grown ? ", box grown" : "", rs.blocked,
+                    rs.expansions, rs.legs, rs.oracleCalls, rs.retries, PassName(plan.stats.pass), us);
             }
             if (!rs.found || plan.outcome != Solver::Outcome::Move || plan.waypoints.empty())
             {
@@ -915,6 +1093,66 @@ namespace BossMechanics
             ++c.routesFound;
             TrimRoute(in, plan, goal);
             BeginEscape(st, std::move(plan), now);
+            return true;
+        }
+
+        // M4 WP-Q (G2): Solver::RegionRoute after a Fallback that broke a hard region (the Alexei Assembly member whose
+        // way to the cluster crosses the Out of bounds circle). A found route becomes an Escape that walks its
+        // waypoints to a spot passing TargetOk (st.regionRoute: the re-check holds its end to TargetOk) and goes onto
+        // the reservation board like a solve's plan. false = none (the Fallback stands).
+        bool RunRegionRoute(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
+        {
+            Solver::Input& in = st.input;
+            st.lastRegionRouteAt = now;
+            ++st.counters.regionRoutes;
+            Solver::RouteParams rp;
+            rp.padYd = cfg.routePadYd;
+            rp.cellYd = cfg.routeCellYd;
+            rp.maxCells = cfg.routeMaxCells;
+            rp.maxExpansions = cfg.routeMaxExpansions;
+            rp.maxLegs = cfg.routeMaxLegs;
+            NavOracleStats nav;
+            NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, 0);
+            TimedOracle oracle(navOracle, st.cost);
+            Solver::RouteStats rs;
+            auto const t0 = std::chrono::steady_clock::now();
+            uint32 const goal = st.regionRouteGoal;
+            st.regionRouteGoal = 0;
+            Solver::Plan plan = Solver::RegionRoute(in, oracle, rp, &rs, goal);
+            auto const us = static_cast<uint32>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count());
+            st.cost.routeUs.Add(us);
+            AttributePathCalls(st.cost, plan.answers, oracle.Calls());
+            MechanicBotCounters& c = st.counters;
+            c.routeUsLast = us;
+            c.routeUsMax = std::max(c.routeUsMax, us);
+            if (cfg.debug)
+            {
+                c.debugNav.Add(nav);
+                LOG_INFO(kLog, "Bot {}: region route {}: {} cells ({:.2f} yd{}), {} expansions, {} legs, {} oracle "
+                    "calls, {} us", bot->GetName(), rs.found ? "found" : "none", rs.cells, rs.cellYd,
+                    rs.grown ? ", box grown" : "", rs.expansions, rs.legs, rs.oracleCalls, us);
+            }
+            if (plan.outcome != Solver::Outcome::Move)
+            {
+                // STAGE-M4-R-REPORT m-10: one goal per budget unit; the next goal goes on the next step (no retry
+                // wait: it continues this search).
+                if (rs.moreGoals)
+                {
+                    st.regionRoutePending = true;
+                    st.regionRouteAskedAt = now;
+                    st.regionRouteGoal = rs.nextGoal;
+                }
+                return false;
+            }
+            ++c.regionRoutesFound;
+            if (st.reserved || !st.viewInfo.tasks.empty())
+            {
+                PublishReservations(reg, bot, st.viewInfo, plan, now);
+                st.reserved = !st.viewInfo.tasks.empty();
+            }
+            BeginEscape(st, std::move(plan), now);
+            st.regionRoute = true;
             return true;
         }
 
@@ -934,9 +1172,12 @@ namespace BossMechanics
                     continue;
                 if (!TakeBudget(bot, now))
                     return false;
-                NavOracle oracle(bot, nullptr, 0);
+                NavOracle navOracle(bot, nullptr, 0);
+                TimedOracle oracle(navOracle, st.cost);
                 Solver::Plan plan;
-                if (!BotRole::TankRefacePlan(bot, source, f, st.input, cfg.facingSlackDeg, oracle, plan))
+                bool const found = BotRole::TankRefacePlan(bot, source, f, st.input, cfg.facingSlackDeg, oracle, plan);
+                st.cost.pathCallsUnattributed += oracle.Calls();
+                if (!found)
                 {
                     if (cfg.debug)
                         LOG_INFO(kLog, "Bot {}: no clear ring point to turn {} away from the group", bot->GetName(),
@@ -1011,6 +1252,73 @@ namespace BossMechanics
             st.reserved = true;
         }
 
+        // WP-F2 (STAGE-M4-R2-REPORT m-6): a motion's end failed on hazard `hazardId` and no re-route was found: until
+        // that hazard ends (+ marginMs; HoldCapMs when it is endless or unknown, as an end that fails only on a player
+        // kind), Hold keeps the spot past the role release, Watch holds again without a new re-route, and the lock
+        // refuses the melee chase. The ring hazard over the melee band no longer creeps the bot in a brain step at a
+        // time, or costs a solve per cycle.
+        void BlockBand(MechanicBotState& st, Milliseconds now, BotConfig const& cfg, uint32 hazardId)
+        {
+            Solver::Input const& in = st.input;
+            Milliseconds until = now + Milliseconds(cfg.holdCapMs);
+            if (Solver::Hazard const* h = FindHazard(in, hazardId))
+                if (h->timing.to < Solver::kForever)
+                    until = std::max(until, h->timing.to + in.params.marginMs);
+            st.bandBlockedUntil = until;
+            st.bandBlockedBy = hazardId;
+        }
+
+        // WP-F2 (R2 M-1 fix 4): the chase valve. A melee bot or tank out of reach whose chase has been refused for
+        // ChaseReleaseMs (a tank half of it; LockRules::ChaseValveDue) goes to the stock AI for that long: the lock
+        // allows everything, Watch does not police its motion, and its spot is not solved, so it walks into melee and
+        // fights there. Only while some point of the melee ring stays clear for the walk in, the release and the walk
+        // out (LockRules::ChaseValveWindowMs): the refusal looked a whole horizon ahead. Once released, the run starts
+        // again.
+        bool StepChaseValve(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
+        {
+            Solver::Input const& in = st.input;
+            if (!OutOfMeleeBand(bot, in.role, in.bot))
+                return false;
+            int64 const release = LockRules::ChaseReleaseMsFor(cfg.chaseReleaseMs, PlayerbotAI::IsTank(bot));
+            if (!LockRules::ChaseValveDue(st.chase, now.count(), release, LockRules::ChaseRunStaleMs(cfg.holdCapMs)))
+                return false;
+            Milliseconds const window(LockRules::ChaseValveWindowMs(release));
+            if (!Landing::RingSafe(in, in.role.anchor, in.bot, in.role.maxYd, now, now + window))
+                return false;
+            LockRules::ChaseInReach(st.chase);
+            st.bandBlockedUntil = Milliseconds(0);
+            st.bandBlockedBy = 0;
+            ++st.counters.chaseReleases;
+            Release(&reg, bot, st, now, cfg, false, "chase valve", Milliseconds(release), true);
+            return true;
+        }
+
+        // WP-F2 (R2 M-1 fix 3): the lock refused the melee chase (no safe point of the melee ring, or the band is
+        // blocked): a role solve now and then, so a safe spot nearer the band is taken instead of standing where the
+        // bot was pushed. Backed off like the healer's sight solve when it finds nothing closer.
+        bool StepChaseRecovery(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
+            ViewCtx& ctx)
+        {
+            Solver::Input& in = st.input;
+            if (!LockRules::ChaseRefusedNow(st.chase, now.count()) || !OutOfMeleeBand(bot, in.role, in.bot)
+                || now < st.nextChaseSolveAt || now - st.lastChaseSolveAt < kChaseSolveEvery)
+                return false;
+            if (!CanSolve(bot, st, now, cfg))
+                return false;
+            st.lastChaseSolveAt = now;
+            ++st.counters.chaseSolves;
+            float const away = Dist2d(in.bot, in.role.anchor);
+            Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true);
+            bool const moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
+            if (!moving || Dist2d(plan.target, in.role.anchor) > away - in.params.rerouteGainYd)
+            {
+                st.nextChaseSolveAt = now + kChaseSolveBackoff;
+                return false;
+            }
+            BeginEscape(st, std::move(plan), now);
+            return true;
+        }
+
         // Idle/Watch (§3.4 step 4): solve when the spot fails TargetOk; hold for live tasks; re-route or hold when
         // only the current motion is unsafe; then the tank and healer tasks.
         void StepWatch(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
@@ -1048,18 +1356,55 @@ namespace BossMechanics
                     return;
                 }
             }
+            bool const released = BotBrain::Released(botAI, st, now);
+            if (!released && StepChaseValve(reg, bot, st, now, cfg))
+                return;
             std::vector<Geo::Vec3> motion;
-            if (RemainingSpline(bot, motion))
+            // The chase valve's release: the stock AI's walk into melee is not policed (the lock allows it too).
+            if (!(released && st.releaseForChase) && RemainingSpline(bot, motion))
             {
                 Solver::PathCheck const pc = CheckMotion(in, motion);
-                if (!pc.ok)
+                // WP-Q2 (m4-s2 Zone/5): the spot the motion ends on must pass TargetOk from its arrival as well. The
+                // path check alone let the stock chase walk a melee bot back into a warned zone whose window opens
+                // after the walk ends (alexei's Out of bounds on the group, at the boss); the bot then stood in it,
+                // solved, left, and was walked back in by the next chase.
+                // Judged whatever the path check says, so a path that fails into a failing end re-routes toward the
+                // role band (TryReroute's endUnsafe), not toward that end. A failed check's arriveAt is its start: the
+                // arrival comes from the motion's length.
+                Milliseconds const arrival = now + Solver::Detail::TravelMs(Solver::Detail::PathLength(motion),
+                    Solver::Detail::Speed(in));
+                Milliseconds const endTo = std::max(arrival, horizonEnd);
+                // endHit: the hazard the end fails on, for the hold's length. 0 when the end fails only on what
+                // PointSafe does not see (a player kind: a region, a carried shape, a due HoldStill): the hold then
+                // runs the full HoldCapMs instead of to a hazard's end (STAGE-M4-R2-REPORT nit 2; acceptable).
+                uint32 endHit = 0;
+                bool const endOk = Solver::TargetOk(in, motion.back(), arrival, endTo);
+                if (!endOk)
+                {
+                    Solver::PointSafe(in, motion.back(), arrival, endTo, &endHit);
+                    if (pc.ok)
+                        ++st.counters.motionEndStops;
+                }
+                if (!pc.ok || !endOk)
                 {
                     bool deferred = false;
-                    if (TryReroute(reg, bot, st, now, cfg, ctx, motion, deferred))
+                    // WP-F2 (m-6): the band is blocked by the hazard this end still fails on: hold, no new re-route.
+                    bool const blocked = !endOk && now < st.bandBlockedUntil && endHit == st.bandBlockedBy;
+                    if (!blocked && TryReroute(reg, bot, st, now, cfg, ctx, motion, deferred, !endOk,
+                        PlayerbotAI::IsHeal(bot)))
                         return;
-                    HoldHere(st, now, cfg, pc.firstHit, deferred);
-                    // M3 §3.8: the greedy hop found nothing; a route search runs on a later brain step.
-                    if (!deferred && cfg.routeEnable
+                    HoldHere(st, now, cfg, pc.ok ? endHit : pc.firstHit, deferred);
+                    // A melee bot or tank out of reach whose chase ends in the hazard: the band is blocked, and the
+                    // hold counts toward the chase valve, as a refusal by the lock (other bots have no melee band).
+                    if (!endOk && !deferred && OutOfMeleeBand(bot, in.role, in.bot))
+                    {
+                        if (!blocked)
+                            BlockBand(st, now, cfg, endHit);
+                        LockRules::NoteChaseRefusal(st.chase, now.count(), LockRules::ChaseRunStaleMs(cfg.holdCapMs));
+                    }
+                    // M3 §3.8: the greedy hop found nothing; a route search runs on a later brain step (not for an
+                    // end that fails: a route there ends on the same spot).
+                    if (!pc.ok && !deferred && cfg.routeEnable
                         && Solver::PointSafe(in, motion.back(), now, now + in.params.horizon))
                     {
                         st.routePending = true;
@@ -1071,6 +1416,8 @@ namespace BossMechanics
             }
             st.mode = MechanicBotMode::Watch;
             if (StepTankFacing(bot, st, now, cfg))
+                return;
+            if (!released && StepChaseRecovery(reg, bot, st, now, cfg, ctx))
                 return;
             StepHealerSight(reg, bot, st, now, cfg, ctx);
         }
@@ -1133,6 +1480,12 @@ namespace BossMechanics
             }
             if (arrived)
             {
+                // A route's escape ends where stock follow takes over (§3.8): the route-loop counter's handoff (§3.7).
+                if (!st.plan.waypoints.empty() && !st.regionRoute)
+                {
+                    st.routeHandoffAt = now;
+                    st.routeHandoffGoal = st.routeGoal;
+                }
                 st.mode = MechanicBotMode::Hold;
                 st.outOfRoleSince = Milliseconds(0);
                 return;
@@ -1153,14 +1506,23 @@ namespace BossMechanics
                 Solver::Input reduced;
                 if (st.planReduced)
                     reduced = Solver::ReducedMargins(in);
-                Solver::PathCheck const pc = CheckMotion(st.planReduced ? reduced : in,
-                    RemainingPath(st.plan.path, pos));
-                // A route's end only has to be hazard-safe (stock follow takes over there); a solve's target must
-                // pass TargetOk.
-                bool const endOk = st.plan.waypoints.empty()
+                std::vector<Geo::Vec3> const rest = RemainingPath(st.plan.path, pos);
+                Solver::PathCheck const pc = CheckMotion(st.planReduced ? reduced : in, rest);
+                // A route's end only has to be hazard-safe (stock follow takes over there); a solve's target, and a
+                // region route's end, must pass TargetOk.
+                bool const endOk = st.plan.waypoints.empty() || st.regionRoute
                     ? Solver::TargetOk(in, st.plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd))
                     : Solver::PointSafe(in, st.plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd));
                 resolve = !pc.ok || !endOk;
+                // M4 §3.7: a clear Fallback never passed the margins, so it failed this check on every rebuild and
+                // was solved again, nearly always to another Fallback, and the turn-arounds cost hits (the barrage
+                // crowd, STAGE-M4-P-REPORT §3). It walks on while the rest of its way stays out of the exact
+                // hitboxes and its end stays clear; a hot one is still solved again.
+                if (resolve && Solver::FallbackHolds(in, st.plan, rest, horizonEnd, true))
+                {
+                    resolve = false;
+                    ++st.counters.fallbackKept;
+                }
                 if (!resolve)
                     st.solveBypass = false;
             }
@@ -1233,6 +1595,37 @@ namespace BossMechanics
             return false;
         }
 
+        // M4 WP-Q (G5): the out-of-band clock, sampled once per brain step with the mode the bot is in now (the
+        // waker's mode clocks' rule; a gap over 2 s is not counted).
+        void TickBandClock(Player const* bot, MechanicBotState& st, Milliseconds now)
+        {
+            Milliseconds const last = st.bandClockAt;
+            st.bandClockAt = now;
+            if (last == Milliseconds(0) || now <= last || now - last > Milliseconds(2000))
+                return;
+            bool const locked = st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold
+                || st.mode == MechanicBotMode::Freeze;
+            Solver::RoleBand const& role = st.input.role;
+            if (!role.present)
+                return;
+            float const d = Dist2d(st.input.bot, role.anchor);
+            if (d >= role.minYd && d <= role.maxYd)
+                return;
+            uint32 const ms = static_cast<uint32>((now - last).count());
+            // WP-F2 (R2 m-3): Idle or Watch out of the melee band with the chase refused (not released): what the
+            // lock's chase refusal costs a melee bot, which msOutOfBand does not see.
+            if (!locked)
+            {
+                if (bot && LockRules::ChaseRefusedNow(st.chase, now.count()) && OutOfMeleeBand(bot, role, st.input.bot)
+                    && !(now < st.releaseUntil))
+                    st.counters.msChaseRefused += ms;
+                return;
+            }
+            st.counters.msOutOfBand += ms;
+            if (TaskHoldUntil(st, now) > now)
+                st.counters.msOutOfBandTask += ms;
+        }
+
         void StepHold(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
             BotConfig const& cfg, ViewCtx& ctx)
         {
@@ -1269,6 +1662,10 @@ namespace BossMechanics
                 st.outOfRoleSince = Milliseconds(0);
                 return;
             }
+            // WP-F2: a hold on a blocked band (m-6) ends early when the chase valve is due.
+            if (now < st.bandBlockedUntil && !BotBrain::Released(botAI, st, now)
+                && StepChaseValve(reg, bot, st, now, cfg))
+                return;
             // Out of the role band for RoleSlackMs: give the spot back to stock movement (Watch polices its path).
             // Solve would only answer Safe here (the spot is safe), so the hold is released instead of re-solved.
             Solver::RoleBand const& role = in.role;
@@ -1278,7 +1675,8 @@ namespace BossMechanics
                 return;
             }
             float const d = Dist2d(in.bot, role.anchor);
-            if (d >= role.minYd && d <= role.maxYd)
+            // WP-F2 (m-6): no release while the band is blocked (Watch would walk the bot a step into it again).
+            if ((d >= role.minYd && d <= role.maxYd) || now < st.bandBlockedUntil)
             {
                 st.outOfRoleSince = Milliseconds(0);
                 return;
@@ -1400,10 +1798,12 @@ namespace BossMechanics
 
     void MechanicBotState::Reset()
     {
-        MechanicBotCounters const keptCounters = counters;
+        MechanicBotCounters keptCounters = std::move(counters);
+        CostStats keptCost = std::move(cost);
         bool const keptAvoidAoe = avoidAoeByGate;
         *this = MechanicBotState();
-        counters = keptCounters;
+        counters = std::move(keptCounters);
+        cost = std::move(keptCost);
         avoidAoeByGate = keptAvoidAoe;
     }
 
@@ -1424,6 +1824,12 @@ namespace BossMechanics
             return;
         st.brainRan = true;
         st.lastBrainAt = now;
+        // WP-F2 (R2 m-2): the delay from the waker's wake to this step, for the fast tick's lead.
+        if (st.wakeAt > Milliseconds(0) && now > st.wakeAt)
+        {
+            st.wakeLeadMs = LockRules::NextWakeLead(st.wakeLeadMs, (now - st.wakeAt).count());
+            st.wakeAt = Milliseconds(0);
+        }
 
         Player* bot = botAI ? botAI->GetBot() : nullptr;
         if (!bot || !bot->IsInWorld() || !bot->GetMap())
@@ -1431,6 +1837,7 @@ namespace BossMechanics
             ToIdle(st);
             return;
         }
+        BrainTimer const timer(st, bot);
         // No negative cache (STAGE-M2-REVIEW m4): Get is one DataMap look-up, and a cached "no registry" delayed
         // the first mechanic of every map by up to its lifetime.
         Registry* reg = Registry::Get(bot->GetMap());
@@ -1464,6 +1871,14 @@ namespace BossMechanics
             return;
         }
         in.role = BotRole::RoleBandOf(botAI, bot, cfg);
+        TickBandClock(bot, st, now);
+        // WP-F2: in reach of its target (or with no melee band) ends a run of chase refusals and a blocked band.
+        if (!OutOfMeleeBand(bot, in.role, in.bot))
+        {
+            LockRules::ChaseInReach(st.chase);
+            st.bandBlockedUntil = Milliseconds(0);
+            st.bandBlockedBy = 0;
+        }
         BotRole::FillSightReach(bot, cfg, in);
         BotRole::FillPark(bot, *reg, st, cfg, now, in);
         st.tankWarning = HasRole(st, BotTaskRole::Tank, now);
@@ -1512,6 +1927,34 @@ namespace BossMechanics
             }
         }
 
+        // M4 WP-Q (G2): the region route a Fallback asked for, on a later step, Route.RetryMs apart, one budget unit,
+        // while the bot still walks or holds that Fallback; like the route search, never with a solve in one step.
+        // The request stays pending while the Fallback still breaks its region and only the retry clock or the
+        // budget is not there yet (STAGE-M4-R-REPORT m-4: it used to be dropped then, with no retry).
+        if (st.regionRoutePending && now > st.regionRouteAskedAt)
+        {
+            bool const fallback = st.plan.outcome == Solver::Outcome::Fallback
+                || st.plan.outcome == Solver::Outcome::NoPath;
+            bool const wanted = cfg.routeEnable && fallback && st.plan.violated > 0
+                && (st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold)
+                && !BotBrain::Released(botAI, st, now);
+            // A continuation (the next goal of the last search) waits for no retry clock.
+            bool const due = st.regionRouteGoal > 0 || now - st.lastRegionRouteAt >= Milliseconds(cfg.routeRetryMs);
+            if (!wanted)
+            {
+                st.regionRoutePending = false;
+                st.regionRouteGoal = 0;
+            }
+            else if (due && TakeBudget(bot, now))
+            {
+                st.regionRoutePending = false;
+                RunRegionRoute(*reg, bot, st, now, cfg);
+                BotFacing::UpdateLookAway(bot, st, now);
+                PublishLookAway(*reg, bot, st, now);
+                return;
+            }
+        }
+
         switch (st.mode)
         {
             case MechanicBotMode::Idle:
@@ -1530,6 +1973,25 @@ namespace BossMechanics
         PublishLookAway(*reg, bot, st, now);
     }
 
+    bool BotBrain::EndPullOnWake(PlayerbotAI* botAI, MechanicBotState& st)
+    {
+        if (st.mode == MechanicBotMode::Idle || st.pullEndChecked || !botAI)
+            return false;
+        st.pullEndChecked = true;
+        // PullMultiplier's own test: it zeroes our actions only while the pull has a target and is pending or begun.
+        PullStrategy const* pull = PullStrategy::Get(botAI);
+        if (!pull || !pull->HasTarget() || (!pull->IsPullPendingToStart() && !pull->HasPullStarted()))
+            return false;
+        // `pull end` is on PullMultiplier's allow list, restores the pet's react state and clears the pull position.
+        if (!botAI->DoSpecificAction("pull end", Event(), true))
+            return false;
+        ++st.counters.pullsEnded;
+        if (GetConfig().bots.debug)
+            if (Player const* bot = botAI->GetBot())
+                LOG_INFO(kLog, "Bot {}: a mechanic began during its pull; the pull ended", bot->GetName());
+        return true;
+    }
+
     Milliseconds BotBrain::CastLeaveBy(PlayerbotAI* botAI, MechanicBotState& st, Registry const& reg,
         Milliseconds now)
     {
@@ -1543,6 +2005,7 @@ namespace BossMechanics
         if (idleUnchanged)
             return Solver::kForever;
 
+        BrainTimer const timer(st, bot);
         BotConfig const& cfg = GetConfig().bots;
         ViewCtx ctx(bot, st, reg, now, cfg);
         RefreshView(bot, st, reg, now, cfg, ctx);
@@ -1571,6 +2034,16 @@ namespace BossMechanics
             return false;
         }
         return true;
+    }
+
+    uint32 BotBrain::TakeMapBrainUs(uint32 mapId, uint32 instanceId)
+    {
+        auto it = tMapBrainUs.find(MapBrainKey(mapId, instanceId));
+        if (it == tMapBrainUs.end())
+            return 0;
+        uint64 const us = it->second;
+        tMapBrainUs.erase(it);
+        return static_cast<uint32>(std::min<uint64>(us, std::numeric_limits<uint32>::max()));
     }
 
     bool BotBrain::TankOwned(MechanicBotState const& st)
