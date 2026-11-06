@@ -16,7 +16,8 @@
  *
  * BossMechanics.ReferenceHealth.MapLevels: entries "<mapId>[h]:<level>" pin the content level of a map (normal, or
  * heroic with `h`) instead of the owner's level: a dungeon's mechanics then use one row whatever the level of the
- * boss (19, 20 or 21) or of the `.mech test` owner (the GM's level). Empty: the owner's level everywhere.
+ * boss (19, 20 or 21) or of the `.mech test` owner (the GM's level). A pin covers one difficulty: "36:20" leaves
+ * heroic Deadmines on the owner's level; the default "36:20 36h:60" pins both. Empty: the owner's level everywhere.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_REF_HEALTH_H

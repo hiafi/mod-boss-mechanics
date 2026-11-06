@@ -22,8 +22,9 @@ namespace BossMechanics
     constexpr char const* kPlaceholderReferenceHealthRows = "20:1000:1500 60:5000:8000 60h:6000:9600";
     // The M1 stub's placeholder rows (normal only), still valid in an old conf.
     constexpr char const* kLegacyStubReferenceHealthRows = "20:1000:1500 60:5000:8000";
-    // Deadmines (the Pilot) at content level 20 whatever the boss's or the `.mech test` owner's level.
-    constexpr char const* kDefaultReferenceHealthMapLevels = "36:20";
+    // Deadmines (the Pilot): normal at content level 20, heroic at 60, whatever the boss's or the `.mech test`
+    // owner's level. A pin is per difficulty: "36:20" alone pins normal only and heroic reads the owner's level.
+    constexpr char const* kDefaultReferenceHealthMapLevels = "36:20 36h:60";
 
     enum class FollowMode : uint8
     {

@@ -136,8 +136,9 @@ prints a fresh string to paste after a gear or stat change. The pure rules are
 
 - **Content key** (`ContentKeyProvider`, default `DefaultContentKey`): heroic = `Map::IsHeroic()` (the open world and
   the sim are normal); level = the map's `BossMechanics.ReferenceHealth.MapLevels` pin for that difficulty
-  (`36:20`, `36h:60`), else the owner's level; empowered level 0. The empowered work (E4) installs its own provider
-  that calls `DefaultContentKey` and sets the empowered level.
+  (`36:20`, `36h:60`: one pin per difficulty, so `36:20` alone leaves heroic on the owner's level), else the owner's
+  level; empowered level 0. The empowered work (E4) installs its own provider that calls `DefaultContentKey` and sets
+  the empowered level.
 - **Lookup**: within the key's tier, interpolated by level and clamped at both ends. Empowered N with no `e<N>` rows
   reads the heroic rows, heroic with no `h` rows the normal rows. At least one normal row is required; a repeated key
   in one tier, a zero or signed number, or a level above 255 is malformed (a warning, then the default).
@@ -1059,7 +1060,7 @@ same rule).
 | `BossMechanics.Enable` | 1 | 0 refuses every registration |
 | `BossMechanics.Debug` | 0 | logs every resolve, failure and the map tick diff |
 | `BossMechanics.ReferenceHealth.Rows` | `20:1300:1290 60:3670:3710 60h:4120:4110` | keyed rows (E3 measurement) |
-| `BossMechanics.ReferenceHealth.MapLevels` | `36:20` | `mapId[h]:level` content level pins |
+| `BossMechanics.ReferenceHealth.MapLevels` | `36:20 36h:60` | `mapId[h]:level` content level pins, per difficulty |
 | `BossMechanics.Telegraph.FollowMode` | 0 | 0 spline step, 1 MoveFollow, 2 teleport |
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
 | `BossMechanics.Telegraph.Lift` | 0.3 | height above the highest ground sample (yd; GroundSnap 0: above the anchor) |

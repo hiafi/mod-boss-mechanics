@@ -44,13 +44,15 @@ BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
 #    BossMechanics.ReferenceHealth.MapLevels
 #        Description: Content level pins, "<mapId>[h]:<level>" separated by spaces: mechanics on that map (its
 #                     normal difficulty, or heroic with "h") read the reference health of that level instead of
-#                     the owner's level (a boss at 19 or 21, a .mech test owner at the GM's level). Maps without
-#                     a pin, the open world and the sim use the owner's level. Empty: no pins.
-#        Example:     "36:20 289:60"
-#        Default:     "36:20" - Deadmines normal is level 20
+#                     the owner's level (a boss at 19 or 21, a .mech test owner at the GM's level). Each pin
+#                     covers one difficulty: "36:20" alone pins normal only, and heroic then uses the owner's
+#                     level (a level 60 heroic template reads the 60h row). Maps or difficulties without a pin,
+#                     the open world and the sim use the owner's level. Empty: no pins.
+#        Example:     "36:20 36h:60 289:60"
+#        Default:     "36:20 36h:60" - Deadmines normal is level 20, heroic level 60
 #
 
-BossMechanics.ReferenceHealth.MapLevels = "36:20"
+BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60"
 
 #
 #    BossMechanics.Telegraph.FollowMode
