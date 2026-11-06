@@ -267,6 +267,57 @@ namespace
         dm.heroic = false;
         CHECK(Lookup(t, ResolveContentKey(dm, pins)).health.nonTank == 5000);
     }
+    // The MapLevels pin is per difficulty (WP-H, dungeon difficulties E2): "36:20" pins normal Deadmines only and
+    // heroic reads the owner's level; the default "36:20 36h:60" pins heroic at 60 too.
+    void TestMapLevelsPerDifficulty()
+    {
+        std::string err;
+        Table t;
+        CHECK(ParseTable("20:1300:1290 60:3670:3710 60h:4120:4110", t, err));   // kDefaultReferenceHealthRows
+        MapLevels pins;
+        CHECK(ParseMapLevels("36:20 36h:60", pins, err));                        // kDefaultReferenceHealthMapLevels
+        CHECK(pins.size() == 2 && pins.at({ 36, false }) == 20 && pins.at({ 36, true }) == 60);
+
+        ContentInputs dm;
+        dm.hasMap = true;
+        dm.mapId = 36;
+        // Heroic: a stock level 20 boss (before the E2 templates), a level 60 heroic template, an 80 GM's test owner.
+        dm.heroic = true;
+        for (std::uint8_t owner : { std::uint8_t(20), std::uint8_t(60), std::uint8_t(80) })
+        {
+            dm.ownerLevel = owner;
+            ContentKey const k = ResolveContentKey(dm, pins);
+            CHECK(k.level == 60 && k.heroic);
+            CHECK(Lookup(t, k).health.nonTank == 4120);
+            CHECK(Describe(k) == "level 60 heroic");
+        }
+        // Normal: 20 whatever the owner.
+        dm.heroic = false;
+        for (std::uint8_t owner : { std::uint8_t(19), std::uint8_t(60), std::uint8_t(80) })
+        {
+            dm.ownerLevel = owner;
+            ContentKey const k = ResolveContentKey(dm, pins);
+            CHECK(k.level == 20 && !k.heroic);
+            CHECK(Lookup(t, k).health.nonTank == 1300);
+        }
+
+        // The old default "36:20" never pinned heroic: heroic Deadmines reads the heroic rows at the owner's level,
+        // which with the single 60h row clamps to 60h (4120), not the normal 20 row.
+        MapLevels normalOnly;
+        CHECK(ParseMapLevels("36:20", normalOnly, err));
+        dm.heroic = true;
+        dm.ownerLevel = 20;
+        ContentKey k = ResolveContentKey(dm, normalOnly);
+        CHECK(k.level == 20 && k.heroic);
+        CHECK(Lookup(t, k).health.nonTank == 4120);
+        // Where the explicit heroic pin matters: with a heroic row below 60 the unpinned owner level would pick it.
+        Table more;
+        CHECK(ParseTable("20:1300:1290 60:3670:3710 20h:1500:1500 60h:4120:4110", more, err));
+        CHECK(Lookup(more, ResolveContentKey(dm, normalOnly)).health.nonTank == 1500);
+        CHECK(Lookup(more, ResolveContentKey(dm, pins)).health.nonTank == 4120);
+        dm.ownerLevel = 80;
+        CHECK(Lookup(more, ResolveContentKey(dm, pins)).health.nonTank == 4120);
+    }
 }
 
 int main()
@@ -278,5 +329,6 @@ int main()
     TestDescribe();
     TestMapLevels();
     TestContentKey();
+    TestMapLevelsPerDifficulty();
     return Report("ref_health_test");
 }
