@@ -24,13 +24,33 @@ BossMechanics.Debug = 0
 
 #
 #    BossMechanics.ReferenceHealth.Rows
-#        Description: Stub reference health, "level:nonTank:tank" entries separated by spaces. Mechanic damage
-#                     percents are taken of these numbers, linearly interpolated by the owner's level and clamped
-#                     at both ends. Placeholders until the dungeon difficulties work installs measured numbers.
-#        Default:     "20:1000:1500 60:5000:8000"
+#        Description: Reference health: mechanic damage percents are taken of these numbers. Entries
+#                     "<level>[tier]:<nonTank>:<tank>" separated by spaces (or commas, semicolons). The tier suffix
+#                     is none for normal, "h" for heroic, "e<N>" for empowered level N (1-255; read from E4 on).
+#                     Within a tier the numbers are interpolated by the content level and clamped at both ends.
+#                     Empowered N without "e<N>" rows uses the heroic rows; heroic without "h" rows uses the
+#                     normal rows. At least one normal row is required. The old level-only stub format
+#                     ("20:1000:1500 60:5000:8000") still works: every row is normal. Paste the string printed
+#                     by mod-dpssim tools/refhealth.py. A malformed value logs a warning and uses the default.
+#                     The default is the E3 measurement (2026-11-05); the tank column is the pre-talent sheet,
+#                     close to the non-tank one because tanks' extra survivability is damage reduction.
+#        Example:     "20:1000:1500 60:5000:8000 60h:6000:9600 60e1:7000:11000"
+#        Default:     "20:1300:1290 60:3670:3710 60h:4120:4110"
 #
 
-BossMechanics.ReferenceHealth.Rows = "20:1000:1500 60:5000:8000"
+BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
+
+#
+#    BossMechanics.ReferenceHealth.MapLevels
+#        Description: Content level pins, "<mapId>[h]:<level>" separated by spaces: mechanics on that map (its
+#                     normal difficulty, or heroic with "h") read the reference health of that level instead of
+#                     the owner's level (a boss at 19 or 21, a .mech test owner at the GM's level). Maps without
+#                     a pin, the open world and the sim use the owner's level. Empty: no pins.
+#        Example:     "36:20 289:60"
+#        Default:     "36:20" - Deadmines normal is level 20
+#
+
+BossMechanics.ReferenceHealth.MapLevels = "36:20"
 
 #
 #    BossMechanics.Telegraph.FollowMode

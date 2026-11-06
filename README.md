@@ -120,11 +120,30 @@ M3 options:
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
 
-Damage is a percent of the reference health (`ReferenceHealthProvider`; M1 ships the config stub), one flat number per
-target set by the resolve spell, so boss buffs and the creature damage rate never change it
+Damage is a percent of the reference health (`ReferenceHealthProvider`; keyed rows from the config, see
+[Reference health](#reference-health)), one flat number per target set by the resolve spell, so boss buffs and the creature damage rate never change it
 (`SPELL_ATTR3_IGNORE_CASTER_MODIFIERS`). Physical mechanics are reduced by armor; no crit, miss, reflect or partial
 resist. A hit fires the victim's "when hit" procs (`SPELL_ATTR3_NOT_A_PROC` lets the triggered cast proc: Reckoning,
 Blood Craze, Vengeance-style talents), like a boss ability would.
+
+### Reference health
+
+`BossMechanics.ReferenceHealth.Rows` holds one row per content key: `<level>[tier]:<nonTank>:<tank>`, the tier
+suffix none (normal), `h` (heroic) or `e<N>` (empowered level N). The shipped default
+`20:1300:1290 60:3670:3710 60h:4120:4110` is the E3 sim measurement (2026-11-05); mod-dpssim `tools/refhealth.py`
+prints a fresh string to paste after a gear or stat change. The pure rules are
+`src/MechanicRefHealth.h` (tests: `tests/ref_health_test.cpp`).
+
+- **Content key** (`ContentKeyProvider`, default `DefaultContentKey`): heroic = `Map::IsHeroic()` (the open world and
+  the sim are normal); level = the map's `BossMechanics.ReferenceHealth.MapLevels` pin for that difficulty
+  (`36:20`, `36h:60`), else the owner's level; empowered level 0. The empowered work (E4) installs its own provider
+  that calls `DefaultContentKey` and sets the empowered level.
+- **Lookup**: within the key's tier, interpolated by level and clamped at both ends. Empowered N with no `e<N>` rows
+  reads the heroic rows, heroic with no `h` rows the normal rows. At least one normal row is required; a repeated key
+  in one tier, a zero or signed number, or a level above 255 is malformed (a warning, then the default).
+- The level-only stub format (`20:1000:1500 60:5000:8000`) is a valid table of normal rows: a heroic map then reads
+  the normal rows by level, as before.
+- `.mech test` prints the key and row it resolved (`Reference health (level 20 normal): non-tank 1000, tank 1500.`).
 
 ### Kinds
 
@@ -1039,7 +1058,8 @@ same rule).
 | --- | --- | --- |
 | `BossMechanics.Enable` | 1 | 0 refuses every registration |
 | `BossMechanics.Debug` | 0 | logs every resolve, failure and the map tick diff |
-| `BossMechanics.ReferenceHealth.Rows` | `20:1000:1500 60:5000:8000` | stub `level:nonTank:tank` rows |
+| `BossMechanics.ReferenceHealth.Rows` | `20:1300:1290 60:3670:3710 60h:4120:4110` | keyed rows (E3 measurement) |
+| `BossMechanics.ReferenceHealth.MapLevels` | `36:20` | `mapId[h]:level` content level pins |
 | `BossMechanics.Telegraph.FollowMode` | 0 | 0 spline step, 1 MoveFollow, 2 teleport |
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
 | `BossMechanics.Telegraph.Lift` | 0.3 | height above the highest ground sample (yd; GroundSnap 0: above the anchor) |

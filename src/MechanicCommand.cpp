@@ -53,6 +53,7 @@
 #include "MechanicDrillRunner.h"
 #include "MechanicDummyAI.h"
 #include "MechanicMarkerAI.h"
+#include "MechanicProviders.h"
 #include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
 #include "ObjectAccessor.h"
@@ -929,7 +930,8 @@ namespace
         if (!owner)
             return nullptr;
         owner->SetReactState(REACT_PASSIVE);
-        owner->SetLevel(gm->GetLevel(), false);     // the stub content key reads the owner's level
+        // The content key reads the owner's level unless BossMechanics.ReferenceHealth.MapLevels pins this map.
+        owner->SetLevel(gm->GetLevel(), false);
         if (owner->GetPhaseMask() != gm->GetPhaseMask())
             owner->SetPhaseMask(gm->GetPhaseMask(), true);
         owner->SetDisableGravity(true);
@@ -2296,6 +2298,10 @@ public:
         handler->PSendSysMessage("Mechanic test {} {:.1f}: registered #{}{}; resolves in {} ms.", s, spec.size, list,
             repeat > 1 ? Acore::StringFormat(" (+{} repeats every {} ms)", repeat - 1, every.count()) : "",
             spec.warn.count());
+        ContentKey const key = GetContentKeyProvider().Get(owner->GetMap(), owner);
+        ReferenceHealth const ref = GetReferenceHealthProvider().Get(key);
+        handler->PSendSysMessage("Reference health ({}): non-tank {}, tank {}.", RefHealth::Describe(key), ref.nonTank,
+            ref.tank);
         if (spec.atMember || spec.anchorMember || spec.to == TestSpec::To::Member || spec.scatter > 0.f
             || s == "spot")
             handler->PSendSysMessage("Landing on {} (seed {}; seed= repeats the picks).",

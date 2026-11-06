@@ -10,11 +10,21 @@
 
 #include "Define.h"
 #include "MechanicMath.h"
+#include "MechanicRefHealth.h"
 #include <string>
 #include <vector>
 
 namespace BossMechanics
 {
+    // Measured by the E3 sims (mod-dpssim tools/refhealth.py, 2026-11-05): normal 20 and 60, heroic 60.
+    constexpr char const* kDefaultReferenceHealthRows = "20:1300:1290 60:3670:3710 60h:4120:4110";
+    // The pre-E3 placeholder rows, still valid in an old conf.
+    constexpr char const* kPlaceholderReferenceHealthRows = "20:1000:1500 60:5000:8000 60h:6000:9600";
+    // The M1 stub's placeholder rows (normal only), still valid in an old conf.
+    constexpr char const* kLegacyStubReferenceHealthRows = "20:1000:1500 60:5000:8000";
+    // Deadmines (the Pilot) at content level 20 whatever the boss's or the `.mech test` owner's level.
+    constexpr char const* kDefaultReferenceHealthMapLevels = "36:20";
+
     enum class FollowMode : uint8
     {
         SplineStep = 0,     // one spline per interval: move + face together (default)
@@ -92,8 +102,10 @@ namespace BossMechanics
     {
         bool enable = true;                                     // BossMechanics.Enable
         bool debug = false;                                     // BossMechanics.Debug
-        std::string referenceHealthText = "20:1000:1500 60:5000:8000";  // BossMechanics.ReferenceHealth.Rows
-        std::vector<ReferenceHealthRow> referenceHealthRows;
+        std::string referenceHealthText = kDefaultReferenceHealthRows;           // BossMechanics.ReferenceHealth.Rows
+        RefHealth::Table referenceHealth;
+        std::string referenceHealthMapLevelsText = kDefaultReferenceHealthMapLevels;  // ...ReferenceHealth.MapLevels
+        RefHealth::MapLevels referenceHealthMapLevels;
         FollowMode followMode = FollowMode::SplineStep;         // BossMechanics.Telegraph.FollowMode
         uint32 followIntervalMs = 200;                          // BossMechanics.Telegraph.FollowIntervalMs
         float lift = 0.3f;                                      // BossMechanics.Telegraph.Lift

@@ -18,12 +18,12 @@ namespace BossMechanics
 {
     namespace
     {
-        StubReferenceHealthProvider const sStubReferenceHealth;
-        StubContentKeyProvider const sStubContentKey;
+        ConfigReferenceHealthProvider const sConfigReferenceHealth;
+        DefaultContentKeyProvider const sDefaultContentKey;
         StubRoleProvider const sStubRole;
 
-        ReferenceHealthProvider const* sReferenceHealth = &sStubReferenceHealth;
-        ContentKeyProvider const* sContentKey = &sStubContentKey;
+        ReferenceHealthProvider const* sReferenceHealth = &sConfigReferenceHealth;
+        ContentKeyProvider const* sContentKey = &sDefaultContentKey;
         RoleProvider const* sRole = &sStubRole;
 
         // Learned talent spell -> the talent ranks it is (every Talent.dbc row that lists it), built once on first use
@@ -111,12 +111,12 @@ namespace BossMechanics
 
     void SetReferenceHealthProvider(ReferenceHealthProvider* provider)
     {
-        sReferenceHealth = provider ? provider : &sStubReferenceHealth;
+        sReferenceHealth = provider ? provider : &sConfigReferenceHealth;
     }
 
     void SetContentKeyProvider(ContentKeyProvider* provider)
     {
-        sContentKey = provider ? provider : &sStubContentKey;
+        sContentKey = provider ? provider : &sDefaultContentKey;
     }
 
     void SetRoleProvider(RoleProvider* provider)
@@ -139,23 +139,30 @@ namespace BossMechanics
         return *sRole;
     }
 
-    bool IsReferenceHealthStubActive()
+    bool IsConfigReferenceHealthActive()
     {
-        return sReferenceHealth == &sStubReferenceHealth;
+        return sReferenceHealth == &sConfigReferenceHealth;
     }
 
-    ReferenceHealth StubReferenceHealthProvider::Get(ContentKey const& key) const
+    ContentKey DefaultContentKey(Map const* map, Unit const* owner)
     {
-        return InterpolateReferenceHealth(GetConfig().referenceHealthRows, key.level);
+        RefHealth::ContentInputs in;
+        in.hasMap = map != nullptr;
+        in.mapId = map ? map->GetId() : 0;
+        in.heroic = map && map->IsHeroic();
+        in.ownerLevel = owner ? owner->GetLevel() : 0;
+        in.empoweredLevel = 0;
+        return RefHealth::ResolveContentKey(in, GetConfig().referenceHealthMapLevels);
     }
 
-    ContentKey StubContentKeyProvider::Get(Map const* map, Unit const* owner) const
+    ReferenceHealth ConfigReferenceHealthProvider::Get(ContentKey const& key) const
     {
-        ContentKey key;
-        key.level = owner ? owner->GetLevel() : 0;
-        key.heroic = map && map->IsHeroic();
-        key.empoweredLevel = 0;
-        return key;
+        return RefHealth::Lookup(GetConfig().referenceHealth, key).health;
+    }
+
+    ContentKey DefaultContentKeyProvider::Get(Map const* map, Unit const* owner) const
+    {
+        return DefaultContentKey(map, owner);
     }
 
     Role StubRoleProvider::Get(Unit const* owner, Player const* player) const
