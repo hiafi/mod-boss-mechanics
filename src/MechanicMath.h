@@ -575,6 +575,25 @@ namespace BossMechanics
         return static_cast<std::int32_t>(std::max<long>(0, std::lround(v)));
     }
 
+    // The DamageSpec a registry mechanic holds for `.Damage(pct)` (tank false) or `.Damage(pct).TankDamage(pct)`
+    // (tank true): the same clamp of a negative percent to 0 as MechanicRef::Damage / TankDamage.
+    inline DamageSpec RefFlatSpec(float pct, bool tank)
+    {
+        DamageSpec d;
+        d.pctNonTank = std::max(0.f, pct);
+        if (tank)
+            d.pctTank = std::max(0.f, pct);
+        return d;
+    }
+
+    // Mechanic::RefFlat's pure part: `pct` percent of the reference row's tank (tank) or non-tank health, rounded and
+    // clamped by FlatDamageFor, so a script's own spell deals exactly what a registry mechanic with the same percent
+    // deals on the same row.
+    inline std::uint32_t RefFlatFor(ReferenceHealth const& ref, float pct, bool tank)
+    {
+        return static_cast<std::uint32_t>(FlatDamageFor(RefFlatSpec(pct, tank), ref, tank));
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // Marker visual pick (handoff §3.8; used by C2's Telegraph). Two layers per telegraph (M1 telegraph-fill fix):
     // the outline is the hitbox at full size from the first frame; the fill is the timer that grows into it.

@@ -1021,4 +1021,21 @@ namespace Mechanic
             return;
         Registry::GetOrCreate(map).TrackUnit(owner->GetGUID(), unit->GetGUID(), unit->GetEntry(), false);
     }
+
+    uint32 RefFlat(Unit const* owner, float pct, bool tank)
+    {
+        if (!owner || !owner->IsInWorld())
+        {
+            LOG_DEBUG(kLog, "Mechanic::RefFlat: owner is null or not in world; returning 0");
+            return 0;
+        }
+        Map const* map = owner->FindMap();
+        if (!map)
+        {
+            LOG_DEBUG(kLog, "Mechanic::RefFlat from {}: no map; returning 0", owner->GetGUID().ToString());
+            return 0;
+        }
+        ContentKey const key = GetContentKeyProvider().Get(map, owner);
+        return RefFlatFor(GetReferenceHealthProvider().Get(key), pct, tank);
+    }
 }
