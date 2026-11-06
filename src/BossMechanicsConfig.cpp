@@ -188,7 +188,7 @@ namespace BossMechanics
         {
             std::string const rows = RefHealth::Format(sConfig.referenceHealth);
             LOG_INFO("module.bossmechanics", "mod-boss-mechanics: reference health rows '{}', map levels '{}'{}", rows,
-                sConfig.referenceHealthMapLevelsText, rows == kDefaultReferenceHealthRows
+                sConfig.referenceHealthMapLevelsText, rows == kPlaceholderReferenceHealthRows
                 || rows == kLegacyStubReferenceHealthRows ? " (placeholder numbers: paste the measured rows from "
                 "mod-dpssim tools/refhealth.py)" : "");
         }

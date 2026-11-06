@@ -16,8 +16,10 @@
 
 namespace BossMechanics
 {
-    // Placeholder rows until the E3 sims measure the real ones (tools/refhealth.py in mod-dpssim prints the string).
-    constexpr char const* kDefaultReferenceHealthRows = "20:1000:1500 60:5000:8000 60h:6000:9600";
+    // Measured by the E3 sims (mod-dpssim tools/refhealth.py, 2026-11-05): normal 20 and 60, heroic 60.
+    constexpr char const* kDefaultReferenceHealthRows = "20:1300:1290 60:3670:3710 60h:4120:4110";
+    // The pre-E3 placeholder rows, still valid in an old conf.
+    constexpr char const* kPlaceholderReferenceHealthRows = "20:1000:1500 60:5000:8000 60h:6000:9600";
     // The M1 stub's placeholder rows (normal only), still valid in an old conf.
     constexpr char const* kLegacyStubReferenceHealthRows = "20:1000:1500 60:5000:8000";
     // Deadmines (the Pilot) at content level 20 whatever the boss's or the `.mech test` owner's level.

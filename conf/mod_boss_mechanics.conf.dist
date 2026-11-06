@@ -32,12 +32,13 @@ BossMechanics.Debug = 0
 #                     normal rows. At least one normal row is required. The old level-only stub format
 #                     ("20:1000:1500 60:5000:8000") still works: every row is normal. Paste the string printed
 #                     by mod-dpssim tools/refhealth.py. A malformed value logs a warning and uses the default.
-#                     The default holds placeholder numbers until the E3 sims measure the real ones.
+#                     The default is the E3 measurement (2026-11-05); the tank column is the pre-talent sheet,
+#                     close to the non-tank one because tanks' extra survivability is damage reduction.
 #        Example:     "20:1000:1500 60:5000:8000 60h:6000:9600 60e1:7000:11000"
-#        Default:     "20:1000:1500 60:5000:8000 60h:6000:9600"
+#        Default:     "20:1300:1290 60:3670:3710 60h:4120:4110"
 #
 
-BossMechanics.ReferenceHealth.Rows = "20:1000:1500 60:5000:8000 60h:6000:9600"
+BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
 
 #
 #    BossMechanics.ReferenceHealth.MapLevels

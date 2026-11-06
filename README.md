@@ -129,9 +129,9 @@ Blood Craze, Vengeance-style talents), like a boss ability would.
 ### Reference health
 
 `BossMechanics.ReferenceHealth.Rows` holds one row per content key: `<level>[tier]:<nonTank>:<tank>`, the tier
-suffix none (normal), `h` (heroic) or `e<N>` (empowered level N), e.g.
-`20:1000:1500 60:5000:8000 60h:6000:9600 60e1:7000:11000` (the shipped numbers are placeholders until the
-difficulties work's sims measure them; mod-dpssim `tools/refhealth.py` prints a string to paste). The pure rules are
+suffix none (normal), `h` (heroic) or `e<N>` (empowered level N). The shipped default
+`20:1300:1290 60:3670:3710 60h:4120:4110` is the E3 sim measurement (2026-11-05); mod-dpssim `tools/refhealth.py`
+prints a fresh string to paste after a gear or stat change. The pure rules are
 `src/MechanicRefHealth.h` (tests: `tests/ref_health_test.cpp`).
 
 - **Content key** (`ContentKeyProvider`, default `DefaultContentKey`): heroic = `Map::IsHeroic()` (the open world and
@@ -1058,7 +1058,7 @@ same rule).
 | --- | --- | --- |
 | `BossMechanics.Enable` | 1 | 0 refuses every registration |
 | `BossMechanics.Debug` | 0 | logs every resolve, failure and the map tick diff |
-| `BossMechanics.ReferenceHealth.Rows` | `20:1000:1500 60:5000:8000 60h:6000:9600` | keyed rows (placeholders) |
+| `BossMechanics.ReferenceHealth.Rows` | `20:1300:1290 60:3670:3710 60h:4120:4110` | keyed rows (E3 measurement) |
 | `BossMechanics.ReferenceHealth.MapLevels` | `36:20` | `mapId[h]:level` content level pins |
 | `BossMechanics.Telegraph.FollowMode` | 0 | 0 spline step, 1 MoveFollow, 2 teleport |
 | `BossMechanics.Telegraph.FollowIntervalMs` | 200 | follow interval (min 50) |
