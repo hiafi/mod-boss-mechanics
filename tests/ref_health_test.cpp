@@ -267,8 +267,8 @@ namespace
         dm.heroic = false;
         CHECK(Lookup(t, ResolveContentKey(dm, pins)).health.nonTank == 5000);
     }
-    // The MapLevels pin is per difficulty (WP-H, dungeon difficulties E2): "36:20" pins normal Deadmines only and heroic
-    // reads the owner's level; the default "36:20 36h:60" pins heroic at 60 too.
+    // The MapLevels pin is per difficulty (WP-H, dungeon difficulties E2): "36:20" pins normal Deadmines only and
+    // heroic reads the owner's level; the default "36:20 36h:60" pins heroic at 60 too.
     void TestMapLevelsPerDifficulty()
     {
         std::string err;
