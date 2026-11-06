@@ -98,6 +98,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
+| `RefFlat(owner, pct, tank)` | Script spells: `pct`% of the owner's reference row ([below](#reference-health)) |
 
 ### Options (`MechanicRef`)
 
@@ -145,6 +146,14 @@ prints a fresh string to paste after a gear or stat change. The pure rules are
 - The level-only stub format (`20:1000:1500 60:5000:8000`) is a valid table of normal rows: a heroic map then reads
   the normal rows by level, as before.
 - `.mech test` prints the key and row it resolved (`Reference health (level 20 normal): non-tank 1000, tank 1500.`).
+- **A script's own spells** (a SpellScript's hit damage, a custom DoT or chain): `Mechanic::RefFlat(owner, pct, tank)`
+  returns `pct`% of the row the registry would pick for `owner` (same content key provider, same reference health
+  provider), non-tank health or, with `tank`, tank health. The rounding and clamp are the registry's
+  (`RefFlatFor` -> `FlatDamageFor`, `MechanicMath.h`), so `RefFlat(me, 15.f)` equals what `.Damage(15)` deals a non-tank
+  and `RefFlat(me, 15.f, true)` what `.Damage(15).TankDamage(15)` deals the tank: Deadmines 195 / 194 normal, 618 /
+  617 heroic. Call it while the owner is on its map (at cast or hit time); a null owner or one not in the world
+  returns 0 (DEBUG log). It is not scaled by DD's heroic spell hook (custom ids are never scaled): the heroic row is
+  the heroic number.
 
 ### Kinds
 
@@ -377,7 +386,7 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
-.mech drill <smite|cookie|fenrus|alexei|soaks|ras> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -453,6 +462,16 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   while `role=nontank` (and the Bait rule) go by the role provider, which in tests has no boss and falls back to the
   tank spec. Let a tank-spec bot hold the creature, so the two agree.
 - `tag=<n>` (1): the ledger tag; repeats count up from it.
+- Deadmines Pilot gap 8 keys: `at=last` lands on the far end of the last fixed line this command (or drill run)
+  registered (none yet: the selected unit); `at=each` puts one shape under every member, where each stands now;
+  `pick=other` (with `at=member`, `anchor=member`, `to=member`) picks a non-tank the chain has not picked since the
+  last pick that was not `other` (none left: a non-tank other than the previous pick, then any non-tank), so a chain
+  of three hits three members; on line and projectile, `min=<yd>` makes a `to=member` pick prefer members at least
+  that far from the line's source (none: the farthest), `fix=1` freezes a `to=` line at registration (from where its
+  source is now toward where the unit stands now, `size` long), and `reach=1` also ends it there (at least `size`
+  long). `offset=<deg>` turns a frontal (not with `rear=1`). Drill steps also take `after=resolve` (start `atMs`
+  after the previous step of the cycle resolves), `after=with` (`atMs` after it starts) and `cycle=even|odd` (only in
+  those cycles); the runner strips them before the `.mech test` parser (`src/MechanicDrill.h`, `StepOffsets`).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -520,6 +539,15 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     reaches 3 stacks 2 s in and joins the runners; everyone back to 0 at 9 s (the encounter records them, so its end
     and `.mech clear` also remove them). Tags 2 (stack), 5 (runout). Marked, not fenrus's Baited 205008: in one
     program slice the Baited stacks would decide who runs.
+  - `deadmines-followups` (Deadmines Pilot gap 8; 30 s, two cycles by default, every damage step `weak=1`): each
+    heroic 1.5 s follow-up after its 2 s first shape, timed from the first one's resolve. 0 s: a 3 yd dash line from
+    the creature to a non-tank at least 8 yd away (4 yd excluded at its start), then two more 1.5 s lines, each from
+    the last one's end to a non-tank the chain has not hit (SM4). 8 s: a 4 x 25 yd frontal line, then two at
+    +-30 degrees (SM7, SM8). 14 s: donut 5 / 14 on the creature, then circle 6 on it (SM10, SM11). 20 s: circle 8 on
+    the creature (the tank out too), then a frontal cone 90 / 10 yd (even cycles) or a 4 x 30 yd line through a
+    non-tank's spot (odd cycles) (SN1, SN2, SN3). 25 s: circle 5 under every member, then circle 5 under every member
+    where it stands as the first wave lands (RZ1, RZ10). Tags: first shapes 1, 4, 6, 8, 11; follow-ups 2 and 3 (second
+    and third dash), 5 (aftershocks), 7 (Haft Slam), 9 (cone), 10 (line), 12 (Lookout).
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.

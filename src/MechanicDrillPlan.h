@@ -63,15 +63,23 @@ namespace BossMechanics::Drill
         std::uint32_t cycle = 0;
     };
 
-    // Every step of `cycles` cycles, cycle-major (in time order, as the steps are sorted by atMs below cycleMs), so a
-    // scheduler's idle clock ends at the last step.
+    // Every step of `cycles` cycles that runs in its cycle (cycle=), at its StepOffsets time, cycle-major and in time
+    // order within a cycle (steps starting together keep their list order: a pick=same step follows its pick), so a
+    // scheduler's idle clock ends at the last step. The steps start below cycleMs.
     inline std::vector<ScheduledStep> StepSchedule(Def const& def, std::uint32_t cycles)
     {
         std::vector<ScheduledStep> out;
         out.reserve(static_cast<std::size_t>(cycles) * def.steps.size());
         for (std::uint32_t c = 0; c < cycles; ++c)
+        {
+            std::size_t const first = out.size();
+            std::vector<std::optional<std::uint32_t>> const offsets = StepOffsets(def, c);
             for (std::uint32_t i = 0; i < def.steps.size(); ++i)
-                out.push_back({ c * def.cycleMs + def.steps[i].atMs, i, c });
+                if (offsets[i])
+                    out.push_back({ c * def.cycleMs + *offsets[i], i, c });
+            std::stable_sort(out.begin() + static_cast<std::ptrdiff_t>(first), out.end(),
+                [](ScheduledStep const& a, ScheduledStep const& b) { return a.delayMs < b.delayMs; });
+        }
         return out;
     }
 

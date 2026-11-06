@@ -9,7 +9,7 @@
  *                 [seed=]
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
- *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras> [cycles=3] [seed=] [dmg=1] [self=0]
+ *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -33,6 +33,13 @@
  * implemented here, on the same parser: `.mech test` lines are parsed against a ParseCtx (the reference unit standing
  * in for the GM) so the training dummy and the dpssim mechanics mode run the drills without a GM session. `.mech
  * minefield layout=u` lays the fixed U of MechanicDrillPlan.h (the M3 playtest's "bot left behind" repro).
+ *
+ * Deadmines Pilot gap 8 (deadmines-pilot.HANDOFF §3.9, drill `deadmines-followups`): `at=last` lands a shape on the
+ * end of the last line this command (or drill run) registered, `at=each` puts one shape under every member,
+ * `pick=other` picks a non-tank the chain has not picked yet (Drill::PickPool), `min=<yd>` prefers members that far
+ * from a line's source, `fix=1` freezes a `to=` line at registration (from its source toward where the to= unit stands
+ * then), `reach=1` also ends it there, and `frontal offset=<deg>` turns a frontal. Drill steps also take `after=` and
+ * `cycle=` (MechanicDrill.h, StepOffsets), which the runner strips before this parser.
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -91,13 +98,16 @@ namespace
     constexpr char const* kNoMemberMessage = "no alive member of your group on this map (self=1 includes you)";
 
     // The dice of one command. Delayed registrations share it, so they keep drawing from the same seeded sequence.
-    // `lastMember` is the member the last pick landed on (`pick=same`).
+    // `lastMember` is the member the last pick landed on (`pick=same`); `chain` the members picked since the last pick
+    // that was not `pick=other`; `lastEnd` the far end of the last fixed line registered (`at=last`).
     struct Dice
     {
         explicit Dice(uint32 seed) : rng(seed) { }
 
         Barrage::Rng rng;
         ObjectGuid lastMember;
+        std::vector<ObjectGuid> chain;
+        std::optional<Position> lastEnd;
     };
     using RngPtr = std::shared_ptr<Dice>;
 
@@ -350,6 +360,8 @@ namespace
 
         // landing: at=member picks a group member when the repeat registers; scatter offsets a point anchor
         bool atMember = false;
+        bool atLast = false;            // at=last: the end of the last fixed line (Dice::lastEnd)
+        bool atEach = false;            // at=each: one shape under every member
         bool includeGm = false;
         float scatter = 0.f;
 
@@ -380,7 +392,8 @@ namespace
         {
             Any,                // a random member
             NonTank,            // a random member other than the selected unit's victim
-            Same                // the member the previous pick of this command landed on (else a random one)
+            Same,               // the member the previous pick of this command landed on (else a random one)
+            Other               // a non-tank the chain has not picked (Drill::PickPool)
         };
         enum class To : uint8
         {
@@ -417,6 +430,10 @@ namespace
         float shiftAhead = 0.f;
         float shiftLeft = 0.f;
         ObjectGuid selected;            // the selected unit: park, frontal source, pick=nontank's victim
+        // gap 8 (line, to=)
+        bool fix = false;               // fix=1: frozen at registration toward where the to= unit stands
+        bool reach = false;             // reach=1: fixed and ending at that spot (at least `size` long)
+        float minDist = 0.f;            // min=: to=member prefers members at least this far from the source
     };
 
     bool IsShapeName(std::string const& s)
@@ -540,6 +557,8 @@ namespace
             ref.FollowFacing();
             if (spec.rear)
                 ref.Rear();
+            else if (spec.offset != 0.f)
+                ref.FacingOffset(spec.offset);
             ref.TankExempt();
             ApplyCommon(ref, spec, true, true);
             keep(ref);
@@ -732,24 +751,43 @@ namespace
 
     // A random member (pick=any), one other than the selected unit's victim (pick=nontank), or the member the last pick
     // of this command landed on while it is still usable (pick=same; else one other than the victim, as the steps
-    // that follow a pick=nontank one expect: STAGE-M3-R-REPORT n-9). Remembered for pick=same.
-    Player* PickMember(Creature* owner, TestSpec const& spec, Dice& dice)
+    // that follow a pick=nontank one expect: STAGE-M3-R-REPORT n-9), or a non-tank the chain has not picked
+    // (pick=other, Drill::PickPool). `source` (with min=): the point the min= distance is measured from. Remembered
+    // for pick=same and the chain.
+    Player* PickMember(Creature* owner, TestSpec const& spec, Dice& dice, Position const* source = nullptr)
     {
-        std::vector<Player*> members = GroupMembers(owner, spec.gm, spec.includeGm);
+        std::vector<Player*> const members = GroupMembers(owner, spec.gm, spec.includeGm);
         if (spec.pick == TestSpec::Pick::Same && !dice.lastMember.IsEmpty())
             for (Player* p : members)
                 if (p->GetGUID() == dice.lastMember)
                     return p;
-        if (spec.pick == TestSpec::Pick::NonTank || spec.pick == TestSpec::Pick::Same)
+        Unit const* victim = nullptr;
+        if (spec.pick != TestSpec::Pick::Any)
         {
             Unit* selected = spec.selected.IsEmpty() ? nullptr : ObjectAccessor::GetUnit(*owner, spec.selected);
-            if (Unit const* victim = selected ? selected->GetVictim() : nullptr)
-                members.erase(std::remove(members.begin(), members.end(), victim), members.end());
+            victim = selected ? selected->GetVictim() : nullptr;
         }
-        if (members.empty())
+        std::vector<Drill::PickCandidate> candidates;
+        candidates.reserve(members.size());
+        for (Player const* p : members)
+        {
+            Drill::PickCandidate c;
+            c.victim = p == victim;
+            c.chained = std::find(dice.chain.begin(), dice.chain.end(), p->GetGUID()) != dice.chain.end();
+            c.last = p->GetGUID() == dice.lastMember;
+            c.dist = source ? p->GetExactDist2d(source) : 0.f;
+            candidates.push_back(c);
+        }
+        Drill::PickRule const rule = spec.pick == TestSpec::Pick::Any ? Drill::PickRule::Any
+            : spec.pick == TestSpec::Pick::Other ? Drill::PickRule::Other : Drill::PickRule::NonTank;
+        std::vector<std::size_t> const pool = Drill::PickPool(candidates, rule, source ? spec.minDist : 0.f);
+        if (pool.empty())
             return nullptr;
-        Player* p = members[dice.rng.Index(static_cast<uint32>(members.size()))];
+        Player* p = members[pool[dice.rng.Index(static_cast<uint32>(pool.size()))]];
         dice.lastMember = p->GetGUID();
+        if (spec.pick != TestSpec::Pick::Other)
+            dice.chain.clear();
+        dice.chain.push_back(p->GetGUID());
         return p;
     }
 
@@ -760,11 +798,42 @@ namespace
         return ground > INVALID_HEIGHT && std::fabs(ground - z) <= 5.f ? ground : z;
     }
 
-    // One repeat of `.mech test`: resolves the landing (at=member|group|gm, anchor=member, to=, shift=, scatter=) and
-    // the spot ring now, so a delayed repeat follows the bots, then registers.
+    // One repeat of `.mech test`: resolves the landing (at=member|group|gm|last|each, anchor=member, to=, shift=,
+    // scatter=, fix=) and the spot ring now, so a delayed repeat follows the bots, then registers.
     std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
     {
         Barrage::Rng& rng = dice.rng;
+        if (spec.atEach)
+        {
+            // One shape under every member, each where it stands now.
+            std::vector<Player*> const members = GroupMembers(owner, spec.gm, spec.includeGm);
+            if (members.empty())
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            std::vector<uint32> ids;
+            for (Player const* member : members)
+            {
+                TestSpec one = spec;
+                one.atEach = false;
+                one.point = member->GetPosition();
+                one.point.SetOrientation(spec.facing);
+                one.target = member->GetGUID();
+                std::vector<uint32> const made = RegisterRepeat(owner, one, dice, err);
+                ids.insert(ids.end(), made.begin(), made.end());
+            }
+            return ids;
+        }
+        if (spec.atLast)
+        {
+            // The end of the last fixed line; none yet: where the selected unit stands now.
+            if (dice.lastEnd)
+                spec.point = *dice.lastEnd;
+            else if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+                spec.point = selected->GetPosition();
+            spec.point.SetOrientation(spec.facing);
+        }
         if (spec.atMember)
         {
             Player* member = PickMember(owner, spec, dice);
@@ -813,11 +882,16 @@ namespace
             spec.unit = member->GetGUID();
             spec.target = member->GetGUID();
         }
+        // Where a line starts now (min= measures from it, fix= freezes it there).
+        Position source = spec.point;
+        if (spec.unitAnchor)
+            if (Unit* u = ObjectAccessor::GetUnit(*owner, spec.unit))
+                source = u->GetPosition();
         switch (spec.to)
         {
             case TestSpec::To::Member:
             {
-                Player* member = PickMember(owner, spec, dice);
+                Player* member = PickMember(owner, spec, dice, spec.minDist > 0.f ? &source : nullptr);
                 if (!member)
                 {
                     err = kNoMemberMessage;
@@ -834,6 +908,24 @@ namespace
                 break;
             case TestSpec::To::None:
                 break;
+        }
+        if (spec.fix && spec.to != TestSpec::To::None)
+        {
+            // Frozen now: a point line from the source toward where the to= unit stands (reach: ending there).
+            Unit* toUnit = ObjectAccessor::GetUnit(*owner, spec.toUnit);
+            if (!toUnit)
+            {
+                err = "the to= unit is gone";
+                return {};
+            }
+            Drill::FixedLine const line = Drill::FixLine({ source.GetPositionX(), source.GetPositionY(),
+                source.GetPositionZ() }, { toUnit->GetPositionX(), toUnit->GetPositionY(), toUnit->GetPositionZ() },
+                spec.size, spec.reach, spec.facing);
+            spec.unitAnchor = false;
+            spec.to = TestSpec::To::None;
+            spec.facing = line.facing;
+            spec.size = line.length;
+            spec.point = Position(line.source.x, line.source.y, line.source.z, line.facing);
         }
         if (spec.shifted && !spec.unitAnchor)
         {
@@ -864,7 +956,16 @@ namespace
                 spec.spots[members[i]->GetGUID()] = Position(ring[i].x, ring[i].y,
                     GroundZ(owner, ring[i].x, ring[i].y, ring[i].z), 0.f);
         }
-        return RegisterTest(owner, spec, err);
+        std::vector<uint32> ids = RegisterTest(owner, spec, err);
+        // A fixed line (a point source along a fixed facing) leaves its far end for the next `at=last`.
+        if (!ids.empty() && (spec.shape == "line" || spec.shape == "projectile") && !spec.unitAnchor
+            && spec.to == TestSpec::To::None)
+        {
+            Geo::Vec3 const end = Drill::LineEnd({ spec.point.GetPositionX(), spec.point.GetPositionY(),
+                spec.point.GetPositionZ() }, spec.facing, spec.size);
+            dice.lastEnd = Position(end.x, end.y, GroundZ(owner, end.x, end.y, end.z), spec.facing);
+        }
+        return ids;
     }
 
     // One `.mech barrage` shot: a random member, a random kind of the list, the shot's geometry around that member.
@@ -1010,7 +1111,7 @@ namespace
             spec.inner = opt.Float("inner", spec.size / 2.f);
         if (s == "cone" || s == "rearcone" || s == "frontal")
             spec.angle = opt.Float("angle", 90.f);
-        if (s == "cone")
+        if (s == "cone" || s == "frontal")
             spec.offset = opt.Float("offset", 0.f);
         if (s == "line" || s == "projectile")
         {
@@ -1025,6 +1126,11 @@ namespace
                 spec.to = TestSpec::To::Me;
             else if (!to.empty())
                 opt.MarkBad("to");
+            spec.reach = opt.Bool("reach", false);
+            spec.fix = spec.reach || opt.Bool("fix", false);
+            spec.minDist = opt.Float("min", 0.f);
+            if (spec.minDist < 0.f)
+                opt.MarkBad("min");
         }
         if (s == "projectile")
         {
@@ -1232,6 +1338,10 @@ namespace
             spec.atGroup = true;
         else if (at == "gm")
             spec.atGm = true;
+        else if (at == "last")
+            spec.atLast = true;
+        else if (at == "each")
+            spec.atEach = true;
         else if (!at.empty())
             opt.MarkBad("at");
         std::string const pick = opt.Str("pick", "any");
@@ -1239,6 +1349,8 @@ namespace
             spec.pick = TestSpec::Pick::NonTank;
         else if (pick == "same")
             spec.pick = TestSpec::Pick::Same;
+        else if (pick == "other")
+            spec.pick = TestSpec::Pick::Other;
         else if (pick != "any")
             opt.MarkBad("pick");
         if (opt.Has("shift"))
@@ -1255,7 +1367,7 @@ namespace
         spec.point.SetOrientation(spec.facing);
         spec.target = selected->GetGUID();
         spec.selected = selected->GetGUID();
-        bool const atPoint = spec.atMember || spec.atGroup || spec.atGm;
+        bool const atPoint = spec.atMember || spec.atGroup || spec.atGm || spec.atLast || spec.atEach;
         if (s == "frontal")
         {
             if (selected == gm || !selected->IsCreature())
@@ -1297,6 +1409,16 @@ namespace
             return "shift= moves a point anchor; leave anchor= out";
         if (spec.cluster && spec.lane)
             return "cluster= needs a circle stack (no shape=line)";
+        if (spec.fix && spec.to == TestSpec::To::None)
+            return "fix=1 and reach=1 aim at the to= unit: add to=member, target or me";
+        if (spec.fix && (spec.follow || s == "projectile"))
+            return "fix=1 and reach=1 freeze a line: no follow=1, no projectile";
+        if (spec.minDist > 0.f && spec.to != TestSpec::To::Member)
+            return "min= measures a to=member pick from the line's source: add to=member";
+        if (spec.offset != 0.f && s == "frontal" && spec.rear)
+            return "a frontal takes rear=1 or offset=, not both";
+        if (spec.atEach && (s == "spot" || s == "spread" || s == "runout" || s == "bait" || s == "holdstill"))
+            return "at=each puts a zone, stack or soak under every member";
 
         std::string const bad = opt.Bad();
         if (!bad.empty())
@@ -1415,7 +1537,14 @@ namespace
         std::vector<Planned> planned;
         for (Drill::Step const& step : def.steps)
         {
-            std::string line = step.line;
+            if (!Drill::PlanKeysOk(step.line))
+            {
+                err = Acore::StringFormat("Drill {}: step '{}': bad after= (resolve, with) or cycle= (even, odd)",
+                    def.name, step.line);
+                return false;
+            }
+            // after= and cycle= are the plan's (StepSchedule); the `.mech test` parser never sees them.
+            std::string line = Drill::StripPlanKeys(step.line);
             std::vector<std::string_view> const head = Acore::Tokenize(line, ' ', false);
             Planned p;
             if (!head.empty() && head[0] == "marker")
@@ -2249,7 +2378,7 @@ public:
             return false;
         }
 
-        bool const landsOnMembers = spec.atMember || spec.atGroup || spec.anchorMember
+        bool const landsOnMembers = spec.atMember || spec.atGroup || spec.atEach || spec.anchorMember
             || spec.to == TestSpec::To::Member || s == "spot";
         if (landsOnMembers && GroupMembers(owner, spec.gm, spec.includeGm).empty())
         {

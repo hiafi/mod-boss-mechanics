@@ -7,7 +7,8 @@
  * rows it reproduces (shapes, timings, the separations the pairs need) and the landing geometry below.
  *
  * A drill is a list of steps per cycle. A step is the argument line of one `.mech test` (shape, size, ms, keys), run
- * at `atMs` after the cycle start from the test owner's scheduler, or the drill-only pseudo shape `marker <stacks>`
+ * at `atMs` after the cycle start from the test owner's scheduler (or, with `after=`, after the previous step: see
+ * StepOffsets; `cycle=even|odd` skips it in the other cycles), or the drill-only pseudo shape `marker <stacks>`
  * (sets Marked (drill) 205009 on group members, see Step; drill setup never hands out Weakened). The command appends
  * `dmg=<n>` to every damage step (DamageShape). Positions are yards in map coordinates; angles in radians; "ahead" is
  * along the GM's facing, "left" 90 degrees counterclockwise from it.
@@ -17,9 +18,11 @@
 #define MOD_BOSS_MECHANICS_MECHANIC_DRILL_H
 
 #include "MechanicGeometry.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -97,7 +100,7 @@ namespace BossMechanics::Drill
         std::uint32_t cycleMs = 0;
         bool ownerAtCreature = false;   // the test owner (the Bait's owner) stands at the selected creature (moved
                                         // there at the start and before each step)
-        std::vector<Step> steps;        // sorted by atMs
+        std::vector<Step> steps;        // in start order (StepOffsets: atMs, or after the previous step with after=)
         std::uint32_t defaultCycles = 3;    // `cycles=` when not given
     };
 
@@ -110,6 +113,20 @@ namespace BossMechanics::Drill
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
     // 6 s; at-close rules resolve at warning + window.
     constexpr std::uint32_t kAlexeiSlotMs = 12000;
+
+    // Deadmines Pilot gap 8 (deadmines-pilot.HANDOFF §3.9): the ledger tags of `deadmines-followups`. First shapes:
+    // 1 (dash), 4 (Shockwave), 6 (donut), 8 (Saw Spin), 11 (Cave In). Follow-ups (FollowupTag): 2 and 3 (second and
+    // third dash), 5 (both aftershocks), 7 (Haft Slam), 9 (Splinter Spray cone, even cycles), 10 (Runaway line, odd
+    // cycles), 12 (Lookout wave).
+    constexpr std::uint32_t kFollowupTags[] = { 2, 3, 5, 7, 9, 10, 12 };
+
+    inline bool FollowupTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kFollowupTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
 
     inline std::vector<Def> const& All()
     {
@@ -201,6 +218,35 @@ namespace BossMechanics::Drill
                     { 2000, "marker 3 pick=nontank" },
                     { 9000, "marker 0" },
                 } },
+            // Deadmines Pilot gap 8 (deadmines-pilot.HANDOFF §3.9): every heroic 1.5 s follow-up, after a 2 s first
+            // shape, timed from the first one's resolve (after=). Smite SM4 H: a 3 yd dash line from the creature to a
+            // non-tank at least 8 yd away (4 yd excluded at its start), then two more, each from where the last ended
+            // (at=last) to a non-tank the chain has not hit (pick=other). SM7 + SM8: Shockwave, a 4 x 25 yd frontal
+            // line, then two at 30 degrees either side. SM10 + SM11: Harpoon Sweep, donut 5 / 14, then Haft Slam,
+            // circle 6 (in, then out). SN1 then SN2 / SN3 (alternating cycles): Saw Spin, circle 8 on the creature
+            // (the tank out too), then Splinter Spray, frontal cone 90 deg / 10 yd, or Runaway, a 4 x 30 yd line
+            // through a non-tank's spot (fix=1). RZ1 + RZ10: Cave In, circle 5 under every member (at=each), then
+            // Lookout, circle 5 under every member where it stands as the first wave lands.
+            { "deadmines-followups", "1.5 s follow-ups: dash chain, aftershock lines, donut then circle, saw then "
+                "cone or line, two Cave In waves", 30000, false, {
+                    { 0, "line 8 2000 width=3 exclude=4 anchor=target to=member pick=nontank min=8 reach=1 weak=1 "
+                        "tag=1" },
+                    { 0, "line 8 1500 width=3 exclude=4 at=last to=member pick=other min=8 reach=1 after=resolve "
+                        "weak=1 tag=2" },
+                    { 0, "line 8 1500 width=3 exclude=4 at=last to=member pick=other min=8 reach=1 after=resolve "
+                        "weak=1 tag=3" },
+                    { 8000, "frontal 25 2000 line=1 width=4 weak=1 tag=4" },
+                    { 0, "frontal 25 1500 line=1 width=4 offset=30 after=resolve weak=1 tag=5" },
+                    { 0, "frontal 25 1500 line=1 width=4 offset=-30 after=with weak=1 tag=5" },
+                    { 14000, "donut 14 2000 inner=5 anchor=target weak=1 tag=6" },
+                    { 0, "circle 6 1500 anchor=target after=resolve weak=1 tag=7" },
+                    { 20000, "circle 8 2000 anchor=target weak=1 tag=8" },
+                    { 0, "frontal 10 1500 angle=90 after=resolve cycle=even weak=1 tag=9" },
+                    { 0, "line 30 1500 width=4 exclude=4 anchor=target to=member pick=nontank fix=1 after=resolve "
+                        "cycle=odd weak=1 tag=10" },
+                    { 25000, "circle 5 2000 at=each weak=1 tag=11" },
+                    { 0, "circle 5 1500 at=each after=resolve weak=1 tag=12" },
+                }, 2 },     // two cycles: the cone and the line once each
         };
         return drills;
     }
@@ -270,6 +316,206 @@ namespace BossMechanics::Drill
                 return std::nullopt;
         }
         return v;
+    }
+
+    // ---- step timing (after=, cycle=) ------------------------------------------------------------------------------
+    // Two keys of a drill step that the plan reads and the runner strips before the `.mech test` parser
+    // (StripPlanKeys): `after=resolve` starts the step `atMs` after the previous step of its cycle resolves (that
+    // step's start plus its warning), `after=with` `atMs` after that step starts; without `after=`, `atMs` counts from
+    // the cycle start. `cycle=even|odd` runs the step only in even (0, 2, ...) or odd cycles; a skipped step is not
+    // "the previous step" of the next one.
+
+    enum class After : std::uint8_t
+    {
+        CycleStart,
+        Resolve,
+        With
+    };
+
+    enum class Parity : std::uint8_t
+    {
+        Every,
+        Even,
+        Odd
+    };
+
+    // The warning of a step line (its third token, ms); 0 for `marker` and anything unreadable.
+    inline std::uint32_t WarnMs(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] == "marker")
+            return 0;
+        std::optional<float> const ms = Number(t[2]);
+        return ms ? static_cast<std::uint32_t>(*ms) : 0;
+    }
+
+    // nullopt when the value is not one of the key's words.
+    inline std::optional<After> AfterOf(std::string_view line)
+    {
+        std::optional<std::string_view> const v = Value(line, "after");
+        if (!v)
+            return After::CycleStart;
+        if (*v == "resolve")
+            return After::Resolve;
+        if (*v == "with")
+            return After::With;
+        return std::nullopt;
+    }
+
+    inline std::optional<Parity> ParityOf(std::string_view line)
+    {
+        std::optional<std::string_view> const v = Value(line, "cycle");
+        if (!v)
+            return Parity::Every;
+        if (*v == "even")
+            return Parity::Even;
+        if (*v == "odd")
+            return Parity::Odd;
+        return std::nullopt;
+    }
+
+    // Are the step's timing keys readable? (The runner refuses a drill whose step fails this.)
+    inline bool PlanKeysOk(std::string_view line)
+    {
+        return AfterOf(line).has_value() && ParityOf(line).has_value();
+    }
+
+    inline bool RunsInCycle(std::string_view line, std::uint32_t cycle)
+    {
+        Parity const p = ParityOf(line).value_or(Parity::Every);
+        return p == Parity::Every || (p == Parity::Even) == (cycle % 2 == 0);
+    }
+
+    // When each step starts in cycle `cycle`, in ms after the cycle start (nullopt: skipped in this cycle). An
+    // after= step with no earlier step in the cycle counts from the cycle start.
+    inline std::vector<std::optional<std::uint32_t>> StepOffsets(Def const& def, std::uint32_t cycle)
+    {
+        std::vector<std::optional<std::uint32_t>> out(def.steps.size());
+        std::optional<std::size_t> prev;
+        for (std::size_t i = 0; i < def.steps.size(); ++i)
+        {
+            Step const& step = def.steps[i];
+            if (!RunsInCycle(step.line, cycle))
+                continue;
+            After const after = AfterOf(step.line).value_or(After::CycleStart);
+            std::uint32_t base = 0;
+            if (prev && after != After::CycleStart)
+            {
+                base = *out[*prev];
+                if (after == After::Resolve)
+                    base += WarnMs(def.steps[*prev].line);
+            }
+            out[i] = base + step.atMs;
+            prev = i;
+        }
+        return out;
+    }
+
+    // The line without the plan's keys (after=, cycle=), as the `.mech test` parser reads it.
+    inline std::string StripPlanKeys(std::string_view line)
+    {
+        std::string out;
+        for (std::string_view const t : Tokens(line))
+        {
+            std::string_view const key = t.substr(0, t.find('='));
+            if (t.find('=') != std::string_view::npos && (key == "after" || key == "cycle"))
+                continue;
+            if (!out.empty())
+                out += ' ';
+            out += t;
+        }
+        return out;
+    }
+
+    // ---- member picks (pick=any|nontank|other, min=) ---------------------------------------------------------------
+
+    enum class PickRule : std::uint8_t
+    {
+        Any,
+        NonTank,        // never the selected unit's victim
+        Other           // a non-tank the chain has not picked yet (see PickPool)
+    };
+
+    // One member as a pick sees it (members in guid order).
+    struct PickCandidate
+    {
+        bool victim = false;    // the selected unit's victim (the tank)
+        bool chained = false;   // picked since the last pick that was not pick=other (the chain)
+        bool last = false;      // the previous pick
+        float dist = 0.f;       // from the shape's source (min=)
+    };
+
+    // The members a pick draws from (indices into `c`, in order; empty: nobody). pick=other: a non-tank outside the
+    // chain, else a non-tank other than the previous pick, else any non-tank (a small group runs out of fresh
+    // targets). min > 0: of those, the ones at least `min` yd from the source, else the single farthest one.
+    inline std::vector<std::size_t> PickPool(std::vector<PickCandidate> const& c, PickRule rule, float min)
+    {
+        std::vector<std::size_t> pool;
+        auto collect = [&c, &pool](auto const& keep)
+        {
+            pool.clear();
+            for (std::size_t i = 0; i < c.size(); ++i)
+                if (keep(c[i]))
+                    pool.push_back(i);
+        };
+        if (rule == PickRule::Any)
+            collect([](PickCandidate const&) { return true; });
+        else
+        {
+            if (rule == PickRule::Other)
+            {
+                collect([](PickCandidate const& m) { return !m.victim && !m.chained; });
+                if (pool.empty())
+                    collect([](PickCandidate const& m) { return !m.victim && !m.last; });
+            }
+            if (pool.empty())
+                collect([](PickCandidate const& m) { return !m.victim; });
+        }
+        if (min > 0.f && !pool.empty())
+        {
+            std::vector<std::size_t> far;
+            std::size_t farthest = pool.front();
+            for (std::size_t i : pool)
+            {
+                if (c[i].dist >= min)
+                    far.push_back(i);
+                if (c[i].dist > c[farthest].dist)
+                    farthest = i;
+            }
+            if (far.empty())
+                far.push_back(farthest);
+            pool = far;
+        }
+        return pool;
+    }
+
+    // ---- fixed lines (fix=1, reach=1, at=last) ---------------------------------------------------------------------
+
+    // A line frozen at registration: from `source` toward `toward`, `size` long, or (reach) ending at `toward` but
+    // never shorter than `size`. A target on the source keeps the given facing.
+    struct FixedLine
+    {
+        Geo::Vec3 source;
+        float facing = 0.f;
+        float length = 0.f;
+    };
+
+    inline FixedLine FixLine(Geo::Vec3 const& source, Geo::Vec3 const& toward, float size, bool reach,
+        float facing)
+    {
+        float const dx = toward.x - source.x;
+        float const dy = toward.y - source.y;
+        float const d = std::sqrt(dx * dx + dy * dy);
+        FixedLine out{ source, d > 1e-3f ? std::atan2(dy, dx) : facing, size };
+        if (reach)
+            out.length = std::max(size, d);
+        return out;
+    }
+
+    // The far end of a line (`at=last` lands the next one there).
+    inline Geo::Vec3 LineEnd(Geo::Vec3 const& source, float facing, float length)
+    {
+        return Shifted(source, facing, length, 0.f);
     }
 }
 
