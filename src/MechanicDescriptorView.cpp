@@ -171,6 +171,8 @@ namespace BossMechanics
         f.entry = unit->GetEntry();
         f.alive = unit->IsAlive();
         f.healthPct = unit->GetHealthPct();
+        f.player = unit->IsPlayer();
+        f.charmed = unit->IsCharmed();
         for (uint32 aura : view.refs.auras)
             if (unit->HasAura(aura))
                 f.auras.push_back(aura);

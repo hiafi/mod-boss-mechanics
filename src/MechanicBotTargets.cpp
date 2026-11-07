@@ -60,6 +60,11 @@ namespace
         return v.Active() && !v.descriptor.ignores.empty();
     }
 
+    bool HasHostilePlayers(DescriptorView const& v)
+    {
+        return v.Active() && !v.descriptor.hostilePlayerAuras.empty();
+    }
+
     // The registry and the state with the view brought up to date; false when no descriptor applies to the bot.
     bool RefreshedView(PlayerbotAI* botAI, Player* bot, MechanicBotStateRef& ref, MechanicBotState*& st,
         Registry const*& reg)
@@ -106,6 +111,53 @@ namespace
         return !BotTargets::IsIgnoredNow(*st, *reg, bot, unit, Now());
     }
 #endif
+
+#if defined(PLAYERBOTS_HAS_HOSTILE_TEAMMATE_FILTER)
+    // SFK F1: the fork asks this for a charmed teammate only (AttackersValue::IsHostileTeammate).
+    bool HostileTeammateFilter(Player* teammate, Player* bot)
+    {
+        return bot && BotTargets::IsHostilePlayer(GET_PLAYERBOT_AI(bot), bot, teammate);
+    }
+#endif
+
+    // SFK F1: a teammate the bot attacked as turned is not any more (the aura is gone, or the charm with it): drop it
+    // as the current target, the melee victim and the cast target. The core's release (Unit::RemoveCharmedBy,
+    // StopAttackingInvalidTarget) covers the melee swing when the charm ends; this covers the aura ending first and
+    // a cast in flight.
+    void DropReleased(PlayerbotAI* botAI, Player* bot, MechanicBotState& st)
+    {
+        auto released = [&](Unit const* u)
+        {
+            return u && u != bot && u->IsPlayer() && u->ToPlayer()->GetTeamId(true) == bot->GetTeamId(true)
+                && !BotTargets::IsHostilePlayer(botAI, bot, u);
+        };
+        MechanicBotCounters& c = st.counters;
+        Value<Unit*>* currentValue = botAI->GetAiObjectContext()->GetValue<Unit*>("current target");
+        Unit* current = currentValue ? currentValue->Get() : nullptr;
+        if (released(current))
+        {
+            if (GetConfig().bots.debug)
+                LOG_INFO(kLog, "Bot {}: dropped {} as its target (no longer turned)", bot->GetName(),
+                    current->GetName());
+            currentValue->Set(nullptr);
+            if (bot->GetTarget() == current->GetGUID())
+                bot->SetSelection(ObjectGuid::Empty);
+            ++c.hostileReleases;
+        }
+        if (released(bot->GetVictim()))
+        {
+            bot->AttackStop();
+            ++c.hostileReleases;
+        }
+        for (CurrentSpellTypes type : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+            if (Spell const* spell = bot->GetCurrentSpell(type))
+                if (released(spell->m_targets.GetUnitTarget()) && !spell->GetSpellInfo()->IsPositive())
+                {
+                    botAI->RequestSpellInterrupt();
+                    ++c.hostileReleases;
+                    break;
+                }
+    }
 
     // Pulls one minion (pet, guardian, totem) off an ignored victim: onto the owner's target when it can, else back.
     void PullOff(PlayerbotAI* botAI, Player* bot, Unit* minion, Unit* ownerTarget)
@@ -259,6 +311,21 @@ namespace
 // BotTargets
 // ---------------------------------------------------------------------------------------------------------------------
 
+bool BotTargets::IsHostilePlayer(PlayerbotAI* botAI, Player const* bot, Unit const* unit)
+{
+    if (!botAI || !bot || !unit || !unit->IsPlayer() || !unit->IsCharmed() || !bot->IsInWorld()
+        || !unit->IsInMap(bot))
+        return false;
+    MechanicBotState* st = BotBrain::StateOf(botAI);
+    if (!st || !HasHostilePlayers(st->descriptor))
+        return false;
+    Registry const* reg = Registry::Get(bot->GetMap());
+    if (!reg)
+        return false;
+    DescriptorView& v = st->descriptor;
+    return Desc::IsHostilePlayer(v.descriptor, FactsOf(v, *reg, unit, Now()));
+}
+
 bool BotTargets::IsIgnoredNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
     Milliseconds now)
 {
@@ -319,6 +386,8 @@ void BotTargets::AfterTick(PlayerbotAI* botAI, Player* bot, MechanicBotState& st
 
     if (HasIgnores(v))
         DropIgnored(botAI, bot, st, reg, now);
+    if (HasHostilePlayers(v))
+        DropReleased(botAI, bot, st);
 }
 
 void BotTargets::AppendExclusions(PlayerbotAI* botAI, GuidSet& exclusions)
@@ -354,6 +423,14 @@ void BotTargets::InstallTargetFilter()
     LOG_INFO(kLog, "mod-boss-mechanics: this mod-playerbots has no AttackersValue::SetTargetFilter; RTI, skull and "
         "assist targets are not filtered by boss ignore lists");
 #endif
+#if defined(PLAYERBOTS_HAS_HOSTILE_TEAMMATE_FILTER)
+    AttackersValue::SetHostileTeammateFilter(&HostileTeammateFilter);
+    LOG_INFO(kLog, "mod-boss-mechanics: installed the turned-teammate filter "
+        "(AttackersValue::SetHostileTeammateFilter)");
+#else
+    LOG_INFO(kLog, "mod-boss-mechanics: this mod-playerbots has no AttackersValue::SetHostileTeammateFilter; bots "
+        "never attack a charmed teammate, whatever the boss descriptor's hostilePlayerAuras say");
+#endif
 }
 
 std::string BotTargets::ReportLine(MechanicBotState const& st)
@@ -364,8 +441,9 @@ std::string BotTargets::ReportLine(MechanicBotState const& st)
         f.priority, f.Engaged() ? " engaged" : "", f.aoeOk ? " aoe ok" : "") : std::string("-");
     return Acore::StringFormat("m5 targets: focus {} | switches {}, on lower targets {} ms, break-out max {} ms | "
         "ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, minions pulled "
-        "off {}", focus, c.focusSwitches, c.msLowerTarget, c.breakOutMsMax, c.ignoredHits, c.ignoredDamage,
-        c.petIgnoredHits, c.petIgnoredDamage, c.ignoreBlocks, c.ignoreDrops, c.petRecalls);
+        "off {} | turned teammates released {}", focus, c.focusSwitches, c.msLowerTarget, c.breakOutMsMax,
+        c.ignoredHits, c.ignoredDamage, c.petIgnoredHits, c.petIgnoredDamage, c.ignoreBlocks, c.ignoreDrops,
+        c.petRecalls, c.hostileReleases);
 }
 
 void AddSC_boss_mechanics_bot_targets()

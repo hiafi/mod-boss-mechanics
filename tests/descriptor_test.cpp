@@ -1,8 +1,8 @@
 // Standalone tests for src/MechanicDescriptor.h and src/MechanicDescriptorPresets.h (STAGE-M5-HANDOFF §3.2-§3.5,
 // §5, WP-D): conditions, interrupt ordering and the do-not-kick rule, cast notes and due times, the overload hold
 // timeline, kicker alternation, kick claims and their expiry, the dispel pick with urgent and deadline entries,
-// purges, the target pick (priority, who, conditions, kill together, GUID follow, break-out order) and the ignore
-// filter. Build: tests/run.sh.
+// purges, the target pick (priority, who, conditions, kill together, GUID follow, break-out order), the ignore
+// filter and turned players (SFK F1: hostilePlayerAuras, TargetEntry::HostilePlayers). Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicDescriptor.h"
@@ -679,6 +679,99 @@ namespace
         CHECK(attackers.size() == 3 && attackers[0].guid == 3 && attackers[1].guid == 2 && attackers[2].guid == 4);
     }
 
+    // ---- turned players (SFK F1) -----------------------------------------------------------------------------------
+
+    void TestHostilePlayers()
+    {
+        constexpr std::uint32_t TURNED = 300590;
+        constexpr std::uint32_t CURSE = 300591;
+        auto Player = [](Key guid, bool charmed, std::vector<std::uint32_t> auras, float pct = 100.f)
+        {
+            UnitFacts u = Facts(guid, 0, pct);
+            u.player = true;
+            u.charmed = charmed;
+            u.auras = std::move(auras);
+            return u;
+        };
+
+        Descriptor d;
+        CHECK(d.Empty());
+        d.hostilePlayerAuras = { TURNED };
+        CHECK(!d.Empty());
+        // The view gathers the listed auras even when no condition names them.
+        References const r = Referenced(d);
+        CHECK(r.auras.size() == 1 && r.auras[0] == TURNED);
+        d.targets.push_back(TargetEntry::HostilePlayers(1, Who::Dps, Condition::HasAura(TURNED)));
+        CHECK(Referenced(d).auras.size() == 1);
+
+        // Hostile: a live charmed player with a listed aura. The charm alone (stock mind control), the aura alone
+        // (the charm broke), a creature with the aura and a dead player are not.
+        CHECK(IsHostilePlayer(d, Player(10, true, { TURNED })));
+        CHECK(IsHostilePlayer(d, Player(10, true, { CURSE, TURNED })));
+        CHECK(!IsHostilePlayer(d, Player(10, true, {})));
+        CHECK(!IsHostilePlayer(d, Player(10, true, { CURSE })));
+        CHECK(!IsHostilePlayer(d, Player(10, false, { TURNED })));
+        UnitFacts dead = Player(10, true, { TURNED });
+        dead.alive = false;
+        CHECK(!IsHostilePlayer(d, dead));
+        UnitFacts creature = Facts(11, 3857);
+        creature.charmed = true;
+        creature.auras = { TURNED };
+        CHECK(!IsHostilePlayer(d, creature));
+        CHECK(!IsHostilePlayer(Descriptor(), Player(10, true, { TURNED })));
+        Descriptor zero;
+        zero.hostilePlayerAuras = { 0 };
+        CHECK(!IsHostilePlayer(zero, Player(10, true, {})));
+
+        // Kill order (SK: turned players first, Arugal first during Moonrise). Players have entry 0: an entry entry
+        // never names one, and HostilePlayers never names a creature or a teammate who is not turned.
+        constexpr Key BOSS = 1;
+        constexpr std::uint32_t E_ARUGAL = 4275;
+        std::vector<UnitFacts> units = { Facts(BOSS, E_ARUGAL, 60.f), Player(20, true, { TURNED }, 90.f),
+            Player(21, false, {}, 30.f), Player(22, true, {}, 10.f) };
+        auto c = Cands(units);
+        Context ctx;
+        CHECK(PickedGuid(d, c, BOSS, kMelee) == 20);
+        CHECK(PickedGuid(d, c, BOSS, kRanged) == 20);
+        CHECK(PickedGuid(d, c, BOSS, kTank) == BOSS);       // Dps entry: the tank keeps Arugal
+        CHECK(PickedGuid(d, c, BOSS, kHealer) == BOSS);
+        std::optional<TargetPick> p = PickTarget(d, c, BOSS, kMelee, 0, ctx);
+        CHECK(p && p->outranksBoss && p->priority == 1);
+        CHECK(!MatchTarget(d, units[2], kMelee, ctx));      // a teammate
+        CHECK(!MatchTarget(d, units[3], kMelee, ctx));      // charmed, not turned (another mind control)
+        Descriptor byEntry = d;
+        byEntry.targets = { TargetEntry(0, 3), TargetEntry(E_ARUGAL, -1) };
+        CHECK(!MatchTarget(byEntry, units[1], kMelee, ctx));
+        // Two turned players: the one with less health left first; the current one keeps a tie.
+        units.push_back(Player(23, true, { TURNED }, 50.f));
+        c = Cands(units);
+        CHECK(PickedGuid(d, c, BOSS, kMelee) == 23);
+        CHECK(PickedGuid(d, c, BOSS, kMelee, 20) == 20);
+        // The aura ends: off the list; the boss again.
+        units[1].auras.clear();
+        units[4].charmed = false;
+        c = Cands(units);
+        CHECK(PickedGuid(d, c, BOSS, kMelee) == BOSS);
+
+        // Moonrise (phase 1): Arugal first, turned players below him.
+        Descriptor moon;
+        moon.hostilePlayerAuras = { TURNED };
+        moon.phase = 1;
+        moon.targets.push_back(TargetEntry::HostilePlayers(1, Who::Dps, Condition::Phase(0)));
+        moon.targets.push_back(TargetEntry::HostilePlayers(-1, Who::Dps, Condition::Phase(1)));
+        units[1].auras = { TURNED };
+        c = Cands(units);
+        Context moonCtx;
+        moonCtx.phase = 1;
+        p = PickTarget(moon, c, BOSS, kMelee, 0, moonCtx);
+        CHECK(p && c[p->candidate].facts->guid == BOSS && !p->outranksBoss);
+        std::optional<std::size_t> const e = MatchTarget(moon, units[1], kMelee, moonCtx);
+        CHECK(e && moon.targets[*e].priority == -1);
+        units[0].alive = false;
+        c = Cands(units);
+        CHECK(PickedGuid(moon, c, BOSS, kMelee, 0, moonCtx) == 20);
+    }
+
     void TestPresets()
     {
         Preset const* none = FindPreset("none");
@@ -715,6 +808,7 @@ int main()
     TestTargets();
     TestKillTogether();
     TestIgnore();
+    TestHostilePlayers();
     TestPresets();
     return Report("descriptor_test");
 }

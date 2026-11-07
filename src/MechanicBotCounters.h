@@ -149,6 +149,8 @@ namespace BossMechanics
         uint32 ignoreBlocks = 0;        // actions the focus multiplier zeroed because their target is ignored
         uint32 ignoreDrops = 0;         // ignored current targets, melee victims and cast targets dropped
         uint32 petRecalls = 0;          // minions pulled off an ignored victim (onto the bot's target, or recalled)
+        // SFK F1 (turned teammates, MechanicBotTargets.cpp).
+        uint32 hostileReleases = 0;     // targets, melee victims and casts dropped: a teammate no longer turned
         // M5 WP-P (dispels and purges, MechanicBotDispel.cpp), whichever row cast them. M5 WP-F (R M-1): a dispel
         // removes a random aura of its type, so the cures and purges are counted on the dispeller when the listed
         // aura is removed by its cast (the aura hook, AURA_REMOVE_BY_ENEMY_SPELL), not at the cast; a dispel that
