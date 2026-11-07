@@ -259,6 +259,16 @@ namespace Mechanic
     // A script's own summon counts as a unit of the owner's encounter (casterEntry 0 interrupt entries); not despawned
     // at the encounter's end (the script's summon list owns it).
     void TrackUnit(Unit* owner, Unit* unit);
+
+    // reference health for a script's own spell (a SpellScript's damage, a custom DoT): `pct` percent of the row the
+    // registry would pick for `owner` (its content key on its current map: difficulty, MapLevels pin, else its
+    // level), non-tank health, or tank health with `tank`. Rounded and clamped exactly as Damage(pct) /
+    // TankDamage(pct) (RefFlatFor, MechanicMath.h), so the same percent deals the same number. Call it while the
+    // owner is on its map (at cast or hit time; never cache it across a map change); a null owner or one not in the
+    // world returns 0 (DEBUG log). Deadmines, 15%: 195 normal, 618 heroic.
+    //
+    //     SetHitDamage(Mechanic::RefFlat(GetCaster(), 15.f));
+    uint32 RefFlat(Unit const* owner, float pct, bool tank = false);
 }
 
 #endif

@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 using namespace BossMechanics;
@@ -38,31 +39,96 @@ namespace
         return best;
     }
 
-    // The schedule `.mech drill` used before the runner: for each cycle, for each step, c * cycleMs + atMs.
+    // Drills without after= or cycle= keep the schedule `.mech drill` used before the runner: for each cycle, for
+    // each step, c * cycleMs + atMs. Every drill: each step that runs in its cycle once, at its StepOffsets time.
     void TestStepSchedule()
     {
         for (Drill::Def const& d : Drill::All())
         {
+            bool timed = false;
+            for (Drill::Step const& step : d.steps)
+                timed = timed || Drill::Value(step.line, "after") || Drill::Value(step.line, "cycle");
             for (std::uint32_t cycles = 1; cycles <= 3; ++cycles)
             {
                 std::vector<Drill::ScheduledStep> const s = Drill::StepSchedule(d, cycles);
-                CHECK(s.size() == cycles * d.steps.size());
-                std::size_t k = 0;
+                std::size_t expected = 0;
                 for (std::uint32_t c = 0; c < cycles; ++c)
-                    for (std::uint32_t i = 0; i < d.steps.size(); ++i, ++k)
+                {
+                    std::vector<std::optional<std::uint32_t>> const at = Drill::StepOffsets(d, c);
+                    for (std::uint32_t i = 0; i < d.steps.size(); ++i)
                     {
-                        if (k >= s.size())
-                            break;
-                        CHECK(s[k].step == i);
-                        CHECK(s[k].cycle == c);
-                        CHECK(s[k].delayMs == c * d.cycleMs + d.steps[i].atMs);
+                        if (!at[i])
+                            continue;
+                        ++expected;
+                        std::size_t hits = 0;
+                        for (Drill::ScheduledStep const& x : s)
+                            if (x.cycle == c && x.step == i)
+                            {
+                                ++hits;
+                                CHECK(x.delayMs == c * d.cycleMs + *at[i]);
+                            }
+                        CHECK(hits == 1);
                     }
+                }
+                CHECK(s.size() == expected);
+                if (!timed)
+                {
+                    CHECK(s.size() == cycles * d.steps.size());
+                    std::size_t k = 0;
+                    for (std::uint32_t c = 0; c < cycles; ++c)
+                        for (std::uint32_t i = 0; i < d.steps.size(); ++i, ++k)
+                        {
+                            if (k >= s.size())
+                                break;
+                            CHECK(s[k].step == i);
+                            CHECK(s[k].cycle == c);
+                            CHECK(s[k].delayMs == c * d.cycleMs + d.steps[i].atMs);
+                        }
+                }
                 // In time order (the test owner's idle clock ends at the last step).
                 for (std::size_t j = 1; j < s.size(); ++j)
                     CHECK(s[j - 1].delayMs <= s[j].delayMs);
                 CHECK(s.empty() || s.back().delayMs < Drill::RunLengthMs(d, cycles));
             }
         }
+    }
+
+    // Deadmines Pilot gap 8 (deadmines-pilot.HANDOFF §3.9): the runner's schedule of `deadmines-followups` over its
+    // two default cycles, and the program name the sweep passes (`--programs deadmines-followups`).
+    void TestFollowupsSchedule()
+    {
+        Drill::Def const* d = Drill::Find("deadmines-followups");
+        CHECK(d != nullptr);
+        if (!d)
+            return;
+        std::vector<Drill::ScheduledStep> const s = Drill::StepSchedule(*d, Drill::ClampCycles(0, *d));
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> got;
+        for (Drill::ScheduledStep const& x : s)
+            got.push_back({ x.delayMs, x.step });
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> const want = {
+            { 0, 0 }, { 2000, 1 }, { 3500, 2 }, { 8000, 3 }, { 10000, 4 }, { 10000, 5 }, { 14000, 6 }, { 16000, 7 },
+            { 20000, 8 }, { 22000, 9 }, { 25000, 11 }, { 27000, 12 },
+            { 30000, 0 }, { 32000, 1 }, { 33500, 2 }, { 38000, 3 }, { 40000, 4 }, { 40000, 5 }, { 44000, 6 },
+            { 46000, 7 }, { 50000, 8 }, { 52000, 10 }, { 55000, 11 }, { 57000, 12 } };
+        CHECK(got == want);
+        CHECK(Drill::RunLengthMs(*d, 2) == 60000);
+
+        // The sweep's MECHSIM_PROGRAMS entry: the drill name alone (two cycles) or with a cycle count.
+        std::string err;
+        std::optional<Drill::Program> const p = Drill::ParseProgram("deadmines-followups", err);
+        CHECK(p.has_value() && err.empty());
+        if (p)
+        {
+            CHECK(p->entries.size() == 1);
+            if (!p->entries.empty())
+            {
+                CHECK(p->entries[0].kind == Drill::EntryKind::Drill && p->entries[0].drill == d);
+                CHECK(p->entries[0].cycles == 2 && p->entries[0].lengthMs == 60000);
+            }
+            CHECK(p->loopMs == 60000 + Drill::kProgramGapMs);
+        }
+        std::optional<Drill::Program> const four = Drill::ParseProgram("deadmines-followups:4,smite", err);
+        CHECK(four && four->entries.size() == 2 && four->entries[0].cycles == 4);
     }
 
     void TestCyclesAndOwner()
@@ -707,6 +773,7 @@ namespace
 int main()
 {
     TestStepSchedule();
+    TestFollowupsSchedule();
     TestCyclesAndOwner();
     TestPrograms();
     TestDescriptorEntries();

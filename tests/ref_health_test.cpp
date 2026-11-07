@@ -1,6 +1,7 @@
 // Standalone tests for src/MechanicRefHealth.h (dungeon difficulties STAGE-E0-E3-HANDOFF §3.7, decision §7 #5,
 // WP-3P): parsing the keyed reference health rows (the level-only stub format included), lookup and fallback per
-// tier, the canonical text, map level pins and the default content key. Build: tests/run.sh.
+// tier, the canonical text, map level pins, the default content key and Mechanic::RefFlat's pure part
+// (RefFlatFor, deadmines-pilot WP-X). Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicRefHealth.h"
@@ -318,6 +319,61 @@ namespace
         dm.ownerLevel = 80;
         CHECK(Lookup(more, ResolveContentKey(dm, pins)).health.nonTank == 4120);
     }
+
+    // Mechanic::RefFlat's pure part on the shipped conf rows and pins: the row the content key picks, then the same
+    // DamageSpec, rounding and clamp as a registry mechanic's Damage(pct) / TankDamage(pct) (FlatDamageFor).
+    void TestRefFlat()
+    {
+        Table t;
+        MapLevels pins;
+        std::string err;
+        CHECK(ParseTable("20:1300:1290 60:3670:3710 60h:4120:4110", t, err));
+        CHECK(ParseMapLevels("36:20 36h:60", pins, err));
+        ContentInputs dm;
+        dm.hasMap = true;
+        dm.mapId = 36;
+        dm.ownerLevel = 19;
+
+        // Normal Deadmines: the 20 row.
+        ReferenceHealth const normal = Lookup(t, ResolveContentKey(dm, pins)).health;
+        CHECK(RefFlatFor(normal, 100.f, false) == 1300);
+        CHECK(RefFlatFor(normal, 100.f, true) == 1290);
+        CHECK(RefFlatFor(normal, 15.f, false) == 195);
+        CHECK(RefFlatFor(normal, 30.f, true) == 387);
+
+        // Heroic Deadmines: the 60h row (pinned), whatever the owner's level.
+        dm.heroic = true;
+        dm.ownerLevel = 20;
+        ReferenceHealth const heroic = Lookup(t, ResolveContentKey(dm, pins)).health;
+        CHECK(RefFlatFor(heroic, 100.f, false) == 4120);
+        CHECK(RefFlatFor(heroic, 100.f, true) == 4110);
+        CHECK(RefFlatFor(heroic, 15.f, false) == 618);
+        CHECK(RefFlatFor(heroic, 40.f, true) == 1644);
+
+        // Equal to the registry's path for the same percent: Damage(pct) for a non-tank, Damage(pct).TankDamage(pct)
+        // for the tank; half-up rounding (12.5% of 1290 = 161.25 -> 161; 0.5% of 1300 = 6.5 -> 7).
+        for (float pct : { 0.f, 0.5f, 1.f, 5.f, 12.5f, 15.f, 20.f, 33.3f, 100.f, 250.f })
+        {
+            for (ReferenceHealth const& ref : { normal, heroic })
+            {
+                DamageSpec nonTank;
+                nonTank.pctNonTank = pct;
+                DamageSpec tankSpec;
+                tankSpec.pctNonTank = pct;
+                tankSpec.pctTank = pct;
+                CHECK(static_cast<std::int32_t>(RefFlatFor(ref, pct, false)) == FlatDamageFor(nonTank, ref, false));
+                CHECK(static_cast<std::int32_t>(RefFlatFor(ref, pct, true)) == FlatDamageFor(tankSpec, ref, true));
+            }
+        }
+        CHECK(RefFlatFor(normal, 0.5f, false) == 7);
+        CHECK(RefFlatFor(normal, 12.5f, true) == 161);
+
+        // A negative percent clamps to 0 like MechanicRef::Damage; a tank flag never reads the non-tank row.
+        CHECK(RefFlatFor(normal, -10.f, false) == 0);
+        CHECK(RefFlatFor(heroic, -10.f, true) == 0);
+        CHECK(RefFlatSpec(-10.f, false).pctTank < 0.f);
+        CHECK(RefFlatSpec(-10.f, true).pctTank == 0.f);
+    }
 }
 
 int main()
@@ -330,5 +386,6 @@ int main()
     TestMapLevels();
     TestContentKey();
     TestMapLevelsPerDifficulty();
+    TestRefFlat();
     return Report("ref_health_test");
 }

@@ -62,11 +62,11 @@ namespace
     }
 
     // When the step's mechanic is over, relative to the cycle start: resolve, plus a persistent zone's or a hold
-    // window's length.
-    float EndMs(Drill::Step const& step)
+    // window's length. `startMs`: when it starts (StepOffsets), default its atMs.
+    float EndMs(Drill::Step const& step, std::optional<std::uint32_t> startMs = std::nullopt)
     {
         Parsed const p = Parse(step.line);
-        float end = static_cast<float>(step.atMs) + p.ms;
+        float end = static_cast<float>(startMs.value_or(step.atMs)) + p.ms;
         if (p.shape == "holdstill")
             end += p.size * 1000.f;
         end += Key(step.line, "persist", 0.f);
@@ -170,12 +170,25 @@ namespace
             CHECK(Drill::Find(d.name) == &d);
             CHECK(d.cycleMs > 0);
             CHECK(!d.steps.empty());
-            std::uint32_t last = 0;
+            // In start order in every cycle (the after= steps follow their previous step), all below the cycle.
+            for (std::uint32_t cycle = 0; cycle < 2; ++cycle)
+            {
+                std::vector<std::optional<std::uint32_t>> const at = Drill::StepOffsets(d, cycle);
+                std::uint32_t last = 0;
+                for (std::size_t i = 0; i < d.steps.size(); ++i)
+                {
+                    if (!at[i])
+                        continue;
+                    CHECK(*at[i] >= last);
+                    last = *at[i];
+                    CHECK(*at[i] < d.cycleMs);
+                    // Over before the next cycle starts, so cycles never stack.
+                    CHECK(EndMs(d.steps[i], at[i]) <= static_cast<float>(d.cycleMs));
+                }
+            }
             for (Drill::Step const& step : d.steps)
             {
-                CHECK(step.atMs >= last);           // sorted: the command schedules in time order
-                last = step.atMs;
-                CHECK(step.atMs < d.cycleMs);
+                CHECK(Drill::PlanKeysOk(step.line));
                 Parsed const p = Parse(step.line);
                 if (p.shape == "marker")
                 {
@@ -194,8 +207,6 @@ namespace
                 CHECK(kTestShapes.count(p.shape) == 1);
                 CHECK(p.size > 0.f);
                 CHECK(p.ms >= 0.f);
-                // Over before the next cycle starts, so cycles never stack.
-                CHECK(EndMs(step) <= static_cast<float>(d.cycleMs));
                 // Ledger tags name the mechanic.
                 CHECK(Drill::Value(step.line, "tag").has_value());
                 // dmg= comes from the drill; get-in kinds take none.
@@ -204,7 +215,7 @@ namespace
                     CHECK(!Drill::Value(step.line, "weak"));
             }
         }
-        for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras" })
+        for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -475,13 +486,14 @@ namespace
         CHECK(Key(lasting.line, "persist", 0.f) == 5000.f && Key(lasting.line, "need", 0.f) == 1.f);
     }
 
-    // STAGE-M3-R-REPORT n-11: alexei runs one cycle by default (2.6 minutes), the others three.
+    // STAGE-M3-R-REPORT n-11: alexei runs one cycle by default (2.6 minutes), deadmines-followups two (its alternating
+    // follow-up once each), the others three.
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())
         {
             std::string_view const name = d.name;
-            CHECK(d.defaultCycles == (name == "alexei" ? 1u : 3u));
+            CHECK(d.defaultCycles == (name == "alexei" ? 1u : name == "deadmines-followups" ? 2u : 3u));
             CHECK(d.defaultCycles * d.cycleMs <= 180000u);
         }
     }
@@ -530,6 +542,296 @@ namespace
         CHECK(thaw > resolve && thaw < d.cycleMs);
     }
 
+    // ---- Deadmines Pilot gap 8 (deadmines-pilot.HANDOFF §3.9) ------------------------------------------------------
+
+    // A signed decimal (offset=-30); Drill::Number reads no sign.
+    float Signed(std::string_view v)
+    {
+        bool const neg = !v.empty() && v.front() == '-';
+        float const n = Drill::Number(neg ? v.substr(1) : v).value_or(-999.f);
+        return neg ? -n : n;
+    }
+
+    // after=resolve / after=with / cycle=: the step starts measured from the previous step of its cycle.
+    void TestStepOffsetsGrammar()
+    {
+        Drill::Def const d = { "t", "", 30000, false, {
+            { 1000, "circle 5 2000 tag=1" },                                // 1000
+            { 0, "circle 5 1500 after=resolve tag=2" },                     // 1000 + 2000 = 3000
+            { 500, "circle 5 1500 after=resolve tag=3" },                   // 3000 + 1500 + 500 = 5000
+            { 0, "circle 5 1500 after=with tag=4" },                        // 5000 (with the previous)
+            { 250, "circle 5 1500 after=with tag=5" },                      // 5250
+            { 10000, "circle 5 2000 tag=6" },                               // 10000
+            { 0, "circle 5 1500 after=resolve cycle=even tag=7" },          // 12000, even cycles
+            { 0, "circle 5 1500 after=resolve cycle=odd tag=8" },           // 12000, odd cycles: step 6 is previous
+            { 0, "circle 5 1500 after=resolve tag=9" },                     // 13500 either way
+            { 20000, "marker 2 pick=nontank" },                             // 20000
+            { 300, "circle 5 1500 after=resolve tag=10" },                  // a marker resolves at once: 20300
+        } };
+        for (std::uint32_t cycle = 0; cycle < 4; ++cycle)
+        {
+            std::vector<std::optional<std::uint32_t>> const at = Drill::StepOffsets(d, cycle);
+            CHECK(at.size() == d.steps.size());
+            if (at.size() != d.steps.size())
+                return;
+            CHECK(at[0] == 1000u && at[1] == 3000u && at[2] == 5000u && at[3] == 5000u && at[4] == 5250u);
+            CHECK(at[5] == 10000u);
+            bool const even = cycle % 2 == 0;
+            CHECK(at[6].has_value() == even && at[7].has_value() == !even);
+            CHECK((even ? at[6] : at[7]) == 12000u);
+            CHECK(at[8] == 13500u);
+            CHECK(at[9] == 20000u && at[10] == 20300u);
+        }
+        // An after= step with nothing before it in the cycle counts from the cycle start.
+        Drill::Def const lone = { "u", "", 10000, false, {
+            { 0, "circle 5 2000 cycle=odd tag=1" },
+            { 700, "circle 5 1500 after=resolve tag=2" },
+        } };
+        CHECK(Drill::StepOffsets(lone, 0)[1] == 700u);
+        CHECK(Drill::StepOffsets(lone, 1)[1] == 2700u);
+        CHECK(!Drill::StepOffsets(lone, 0)[0].has_value() && Drill::StepOffsets(lone, 1)[0] == 0u);
+
+        // The keys: readable values only; stripped before the `.mech test` parser, nothing else touched.
+        CHECK(Drill::PlanKeysOk("circle 5 1500 after=resolve cycle=odd"));
+        CHECK(Drill::PlanKeysOk("circle 5 1500 after=with cycle=even"));
+        CHECK(Drill::PlanKeysOk("circle 5 1500"));
+        CHECK(!Drill::PlanKeysOk("circle 5 1500 after=start"));
+        CHECK(!Drill::PlanKeysOk("circle 5 1500 cycle=2"));
+        CHECK(Drill::StripPlanKeys("circle 5 1500 after=resolve at=each cycle=odd weak=1 tag=12")
+            == "circle 5 1500 at=each weak=1 tag=12");
+        CHECK(Drill::StripPlanKeys("line 8 1500  at=last  pick=other") == "line 8 1500 at=last pick=other");
+        CHECK(Drill::WarnMs("circle 5 1500 tag=1") == 1500u && Drill::WarnMs("marker 3") == 0u);
+        CHECK(Drill::WarnMs("circle 5") == 0u);
+        CHECK(Drill::RunsInCycle("circle 5 1 cycle=even", 2) && !Drill::RunsInCycle("circle 5 1 cycle=even", 3));
+        CHECK(Drill::RunsInCycle("circle 5 1", 3) && Drill::RunsInCycle("circle 5 1 cycle=odd", 1));
+    }
+
+    // pick=other, pick=nontank, pick=any and min= (Drill::PickPool).
+    void TestPickPool()
+    {
+        using C = Drill::PickCandidate;
+        // 0 the tank (victim), 1 picked first, 2 picked second (the last), 3 and 4 fresh; distances from the source.
+        std::vector<C> const c = { { true, false, false, 20.f }, { false, true, false, 12.f },
+            { false, true, true, 3.f }, { false, false, false, 5.f }, { false, false, false, 9.f } };
+        CHECK(Drill::PickPool(c, Drill::PickRule::Any, 0.f) == (std::vector<std::size_t>{ 0, 1, 2, 3, 4 }));
+        CHECK(Drill::PickPool(c, Drill::PickRule::NonTank, 0.f) == (std::vector<std::size_t>{ 1, 2, 3, 4 }));
+        CHECK(Drill::PickPool(c, Drill::PickRule::Other, 0.f) == (std::vector<std::size_t>{ 3, 4 }));
+        // min=: the fresh ones at least 8 yd away; none that far: the farthest fresh one.
+        CHECK(Drill::PickPool(c, Drill::PickRule::Other, 8.f) == (std::vector<std::size_t>{ 4 }));
+        CHECK(Drill::PickPool(c, Drill::PickRule::Other, 15.f) == (std::vector<std::size_t>{ 4 }));
+        CHECK(Drill::PickPool(c, Drill::PickRule::NonTank, 8.f) == (std::vector<std::size_t>{ 1, 4 }));
+        // Every non-tank in the chain: any non-tank but the previous pick; only the previous pick left: it.
+        std::vector<C> const used = { { true, false, false, 1.f }, { false, true, false, 1.f },
+            { false, true, true, 1.f } };
+        CHECK(Drill::PickPool(used, Drill::PickRule::Other, 0.f) == (std::vector<std::size_t>{ 1 }));
+        std::vector<C> const one = { { true, false, false, 1.f }, { false, true, true, 1.f } };
+        CHECK(Drill::PickPool(one, Drill::PickRule::Other, 0.f) == (std::vector<std::size_t>{ 1 }));
+        // Only the tank: nobody for a non-tank pick (the runner reports no member).
+        std::vector<C> const tankOnly = { { true, false, false, 9.f } };
+        CHECK(Drill::PickPool(tankOnly, Drill::PickRule::Other, 0.f).empty());
+        CHECK(Drill::PickPool(tankOnly, Drill::PickRule::NonTank, 8.f).empty());
+        CHECK(Drill::PickPool({}, Drill::PickRule::Any, 0.f).empty());
+    }
+
+    // fix=1 / reach=1 and at=last: a frozen line toward a spot, and its far end.
+    void TestFixedLines()
+    {
+        Vec3 const src{ 10.f, 10.f, 2.f };
+        Drill::FixedLine const reach = Drill::FixLine(src, { 10.f, 22.f, 2.f }, 8.f, true, 0.f);
+        CHECK_NEAR(reach.facing, Geo::kPi / 2.f, kEps);
+        CHECK_NEAR(reach.length, 12.f, kEps);
+        Vec3 const end = Drill::LineEnd(reach.source, reach.facing, reach.length);
+        CHECK_NEAR(end.x, 10.f, kEps);
+        CHECK_NEAR(end.y, 22.f, kEps);
+        // A target closer than `size`: the line still runs `size` (through it).
+        CHECK_NEAR(Drill::FixLine(src, { 13.f, 10.f, 2.f }, 8.f, true, 0.f).length, 8.f, kEps);
+        // fix=1 without reach: `size` long, aimed through the spot (SN3: 30 yd through a non-tank).
+        Drill::FixedLine const through = Drill::FixLine(src, { 0.f, 10.f, 2.f }, 30.f, false, 0.f);
+        CHECK_NEAR(std::fabs(through.facing), Geo::kPi, kEps);
+        CHECK_NEAR(through.length, 30.f, kEps);
+        // A target on the source keeps the given facing.
+        CHECK_NEAR(Drill::FixLine(src, src, 8.f, true, 1.25f).facing, 1.25f, kEps);
+        // The target stands inside the 3 yd line at its end, the excluded 4 yd at the source stay clear.
+        Shape line = Shape::Line(reach.length, 3.f);
+        line.excludeStart = 4.f;
+        Geo::Pose const pose{ src.x, src.y, src.z, reach.facing };
+        CHECK(Geo::Contains(line, pose, { 10.f, 21.5f, 2.f }));
+        CHECK(!Geo::Contains(line, pose, { 10.f, 12.f, 2.f }));
+    }
+
+    // The dash chain on a 5-member group as the runner draws it: three dashes, each from the last one's end, to three
+    // different non-tanks at least 8 yd from the dash's start (when someone is that far).
+    void TestDashChain()
+    {
+        Drill::Def const& d = *Drill::Find("deadmines-followups");
+        std::vector<Vec3> const members = { { 0.f, 3.f, 0.f }, { 15.f, 0.f, 0.f }, { -12.f, 4.f, 0.f },
+            { 3.f, -14.f, 0.f }, { 6.f, 6.f, 0.f } };
+        std::size_t const tank = 0;
+        for (std::uint32_t seed = 1; seed <= 40; ++seed)
+        {
+            std::uint32_t rng = seed;
+            auto draw = [&rng](std::size_t n)
+            {
+                rng = rng * 1103515245u + 12345u;
+                return static_cast<std::size_t>((rng >> 16) % n);
+            };
+            std::vector<std::size_t> chain;
+            std::optional<std::size_t> last;
+            Vec3 source{ 0.f, 0.f, 0.f };   // the creature
+            for (std::size_t k = 0; k < 3; ++k)
+            {
+                std::string_view const line = d.steps[k].line;
+                Drill::PickRule const rule = Is(line, "pick", "other") ? Drill::PickRule::Other
+                    : Drill::PickRule::NonTank;
+                float const min = Key(line, "min", 0.f);
+                std::vector<Drill::PickCandidate> c;
+                for (std::size_t m = 0; m < members.size(); ++m)
+                    c.push_back({ m == tank, std::find(chain.begin(), chain.end(), m) != chain.end(), last == m,
+                        Geo::Dist2d(members[m].x, members[m].y, source.x, source.y) });
+                std::vector<std::size_t> const pool = Drill::PickPool(c, rule, min);
+                CHECK(!pool.empty());
+                if (pool.empty())
+                    return;
+                std::size_t const pick = pool[draw(pool.size())];
+                CHECK(pick != tank);
+                CHECK(std::find(chain.begin(), chain.end(), pick) == chain.end());
+                // Someone is 8 yd away from every start in this layout, so the pick is.
+                CHECK(c[pick].dist >= 8.f);
+                if (rule != Drill::PickRule::Other)
+                    chain.clear();
+                chain.push_back(pick);
+                last = pick;
+                Drill::FixedLine const dash = Drill::FixLine(source, members[pick], Parse(line).size,
+                    Is(line, "reach", "1"), 0.f);
+                Vec3 const end = Drill::LineEnd(dash.source, dash.facing, dash.length);
+                CHECK_NEAR(end.x, members[pick].x, 1e-2);
+                CHECK_NEAR(end.y, members[pick].y, 1e-2);
+                source = end;               // at=last: the next dash starts here
+            }
+            CHECK(chain.size() == 3);
+        }
+    }
+
+    // The drill table of §3.9: rows, shapes, timings (first shapes 2 s, follow-ups 1.5 s after the first resolves),
+    // anchors, tags and the alternating SN2 / SN3 follow-up.
+    void TestDeadminesFollowups()
+    {
+        Drill::Def const* found = Drill::Find("deadmines-followups");
+        CHECK(found != nullptr);
+        if (!found)
+            return;
+        Drill::Def const& d = *found;
+        CHECK(d.cycleMs == 30000 && d.defaultCycles == 2 && !d.ownerAtCreature);
+        CHECK(d.steps.size() == 13);
+        if (d.steps.size() != 13)
+            return;
+        // Every damage step carries Weakened; the drill adds dmg= (flat 1 by default).
+        for (Drill::Step const& s : d.steps)
+            CHECK(Is(s.line, "weak", "1") && Drill::DamageShape(Parse(s.line).shape));
+
+        struct Row
+        {
+            std::uint32_t at;
+            std::vector<std::size_t> first;
+            std::vector<std::size_t> followups;
+        };
+        std::vector<Row> const rows = { { 0, { 0 }, { 1, 2 } }, { 8000, { 3 }, { 4, 5 } }, { 14000, { 6 }, { 7 } },
+            { 20000, { 8 }, { 9, 10 } }, { 25000, { 11 }, { 12 } } };
+        std::set<std::uint32_t> firstTags;
+        std::set<std::uint32_t> followTags;
+        for (std::uint32_t cycle = 0; cycle < 2; ++cycle)
+        {
+            std::vector<std::optional<std::uint32_t>> const at = Drill::StepOffsets(d, cycle);
+            for (std::size_t r = 0; r < rows.size(); ++r)
+            {
+                Row const& row = rows[r];
+                std::size_t const f = row.first[0];
+                CHECK(at[f] == row.at);
+                CHECK(Parse(d.steps[f].line).ms == 2000.f);
+                CHECK(!Drill::Value(d.steps[f].line, "after"));
+                firstTags.insert(static_cast<std::uint32_t>(Key(d.steps[f].line, "tag", 0.f)));
+                float rowEnd = static_cast<float>(*at[f]) + 2000.f;
+                for (std::size_t i : row.followups)
+                {
+                    Parsed const p = Parse(d.steps[i].line);
+                    CHECK(p.ms == 1500.f);
+                    CHECK(Drill::Value(d.steps[i].line, "after").has_value());
+                    std::uint32_t const tag = static_cast<std::uint32_t>(Key(d.steps[i].line, "tag", 0.f));
+                    CHECK(Drill::FollowupTag(tag));
+                    followTags.insert(tag);
+                    if (at[i])
+                        rowEnd = std::max(rowEnd, static_cast<float>(*at[i]) + p.ms);
+                }
+                // The next row starts after this one's last resolve, at least 1 s later.
+                std::uint32_t const next = r + 1 < rows.size() ? rows[r + 1].at : d.cycleMs;
+                CHECK(rowEnd + 1000.f <= static_cast<float>(next));
+            }
+            // Each follow-up resolves 1.5 s after the shape before it (the first, or the previous dash).
+            auto resolve = [&](std::size_t i) { return static_cast<float>(*at[i]) + Parse(d.steps[i].line).ms; };
+            CHECK_NEAR(resolve(1) - resolve(0), 1500.f, kEps);
+            CHECK_NEAR(resolve(2) - resolve(1), 1500.f, kEps);
+            CHECK_NEAR(resolve(4) - resolve(3), 1500.f, kEps);
+            CHECK_NEAR(resolve(5) - resolve(3), 1500.f, kEps);       // both aftershocks together
+            CHECK_NEAR(resolve(7) - resolve(6), 1500.f, kEps);
+            std::size_t const sn = cycle % 2 == 0 ? 9 : 10;
+            CHECK(at[9].has_value() == (cycle % 2 == 0) && at[10].has_value() == (cycle % 2 == 1));
+            CHECK_NEAR(resolve(sn) - resolve(8), 1500.f, kEps);
+            CHECK_NEAR(resolve(12) - resolve(11), 1500.f, kEps);
+            // The second Cave In wave registers as the first lands: positions are taken then.
+            CHECK(at[12] == 27000u);
+        }
+        // First-shape and follow-up tags never share a value (the sweep tells them apart).
+        CHECK(firstTags == (std::set<std::uint32_t>{ 1, 4, 6, 8, 11 }));
+        CHECK(followTags == (std::set<std::uint32_t>{ 2, 3, 5, 7, 9, 10, 12 }));
+        for (std::uint32_t t : firstTags)
+            CHECK(!Drill::FollowupTag(t));
+
+        // SM4: 3 yd lines, 4 yd excluded at the start; first from the creature to a non-tank >= 8 yd, the follow-ups
+        // from the last end to a non-tank the chain has not hit, ending at the target.
+        for (std::size_t i = 0; i < 3; ++i)
+        {
+            std::string_view const l = d.steps[i].line;
+            CHECK(Parse(l).shape == "line" && Key(l, "width", 0.f) == 3.f && Key(l, "exclude", 0.f) == 4.f);
+            CHECK(Is(l, "to", "member") && Is(l, "reach", "1") && Key(l, "min", 0.f) == 8.f);
+            CHECK(Is(l, "pick", i == 0 ? "nontank" : "other"));
+            CHECK(i == 0 ? Is(l, "anchor", "target") : Is(l, "at", "last") && Is(l, "after", "resolve"));
+        }
+        // SM7 + SM8: a 4 x 25 frontal line, then two at +-30 degrees, both from the first's resolve.
+        for (std::size_t i = 3; i < 6; ++i)
+        {
+            std::string_view const l = d.steps[i].line;
+            CHECK(Parse(l).shape == "frontal" && Parse(l).size == 25.f && Is(l, "line", "1"));
+            CHECK(Key(l, "width", 0.f) == 4.f);
+        }
+        CHECK(!Drill::Value(d.steps[3].line, "offset"));
+        CHECK(Signed(*Drill::Value(d.steps[4].line, "offset")) == 30.f && Is(d.steps[4].line, "after", "resolve"));
+        CHECK(Signed(*Drill::Value(d.steps[5].line, "offset")) == -30.f && Is(d.steps[5].line, "after", "with"));
+        // SM10 + SM11: donut 5 / 14 on the creature, then circle 6 on it.
+        CHECK(Parse(d.steps[6].line).shape == "donut" && Parse(d.steps[6].line).size == 14.f);
+        CHECK(Key(d.steps[6].line, "inner", 0.f) == 5.f && Is(d.steps[6].line, "anchor", "target"));
+        CHECK(Parse(d.steps[7].line).shape == "circle" && Parse(d.steps[7].line).size == 6.f);
+        CHECK(Is(d.steps[7].line, "anchor", "target"));
+        // The Haft Slam circle covers the donut's safe hole: in (within 5), then out (beyond 6).
+        CHECK(Parse(d.steps[7].line).size > Key(d.steps[6].line, "inner", 0.f));
+        // SN1, then SN2 (even cycles) or SN3 (odd cycles).
+        CHECK(Parse(d.steps[8].line).shape == "circle" && Parse(d.steps[8].line).size == 8.f);
+        CHECK(Is(d.steps[8].line, "anchor", "target"));
+        CHECK(Parse(d.steps[9].line).shape == "frontal" && Parse(d.steps[9].line).size == 10.f);
+        CHECK(Key(d.steps[9].line, "angle", 0.f) == 90.f && Is(d.steps[9].line, "cycle", "even"));
+        std::string_view const runaway = d.steps[10].line;
+        CHECK(Parse(runaway).shape == "line" && Parse(runaway).size == 30.f && Key(runaway, "width", 0.f) == 4.f);
+        CHECK(Is(runaway, "to", "member") && Is(runaway, "pick", "nontank") && Is(runaway, "fix", "1"));
+        CHECK(Is(runaway, "anchor", "target") && Key(runaway, "exclude", 0.f) == 4.f && Is(runaway, "cycle", "odd"));
+        CHECK(!Drill::Value(runaway, "reach"));
+        // RZ1 + RZ10: circle 5 under every member, twice.
+        for (std::size_t i : { std::size_t(11), std::size_t(12) })
+            CHECK(Parse(d.steps[i].line).shape == "circle" && Parse(d.steps[i].line).size == 5.f
+                && Is(d.steps[i].line, "at", "each"));
+        // The `.mech test` line the runner parses keeps every key but after= and cycle=.
+        CHECK(Drill::StripPlanKeys(d.steps[10].line).find("cycle=") == std::string::npos);
+        CHECK(Drill::StripPlanKeys(d.steps[10].line).find("fix=1") != std::string::npos);
+    }
+
     void TestNumberParsing()
     {
         CHECK(Drill::Number("12").value_or(-1.f) == 12.f);
@@ -574,5 +876,10 @@ int main()
     TestRas();
     TestNumberParsing();
     TestNoDrillShadowsADescriptorEntry();
+    TestStepOffsetsGrammar();
+    TestPickPool();
+    TestFixedLines();
+    TestDashChain();
+    TestDeadminesFollowups();
     return Report("drill_test");
 }
