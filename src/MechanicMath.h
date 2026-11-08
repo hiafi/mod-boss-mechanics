@@ -434,6 +434,23 @@ namespace BossMechanics
         return { prevEnd, strip.offset + width - prevEnd };
     }
 
+    // ExceptOne's free lane drawn as a Decoy() (LaneBuilder::DecoyFree): the part of it that no real lane covers, so
+    // the decoy and its neighbors tile the frame with no overlap drawn twice, exactly as the real lanes do among
+    // themselves (CoverLaneDrawnStrip). The last lane is clamped and overlaps the one before it, so a free lane next
+    // to it, or a free last lane, is narrower than `width`; never empty for CoverLaneOffsets' layouts.
+    inline LaneStrip DecoyLaneStrip(std::vector<float> const& offsets, float width, std::uint32_t freeIndex)
+    {
+        if (freeIndex >= offsets.size())
+            return {};
+        float lo = offsets[freeIndex];
+        float hi = lo + width;
+        if (freeIndex > 0)
+            lo = std::max(lo, offsets[freeIndex - 1] + width);
+        if (freeIndex + 1 < offsets.size())
+            hi = std::min(hi, offsets[freeIndex + 1]);
+        return { lo, std::max(0.f, hi - lo) };
+    }
+
     // The overlap of an X lane and a Y lane, as a Line along the frame's X axis.
     inline LanePlacement PlaceCrossing(Frame const& f, LaneRect const& xLane, LaneRect const& yLane)
     {

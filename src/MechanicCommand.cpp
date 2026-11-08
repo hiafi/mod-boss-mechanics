@@ -9,8 +9,8 @@
  *                 [seed=]
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
- *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt> [cycles=3] [seed=] [dmg=1]
- *               [self=0]
+ *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes> [cycles=3]
+ *               [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -45,6 +45,12 @@
  * Shadowfang Keep build §3.9 (drill `sfk-hunt`): `hunt` summons a chaser at the selected unit that walks at a member
  * with a catch circle on it, and `soak bell=<n>` is an alarm bell that ends the hunt when filled and lands a circle
  * there (RegisterHunt, RegisterBell; MechanicDrill.h "the chase").
+ *
+ * Scholomance build (WP-X, WP-G §3.9, drill `scholomance-shapes`): `decoy=1` registers a shape as a Decoy() (lanes
+ * safe=1: the free lane marked as one), `grid=<n> apart= decoys=` lays n x n circles with random decoys
+ * (RegisterGrid), `away=<yd>` moves a point landing exactly that far at a random bearing, `at=prev` lands on the last
+ * point-anchored circle's centre, and `at=predict lead=<ms>` where a member will be (PredictedSpot; MechanicDrill.h
+ * "Scholomance shapes").
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -117,8 +123,9 @@ namespace
 
     // The dice of one command. Delayed registrations share it, so they keep drawing from the same seeded sequence.
     // `lastMember` is the member the last pick landed on (`pick=same`); `chain` the members picked since the last pick
-    // that was not `pick=other`; `lastEnd` the far end of the last fixed line registered (`at=last`); `hunt` the last
-    // `hunt` registered (a `soak bell=` ends it).
+    // that was not `pick=other`; `lastEnd` the far end of the last fixed line registered (`at=last`); `lastCircle` the
+    // centre of the last point-anchored circle registered (`at=prev`); `hunt` the last `hunt` registered (a `soak
+    // bell=` ends it).
     struct Dice
     {
         explicit Dice(uint32 seed) : rng(seed) { }
@@ -127,6 +134,7 @@ namespace
         ObjectGuid lastMember;
         std::vector<ObjectGuid> chain;
         std::optional<Position> lastEnd;
+        std::optional<Position> lastCircle;
         HuntPtr hunt;
     };
     using RngPtr = std::shared_ptr<Dice>;
@@ -460,6 +468,15 @@ namespace
         float bellApart = 15.f;         // soak apart=: the bell points' spacing
         float landRadius = 6.f;         // soak land=: the landing circle at the rung bell
         Milliseconds jump{ 2000 };      // soak jump=: the bound to the bell (the landing's warning)
+        // Scholomance build (WP-X decoy; WP-G §3.9 shapes; MechanicDrill.h "Scholomance shapes")
+        bool decoy = false;             // decoy=1: Mechanic::Decoy (lanes safe=1: the free lane, DecoyFree)
+        uint32 grid = 0;                // circle grid=<n>: n x n circles `gridApart` apart (0: one circle)
+        float gridApart = 0.f;
+        uint32 decoys = 0;              // circle grid= decoys=<k>: k of them are decoys
+        float away = 0.f;               // away=<yd>: a point anchor moved exactly this far at a random bearing
+        bool atPrev = false;            // at=prev: the centre of the last point-anchored circle (Dice::lastCircle)
+        bool atPredict = false;         // at=predict: where a member will be `lead` ms from now
+        Milliseconds lead{ Drill::kDefaultPredictLeadMs };
     };
 
     bool IsShapeName(std::string const& s)
@@ -531,6 +548,12 @@ namespace
                 if (Unit* unit = ObjectAccessor::GetUnit(*owner, spec.selected))
                     ref.Park(unit);
         };
+        // decoy=1 (WP-X): in the registering statement, before the ref commits.
+        auto decoy = [&spec](MechanicRef& ref)
+        {
+            if (spec.decoy)
+                ref.Decoy();
+        };
         // stack/soak shape=line: a lane centered on a point anchor along the GM's facing (on a unit: from the unit).
         auto laneSpec = [&spec, &anchor, anchorUnit, &here]()
         {
@@ -548,6 +571,7 @@ namespace
             MechanicRef ref = Mechanic::Circle(owner, anchor, spec.size, spec.warn);
             ApplyCommon(ref, spec, true, true);
             park(ref);
+            decoy(ref);
             keep(ref);
         }
         else if (s == "donut")
@@ -555,6 +579,7 @@ namespace
             MechanicRef ref = Mechanic::Donut(owner, anchor, spec.inner, spec.size, spec.warn);
             ApplyCommon(ref, spec, true, true);
             park(ref);
+            decoy(ref);
             keep(ref);
         }
         else if (s == "cone" || s == "rearcone")
@@ -571,6 +596,7 @@ namespace
                 ref.FollowFacing();
             ApplyCommon(ref, spec, true, true);
             park(ref);
+            decoy(ref);
             keep(ref);
         }
         else if (s == "frontal")
@@ -587,6 +613,7 @@ namespace
                 ref.FacingOffset(spec.offset);
             ref.TankExempt();
             ApplyCommon(ref, spec, true, true);
+            decoy(ref);
             keep(ref);
         }
         else if (s == "line" || s == "projectile")
@@ -615,6 +642,7 @@ namespace
             ApplyCommon(ref, spec, true, s == "line");
             if (s == "line")
                 park(ref);
+            decoy(ref);
             keep(ref);
         }
         else if (s == "mine")
@@ -641,7 +669,11 @@ namespace
             {
                 LaneBuilder lanes = Mechanic::RoomFrame(owner, frame);
                 if (spec.safe)
+                {
                     lanes.ExceptOne(spec.size, spec.warn, spec.axis);
+                    if (spec.decoy)
+                        lanes.DecoyFree();
+                }
                 else
                     lanes.Lanes(spec.axis, { spec.count, spec.size, spec.gap }, spec.warn);
                 if (spec.cross)
@@ -1030,9 +1062,49 @@ namespace
         return ids;
     }
 
-    // One repeat of `.mech test`: resolves the landing (at=member|group|gm|last|each, anchor=member, to=, shift=,
-    // scatter=, fix=) and the spot ring now, so a delayed repeat follows the bots, then registers. `hunt` and
-    // `soak bell=` place themselves (RegisterHunt, RegisterBell).
+    // `at=predict` (Scholomance build §3.9, IB1): where `p` will stand `lead` from now at its heading and speed, read
+    // from its movement keys (a bot's spline move sets forward and faces along the path), snapped to the floor; where
+    // it stands while it does not move (MechanicDrill.h MoveHeading, PredictSpot).
+    Position PredictedSpot(Creature* owner, Player const* p, Milliseconds lead, float facing)
+    {
+        uint32 const flags = p->GetUnitMovementFlags();
+        bool const forward = (flags & MOVEMENTFLAG_FORWARD) != 0;
+        bool const back = (flags & MOVEMENTFLAG_BACKWARD) != 0;
+        std::optional<float> const heading = Drill::MoveHeading(p->GetOrientation(), forward, back,
+            (flags & MOVEMENTFLAG_STRAFE_LEFT) != 0, (flags & MOVEMENTFLAG_STRAFE_RIGHT) != 0);
+        UnitMoveType const type = (flags & MOVEMENTFLAG_WALKING) ? MOVE_WALK : back && !forward ? MOVE_RUN_BACK
+            : MOVE_RUN;
+        Geo::Vec3 const at = Drill::PredictSpot({ p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() },
+            heading, p->GetSpeed(type), static_cast<uint32>(std::max<int64>(lead.count(), 0)));
+        return Position(at.x, at.y, GroundZ(owner, at.x, at.y, at.z), facing);
+    }
+
+    // `grid=<n>` (Scholomance build §3.9, JB1 heroic): n x n circles around the anchor point, `decoys` of them a
+    // Decoy() picked by the dice. The grid's centre is the next `at=prev`.
+    std::vector<uint32> RegisterGrid(Creature* owner, TestSpec const& spec, Dice& dice, std::string& err)
+    {
+        std::vector<Geo::Vec3> const points = Drill::GridPoints({ spec.point.GetPositionX(),
+            spec.point.GetPositionY(), spec.point.GetPositionZ() }, spec.facing, spec.grid, spec.gridApart);
+        std::vector<uint32> const decoys = Drill::PickDistinct(static_cast<uint32>(points.size()), spec.decoys,
+            [&dice](uint32 n) { return dice.rng.Index(n); });
+        std::vector<uint32> ids;
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            TestSpec one = spec;
+            one.grid = 0;
+            one.point = Position(points[i].x, points[i].y, GroundZ(owner, points[i].x, points[i].y, points[i].z),
+                spec.facing);
+            one.decoy = std::find(decoys.begin(), decoys.end(), static_cast<uint32>(i)) != decoys.end();
+            std::vector<uint32> const made = RegisterTest(owner, one, err);
+            ids.insert(ids.end(), made.begin(), made.end());
+        }
+        dice.lastCircle = spec.point;
+        return ids;
+    }
+
+    // One repeat of `.mech test`: resolves the landing (at=member|group|gm|last|each|prev|predict, anchor=member, to=,
+    // away=, shift=, scatter=, fix=) and the spot ring now, so a delayed repeat follows the bots, then registers.
+    // `hunt` and `soak bell=` place themselves (RegisterHunt, RegisterBell); `grid=` lays its circles (RegisterGrid).
     std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
     {
         if (spec.shape == "hunt")
@@ -1067,6 +1139,15 @@ namespace
             // The end of the last fixed line; none yet: where the selected unit stands now.
             if (dice.lastEnd)
                 spec.point = *dice.lastEnd;
+            else if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+                spec.point = selected->GetPosition();
+            spec.point.SetOrientation(spec.facing);
+        }
+        if (spec.atPrev)
+        {
+            // The centre of the last point-anchored circle; none yet: where the selected unit stands now.
+            if (dice.lastCircle)
+                spec.point = *dice.lastCircle;
             else if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
                 spec.point = selected->GetPosition();
             spec.point.SetOrientation(spec.facing);
@@ -1106,6 +1187,24 @@ namespace
             }
             spec.point = gm->GetPosition();
             spec.point.SetOrientation(spec.facing);
+        }
+        else if (spec.atPredict)
+        {
+            Player* member = PickMember(owner, spec, dice);
+            if (!member)
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            spec.point = PredictedSpot(owner, member, spec.lead, spec.facing);
+            spec.target = member->GetGUID();
+        }
+        if (spec.away > 0.f && !spec.unitAnchor)
+        {
+            // Exactly `away` yd from the landing at a random bearing (before a line's source is read: GD4's portal).
+            Geo::Vec3 const p = Drill::Away({ spec.point.GetPositionX(), spec.point.GetPositionY(),
+                spec.point.GetPositionZ() }, rng.Float(0.f, Geo::kTwoPi), spec.away);
+            spec.point.Relocate(p.x, p.y, GroundZ(owner, p.x, p.y, p.z));
         }
         if (spec.anchorMember)
         {
@@ -1193,7 +1292,12 @@ namespace
                 spec.spots[members[i]->GetGUID()] = Position(ring[i].x, ring[i].y,
                     GroundZ(owner, ring[i].x, ring[i].y, ring[i].z), 0.f);
         }
+        if (spec.grid)
+            return RegisterGrid(owner, spec, dice, err);
         std::vector<uint32> ids = RegisterTest(owner, spec, err);
+        // A point-anchored circle leaves its centre for the next `at=prev`.
+        if (!ids.empty() && spec.shape == "circle" && !spec.unitAnchor)
+            dice.lastCircle = spec.point;
         // A fixed line (a point source along a fixed facing) leaves its far end for the next `at=last`.
         if (!ids.empty() && (spec.shape == "line" || spec.shape == "projectile") && !spec.unitAnchor
             && spec.to == TestSpec::To::None)
@@ -1502,6 +1606,26 @@ namespace
         }
         if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "line")
             spec.park = opt.Bool("park", false);
+        // decoy=1 (Scholomance WP-X): drawn, hits nobody, not in the bot view (lanes: the safe=1 lane drawn as one).
+        if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "frontal" || s == "line"
+            || s == "projectile" || s == "lanes")
+            spec.decoy = opt.Bool("decoy", false);
+        if (s == "circle" && opt.Has("grid"))
+        {
+            int32 const grid = opt.Int("grid", 0);
+            if (grid < 2 || grid > static_cast<int32>(Drill::kMaxGrid))
+                opt.MarkBad("grid");
+            else
+            {
+                spec.grid = static_cast<uint32>(grid);
+                spec.gridApart = opt.Float("apart", spec.size * 1.375f);
+                int32 const decoys = opt.Int("decoys", 0);
+                if (decoys < 0 || decoys >= grid * grid)
+                    opt.MarkBad("decoys");
+                else
+                    spec.decoys = static_cast<uint32>(decoys);
+            }
+        }
         if (s == "cone" || s == "rearcone" || s == "line" || s == "projectile")
             spec.follow = opt.Bool("follow", false);
 
@@ -1593,6 +1717,9 @@ namespace
         repeat = static_cast<uint32>(std::clamp<int32>(opt.Int("repeat", 1), 1, kMaxRepeat));
         every = opt.Ms("every", Milliseconds(1000));
         spec.scatter = std::max(0.f, opt.Float("scatter", 0.f));
+        spec.away = opt.Float("away", 0.f);
+        if (spec.away < 0.f)
+            opt.MarkBad("away");
         std::string const at = opt.Str("at", "");
         if (at == "member")
             spec.atMember = true;
@@ -1604,6 +1731,13 @@ namespace
             spec.atLast = true;
         else if (at == "each")
             spec.atEach = true;
+        else if (at == "prev")
+            spec.atPrev = true;
+        else if (at == "predict")
+        {
+            spec.atPredict = true;
+            spec.lead = opt.Ms("lead", Milliseconds(Drill::kDefaultPredictLeadMs));
+        }
         else if (!at.empty())
             opt.MarkBad("at");
         std::string const pick = opt.Str("pick", "any");
@@ -1629,7 +1763,8 @@ namespace
         spec.point.SetOrientation(spec.facing);
         spec.target = selected->GetGUID();
         spec.selected = selected->GetGUID();
-        bool const atPoint = spec.atMember || spec.atGroup || spec.atGm || spec.atLast || spec.atEach;
+        bool const atPoint = spec.atMember || spec.atGroup || spec.atGm || spec.atLast || spec.atEach || spec.atPrev
+            || spec.atPredict;
         if (s == "frontal")
         {
             if (selected == gm || !selected->IsCreature())
@@ -1681,6 +1816,20 @@ namespace
             return "a frontal takes rear=1 or offset=, not both";
         if (spec.atEach && (s == "spot" || s == "spread" || s == "runout" || s == "bait" || s == "holdstill"))
             return "at=each puts a zone, stack or soak under every member";
+        if (spec.away > 0.f && (spec.unitAnchor || spec.anchorMember))
+            return "away= moves a point anchor; leave anchor= out";
+        if (spec.decoy && s == "lanes" && !spec.safe)
+            return "decoy=1 on lanes draws the safe=1 lane as a decoy: add safe=1";
+        if (spec.grid)
+        {
+            if (spec.decoy)
+                return "grid= makes its decoys with decoys=<n>; decoy=1 is for one shape";
+            if (spec.unitAnchor || spec.anchorMember || spec.atEach)
+                return "grid= lays its circles around a point: leave anchor= and at=each out";
+            if (!Drill::GridCovers(spec.size, spec.gridApart))
+                return Acore::StringFormat("grid= apart= must be above 0 and at most {:.2f} (radius x 1.41), so the "
+                    "circles leave no gap and a decoy is the only safe cell", spec.size * std::sqrt(2.f));
+        }
         if (s == "hunt")
         {
             if (selected == gm)
@@ -2661,8 +2810,8 @@ public:
             return false;
         }
 
-        bool const landsOnMembers = spec.atMember || spec.atGroup || spec.atEach || spec.anchorMember
-            || spec.to == TestSpec::To::Member || s == "spot" || s == "hunt" || spec.bells;
+        bool const landsOnMembers = spec.atMember || spec.atGroup || spec.atEach || spec.atPredict
+            || spec.anchorMember || spec.to == TestSpec::To::Member || s == "spot" || s == "hunt" || spec.bells;
         if (landsOnMembers && GroupMembers(owner, spec.gm, spec.includeGm).empty())
         {
             handler->SendErrorMessage("{}", kNoMemberMessage);
@@ -2714,11 +2863,13 @@ public:
         ReferenceHealth const ref = GetReferenceHealthProvider().Get(key);
         handler->PSendSysMessage("Reference health ({}): non-tank {}, tank {}.", RefHealth::Describe(key), ref.nonTank,
             ref.tank);
-        if (spec.atMember || spec.anchorMember || spec.to == TestSpec::To::Member || spec.scatter > 0.f
-            || s == "spot")
+        if (spec.atMember || spec.atPredict || spec.anchorMember || spec.to == TestSpec::To::Member
+            || spec.scatter > 0.f || spec.away > 0.f || spec.decoys || s == "spot")
             handler->PSendSysMessage("Landing on {} (seed {}; seed= repeats the picks).",
-                spec.scatter > 0.f && !spec.atMember ? "scattered points"
-                    : "group members, picked as each repeat registers", rng->rng.Seed());
+                (spec.scatter > 0.f || spec.away > 0.f || spec.decoys) && !spec.atMember && !spec.atPredict
+                    ? "random points" : "group members, picked as each repeat registers", rng->rng.Seed());
+        if (spec.decoy || spec.decoys)
+            handler->PSendSysMessage("Decoys are drawn like the rest but hit nobody, and bots do not see them.");
         if (s == "bait")
             handler->PSendSysMessage("The test owner moved to {}: the bait lands on whoever is farthest from it.",
                 spec.atGm || selected == gm ? "you" : selected->GetName());
@@ -3073,11 +3224,11 @@ public:
             reg->ForEachActive(now, [&](ActiveMechanic const& m)
             {
                 ++shown;
-                handler->PSendSysMessage("#{} {} {} {} tag {} | resolve {:+} ms, expire {:+} ms | {} markers{}{}{}",
+                handler->PSendSysMessage("#{} {} {} {} tag {} | resolve {:+} ms, expire {:+} ms | {} markers{}{}{}{}",
                     m.id, KindName(m.kind), DescribeShape(m.shape), ColorName(m.color), m.tag,
                     (m.resolveAt - now).count(), (m.expireAt - now).count(), m.markers.size(),
                     m.projectile ? " projectile" : "", m.mine ? (m.mine->armed ? " mine(armed)" : " mine") : "",
-                    m.persist ? " persistent" : "");
+                    m.persist ? " persistent" : "", m.decoy ? " decoy" : "");
             });
         handler->PSendSysMessage("{} active mechanic(s) on this map.", shown);
         return true;

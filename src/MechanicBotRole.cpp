@@ -348,7 +348,8 @@ namespace BossMechanics
         // the victim take them: drag out of those too (STAGE-M3-R-REPORT n-2).
         reg.ForEachActive(now, [&](ActiveMechanic const& m)
         {
-            if (!m.IsShapeKind() || !m.persist || m.mine || reg.IsEligible(m, bot) || reg.EligiblePlayers(m).empty())
+            if (!m.IsShapeKind() || !m.persist || m.mine || m.decoy || reg.IsEligible(m, bot)
+                || reg.EligiblePlayers(m).empty())
                 return;
             Solver::Hazard h;
             h.id = m.id;

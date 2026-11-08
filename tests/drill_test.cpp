@@ -216,7 +216,7 @@ namespace
             }
         }
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
-            "sfk-hunt" })
+            "sfk-hunt", "scholomance-shapes" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));

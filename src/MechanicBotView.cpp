@@ -314,6 +314,8 @@ namespace BossMechanics
                 std::vector<Solver::Hazard> extra;
                 _reg.ForEachActive(_now - _opt.postResolveHold, [&](ActiveMechanic const& m)
                 {
+                    if (m.decoy)
+                        return;     // a decoy is empty floor to the bots (Judge::DecoyFits)
                     if (m.IsShapeKind())
                     {
                         ShapeTasks(m);
@@ -1066,7 +1068,7 @@ namespace BossMechanics
         std::unordered_set<uint32> kept;     // hazard ids in the view (lane rects are filtered by them)
         reg.ForEachActive(now - opt.postResolveHold, [&](ActiveMechanic const& m)
         {
-            if (!m.IsShapeKind())
+            if (!m.IsShapeKind() || m.decoy)    // a decoy is empty floor to the bots (Judge::DecoyFits)
                 return;
             if (AnchoredOn(m, self) || !reg.IsEligible(m, bot) || reg.IsTankExempted(m, bot))
                 return;
@@ -1192,7 +1194,8 @@ namespace BossMechanics
         if (!turnsWithMe)
             reg.ForEachActive(now, [&](ActiveMechanic const& m)
             {
-                turnsWithMe = turnsWithMe || (m.anchor.IsUnit() && m.anchor.unit == self && m.anchor.followFacing);
+                turnsWithMe = turnsWithMe
+                    || (!m.decoy && m.anchor.IsUnit() && m.anchor.unit == self && m.anchor.followFacing);
             });
         float const facing = plan.hasFacing ? plan.facing : (turnsWithMe ? bot->GetOrientation() : 0.f);
         std::unordered_set<uint32> published;

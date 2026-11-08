@@ -525,6 +525,7 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
     facts.tank = PlayerbotAI::IsTank(bot);
     facts.healer = PlayerbotAI::IsHeal(bot);
     facts.melee = PlayerbotAI::IsMelee(bot);
+    facts.guid = bot->GetGUID().GetRawValue();
     Desc::Context const ctx = ContextOf(v, bot);
     TargetRules::Focus f;
     for (int i = 0; i <= kMaxRepicks; ++i)

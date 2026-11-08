@@ -461,10 +461,10 @@ namespace
 
     // ---- targets and the ignore list ---------------------------------------------------------------------------
 
-    BotFacts const kTank{ true, false, false };
-    BotFacts const kHealer{ false, true, false };
-    BotFacts const kMelee{ false, false, true };
-    BotFacts const kRanged{ false, false, false };
+    BotFacts const kTank{ true, false, false, 0 };
+    BotFacts const kHealer{ false, true, false, 0 };
+    BotFacts const kMelee{ false, false, true, 0 };
+    BotFacts const kRanged{ false, false, false, 0 };
 
     void TestFits()
     {
@@ -584,6 +584,20 @@ namespace
         both.targets.push_back(TargetEntry::ForUnit(30, 1));
         std::optional<std::size_t> const m = MatchTarget(both, u4[2], kMelee, {});
         CHECK(u4[2].guid == 30 && m == std::optional<std::size_t>(1));
+
+        // OnlyFor (Jandice's Shell Game guesses): an entry for one bot leaves every other bot alone.
+        Descriptor guess;
+        guess.targets.push_back(TargetEntry::ForUnit(31, 2, Who::Any).OnlyFor(7001));
+        guess.targets.push_back(TargetEntry::ForUnit(32, 2, Who::Any).OnlyFor(7002));
+        BotFacts botA = kMelee;
+        botA.guid = 7001;
+        BotFacts botB = kRanged;
+        botB.guid = 7002;
+        CHECK(PickedGuid(guess, c4, BOSS, botA) == 31);
+        CHECK(PickedGuid(guess, c4, BOSS, botB) == 32);
+        CHECK(PickedGuid(guess, c4, BOSS, kMelee) == BOSS);     // no entry of its own: the boss, as ever
+        UnitFacts const& u31 = *std::find_if(u4.begin(), u4.end(), [](UnitFacts const& u) { return u.guid == 31; });
+        CHECK(!MatchTarget(guess, u31, kTank, {}));
 
         // Break-out (Ras HM tombs, Nerub'enkan's cocoon): the tank's prison, then the healer's, then the others'.
         std::vector<UnitFacts> u5 = { Facts(BOSS, E_BOSS), Facts(40, 500), Facts(41, 500), Facts(42, 500) };

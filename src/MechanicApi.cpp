@@ -536,6 +536,15 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::Decoy()
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("Decoy", cur && !cur->committed
+            && Judge::DecoyFits(cur->kind, cur->mine.has_value())))
+            m->decoy = true;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::OnHit(std::function<void(Unit* hit)> fn)
     {
         if (ActiveMechanic* m = Edit("OnHit", true))
@@ -568,10 +577,11 @@ namespace BossMechanics
     }
 
     LaneBuilder::LaneBuilder(LaneBuilder&& other) noexcept : _map(other._map), _owner(other._owner),
-        _laneSet(other._laneSet), _created(std::move(other._created))
+        _laneSet(other._laneSet), _created(std::move(other._created)), _free(std::move(other._free))
     {
         other._map = nullptr;
         other._created.clear();
+        other._free.reset();
     }
 
     std::vector<MechanicHandle> LaneBuilder::Handles() const
@@ -701,6 +711,40 @@ namespace BossMechanics
             }
         }
         ColorSecondAxis(axis, firstNew);
+        if (freeIndex < offsets.size())
+        {
+            LaneStrip const strip = DecoyLaneStrip(offsets, width, freeIndex);
+            _free = FreeLane{ PlaceLane(frame, { axis, strip.offset, strip.width }), warn, firstNew };
+        }
+        return *this;
+    }
+
+    LaneBuilder& LaneBuilder::DecoyFree()
+    {
+        Registry* reg = _map ? Registry::Get(_map) : nullptr;
+        LaneSet const* ls = reg ? reg->FindLaneSet(_laneSet) : nullptr;
+        if (!ls)
+            return *this;
+        if (!_free || _free->place.width <= 0.f)
+        {
+            LOG_WARN(kLog, "RoomFrame {}: DecoyFree needs an ExceptOne before it (once per ExceptOne); ignored",
+                _laneSet);
+            return *this;
+        }
+        FreeLane const free = *_free;
+        _free.reset();
+        // The color of that call's real lanes (the second axis of a set draws in crossLanes).
+        std::optional<BossMechanics::Color> color;
+        if (free.firstLane < ls->lanes.size())
+            if (ActiveMechanic const* lane = reg->Find(ls->lanes[free.firstLane]))
+                color = lane->color;
+        uint32 const id = AddLine(free.place, free.warn, Milliseconds(0));
+        if (!id)
+            return *this;
+        MechanicRef decoy(_map, id, false);
+        decoy.Decoy();
+        if (color)
+            decoy.Color(*color);
         return *this;
     }
 
