@@ -418,6 +418,14 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::OneClaimPerBot()
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("OneClaimPerBot", cur && cur->kind == Kind::Soak))
+            m->oneClaimPerBot = true;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::Count(uint8 n)
     {
         ActiveMechanic const* cur = Get();

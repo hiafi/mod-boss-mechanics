@@ -121,6 +121,9 @@ namespace BossMechanics
         // bot-facing
         MechanicRef& Eligible(Eligibility const& eligibility);
         MechanicRef& Order(Ordering const& ordering);   // Soak, Bait
+        // Soak: among the live Soaks of this tag that set it too, a bot claims at most one (many small pickups at once,
+        // Malicia's souls); without it each Soak ranks its claimers alone and one bot can claim them all.
+        MechanicRef& OneClaimPerBot();
         MechanicRef& Count(uint8 n);                    // Spread, RunOut: n random eligible targets
         MechanicRef& Targets(GuidSet const& players);   // Spread, RunOut, HoldStill
         MechanicRef& SelfTrigger(uint32 auraSpell, uint8 minStacks);    // Spread, RunOut

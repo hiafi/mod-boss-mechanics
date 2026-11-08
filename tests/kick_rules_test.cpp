@@ -324,6 +324,17 @@ namespace
         dnk.doNotKick = true;
         dnk.listed = true;                                      // a kick stops the do-not-kick cast too
         CHECK(JudgeStockKick(dnk) == StockVerdict::DoNotKick);
+
+        // RV-1: an encounter unit channeling something uninterruptible (Corvane's leash). A real kick stops nothing
+        // and is dropped; a stun or silence used as an interrupt is judged as before (a stun still stops a channel).
+        TargetCast leash;
+        leash.uninterruptibleOnly = true;
+        CHECK(JudgeStockKick(leash) == StockVerdict::Nothing);
+        CHECK(JudgeStockKick(leash, true) == StockVerdict::Nothing);
+        CHECK(JudgeStockKick(leash, false) == StockVerdict::Allow);
+        CHECK(Classify(leash, false) == Outcome::None);         // nothing interruptible: the counters ignore it
+        TargetCast idle;                                        // not casting at all (or not an encounter unit)
+        CHECK(JudgeStockKick(idle, true) == StockVerdict::Allow);
     }
 
     void TestClassify()

@@ -105,9 +105,9 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `Damage(pct)`, `TankDamage(pct)`, `FlatDamage(n)`, `School(s)`, `Spell(id)`, `Rider(spellId)`, `Weakened()`,
 `WeakenedOncePerPlayer()`, `Persistent(duration, tick)`, `Projectile(speed)`, `ProjectileUnit(unit)`,
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
-`AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `Count(n)`, `Targets(set)`,
-`SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`, `NoTelegraph()`,
-`NoFillTimer()`, `Decoy()`, `OnHit(fn)`, `OnResolve(fn)`.
+`AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`, `Count(n)`,
+`Targets(set)`, `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`,
+`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `OnHit(fn)`, `OnResolve(fn)`.
 
 M3 options:
 
@@ -209,6 +209,11 @@ Rules added in M3 (the pure rules live in `src/MechanicJudge.h`, tested by `test
   Frontals still hit pets (damage only, never ledgered).
 - **Soak needs at least `count` bodies**: fewer posts one `MissedSoak`; extra bodies never fail. Bots claim exactly
   `count` and everyone else keeps out of it. `count` 0 never fails.
+- **`OneClaimPerBot()`** (Soak): each Soak normally ranks its claimers alone, so with several small pickups live at
+  once (Malicia's souls) the same best-ranked bot claims every one and the rest fade unclaimed. Soaks of one tag that
+  all set it form a group: a player claims at most one of them (`Assign::ExclusiveSoakClaimers`, earliest resolve
+  first, then the lowest id; a bot's live claim stays on its soak unless it stands inside an earlier one). Soaks
+  without it keep the old behavior.
 - **Lasting Stack/Soak** (`Persistent`): `MissedStack` at most once per player per mechanic; `MissedSoak` once per
   short pass; `onResolve` once per pass. Its bot window is `[resolve, until]`.
 - **Reservations** (bots, M3 handoff §3.6): `Reserve(id, {bot, point, until, since, facing, slot, claim})` replaces the
@@ -733,6 +738,12 @@ while Idle on a map with mechanics) and runs the mode machine:
 to keep allies out of, the freeze deadline, the parking rule). `leaveBy` stays hazard-based, plus the latest start to
 reach an unmet region, so a heal in Hold finishes only when it ends in time.
 
+**Stock kicks** (M5, `boss kick order` multiplier, `Kick::JudgeStockKick`): while a descriptor with an interrupt list
+applies, a stock cast-stopper is dropped on a do-not-kick cast, a cast another bot claimed, a listed cast (`boss kick`
+owns those) or an unlisted one while a listed cast is due before the kick is back. A real kick (not a stun or silence
+used as one) is also dropped on an encounter unit that is casting or channeling nothing interruptible (Corvane's leash
+in the Ravenian fight): it would stop nothing and sit on cooldown when the listed cast starts.
+
 ### Tasks (M3)
 
 The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The brain:
@@ -893,7 +904,7 @@ solving one after another on the map thread never pick colliding spots (decision
 | | eligible | a region: the shape at the anchor's planned spot (a bot's plan), or live + a drift pose |
 | Stack `Cluster(n)` | the leader (sticky claim, else the medoid) | Leader: hold |
 | | eligible | a region of r/2 around the leader's spot (everyone within r of everyone) |
-| Soak | a claimer (`Assign::SoakClaimers`) | a region on the shape over its window |
+| Soak | a claimer (`Assign::SoakClaimers`; a group: `ExclusiveSoakClaimers`) | a region on the shape over its window |
 | | eligible, no claim (or count 0) | the shape as a hazard over its window (decision §7.3) |
 | Bait | the picker (sticky claim, else `BaitPick`) | hazard on the owner, `max(othersRange, humans) + 2`<sup>1</sup> |
 | | eligible, not the picker | a region of `othersRange` around the owner; the picker's landing<sup>1</sup> |

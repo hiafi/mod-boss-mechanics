@@ -115,6 +115,52 @@ namespace BossMechanics::Assign
         return out;
     }
 
+    // One live Soak of an exclusive group (MechanicRef::OneClaimPerBot, the same tag): its eligible players and rule.
+    struct SoakInput { std::vector<Claimant> players; SoakRule rule; };
+
+    // Claimers of an exclusive group: a player claims at most one Soak of the group, so one low-meter bot does not
+    // claim every soul of a drain (Scholomance STAGE-R-B-MALICIA-LATE-REPORT S-4). The caller passes the group in a
+    // fixed order (earliest resolve first, then the lowest id); each Soak runs SoakClaimers on the players no earlier
+    // Soak took. A bot whose live claim (claimedSince) sits on a later Soak is kept for it: an earlier Soak takes it
+    // only while it stands inside (step 1), so claims do not hop between souls. One claimer list per input, in order.
+    inline std::vector<std::vector<std::uint64_t>> ExclusiveSoakClaimers(std::vector<SoakInput> const& soaks)
+    {
+        // home: the Soak holding a bot's oldest live claim (ties to the earlier Soak); soaks.size() = none.
+        auto homeOf = [&](std::uint64_t guid)
+        {
+            std::size_t home = soaks.size();
+            std::int64_t since = 0;
+            for (std::size_t i = 0; i < soaks.size(); ++i)
+                for (Claimant const& c : soaks[i].players)
+                    if (c.guid == guid && c.bot && c.claimedSince != 0
+                        && (home == soaks.size() || c.claimedSince < since))
+                    {
+                        home = i;
+                        since = c.claimedSince;
+                    }
+            return home;
+        };
+
+        std::vector<std::vector<std::uint64_t>> out(soaks.size());
+        std::vector<std::uint64_t> taken;
+        for (std::size_t i = 0; i < soaks.size(); ++i)
+        {
+            std::vector<Claimant> pool;
+            for (Claimant const& c : soaks[i].players)
+            {
+                if (std::find(taken.begin(), taken.end(), c.guid) != taken.end())
+                    continue;
+                std::size_t const home = homeOf(c.guid);
+                if (!c.insideNow && home < soaks.size() && home > i)
+                    continue;   // kept for its own, later Soak
+                pool.push_back(c);
+            }
+            out[i] = SoakClaimers(pool, soaks[i].rule);
+            taken.insert(taken.end(), out[i].begin(), out[i].end());
+        }
+        return out;
+    }
+
     struct Point { std::uint64_t guid = 0; float x = 0.f, y = 0.f; };
 
     // The Stack(Cluster) leader: `sticky` while it is still listed, else the medoid (the player with the smallest

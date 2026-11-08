@@ -756,36 +756,8 @@ namespace BossMechanics
                 }
 
                 // Soak: who claims (§3.6), the same answer on every bot.
-                float const margin = ViewRules::RegionMarginYd(shape, _opt.safetyMarginYd);
-                std::vector<Assign::Claimant> players;
-                for (ObjectGuid const& g : eligible)
-                {
-                    Player const* p = ObjectAccessor::GetPlayer(_bot->GetMap(), g);
-                    if (!p)
-                        continue;
-                    Assign::Claimant c;
-                    c.guid = g.GetRawValue();
-                    c.bot = IsBot(g);
-                    c.insideNow = _reg.ContainsPoint(m, p->GetPosition(), g);
-                    c.stacks = m.ordering.auraSpell ? p->GetAuraCount(m.ordering.auraSpell) : 0;
-                    float const sd = Solver::SignedDistance(shape, live, ToVec(p->GetPosition()));
-                    float const way = std::isfinite(sd) ? std::max(0.f, sd + margin) : 0.f;
-                    c.etaMs = ViewRules::SoakEtaMs(_now, way, p->GetSpeed(MOVE_RUN), _opt.params.startDelay);
-                    for (Reservation const& r : m.reservations)
-                        if (r.bot == g && r.claim && r.until > _now)
-                            c.claimedSince = r.since.count();
-                    players.push_back(c);
-                }
-                Assign::SoakRule rule;
-                rule.count = m.soakCount;
-                rule.ordered = m.ordering.auraSpell != 0;
-                rule.ascending = m.ordering.ascending;
-                rule.capStacks = m.ordering.capStacks;
-                rule.deadlineMs = (from - _opt.params.marginMs).count();
-                // A lasting soak whose window is open: a claimer trailing its moving circle keeps the claim
-                // (STAGE-M3-R-REPORT m-5).
-                rule.keepSticky = m.persist && _now >= from - _opt.params.marginMs;
-                std::vector<uint64> const claimers = Assign::SoakClaimers(players, rule);
+                std::vector<uint64> const claimers = m.oneClaimPerBot ? GroupClaimers(m)
+                    : Assign::SoakClaimers(ClaimantsOf(m, eligible, shape, live), SoakRuleOf(m, from));
                 auto const mine = std::find(claimers.begin(), claimers.end(), _self.GetRawValue());
                 if (mine != claimers.end())
                 {
@@ -823,6 +795,81 @@ namespace BossMechanics
                 h.synthetic = true;
                 extra.push_back(std::move(h));
                 AddTask(m, BotTaskRole::Avoider, from, to);
+            }
+
+            // A Soak's claimants: the eligible players on the map, with their stacks, eta and live claim.
+            std::vector<Assign::Claimant> ClaimantsOf(ActiveMechanic const& m, std::vector<ObjectGuid> const& eligible,
+                Shape const& shape, Geo::Pose const& live)
+            {
+                float const margin = ViewRules::RegionMarginYd(shape, _opt.safetyMarginYd);
+                std::vector<Assign::Claimant> players;
+                for (ObjectGuid const& g : eligible)
+                {
+                    Player const* p = ObjectAccessor::GetPlayer(_bot->GetMap(), g);
+                    if (!p)
+                        continue;
+                    Assign::Claimant c;
+                    c.guid = g.GetRawValue();
+                    c.bot = IsBot(g);
+                    c.insideNow = _reg.ContainsPoint(m, p->GetPosition(), g);
+                    c.stacks = m.ordering.auraSpell ? p->GetAuraCount(m.ordering.auraSpell) : 0;
+                    float const sd = Solver::SignedDistance(shape, live, ToVec(p->GetPosition()));
+                    float const way = std::isfinite(sd) ? std::max(0.f, sd + margin) : 0.f;
+                    c.etaMs = ViewRules::SoakEtaMs(_now, way, p->GetSpeed(MOVE_RUN), _opt.params.startDelay);
+                    for (Reservation const& r : m.reservations)
+                        if (r.bot == g && r.claim && r.until > _now)
+                            c.claimedSince = r.since.count();
+                    players.push_back(c);
+                }
+                return players;
+            }
+
+            Assign::SoakRule SoakRuleOf(ActiveMechanic const& m, Milliseconds from) const
+            {
+                Assign::SoakRule rule;
+                rule.count = m.soakCount;
+                rule.ordered = m.ordering.auraSpell != 0;
+                rule.ascending = m.ordering.ascending;
+                rule.capStacks = m.ordering.capStacks;
+                rule.deadlineMs = (from - _opt.params.marginMs).count();
+                // A lasting soak whose window is open: a claimer trailing its moving circle keeps the claim
+                // (STAGE-M3-R-REPORT m-5).
+                rule.keepSticky = m.persist && _now >= from - _opt.params.marginMs;
+                return rule;
+            }
+
+            // OneClaimPerBot: the claimers of `m` within its group (the live flagged Soaks of its tag, earliest resolve
+            // first, then the lowest id; Assign::ExclusiveSoakClaimers). Every group member is ranked whether or not
+            // this bot perceives it or is eligible for it, so every bot gets the same answer. Cached per pass.
+            std::vector<uint64> GroupClaimers(ActiveMechanic const& m)
+            {
+                auto cached = _groupClaims.find(m.id);
+                if (cached != _groupClaims.end())
+                    return cached->second;
+                std::vector<ActiveMechanic const*> group;
+                _reg.ForEachActive(_now - _opt.postResolveHold, [&](ActiveMechanic const& s)
+                {
+                    if (s.kind == Kind::Soak && s.oneClaimPerBot && !s.decoy && s.tag == m.tag)
+                        group.push_back(&s);
+                });
+                std::sort(group.begin(), group.end(), [](ActiveMechanic const* a, ActiveMechanic const* b)
+                {
+                    return a->resolveAt != b->resolveAt ? a->resolveAt < b->resolveAt : a->id < b->id;
+                });
+                std::vector<Assign::SoakInput> inputs;
+                inputs.reserve(group.size());
+                for (ActiveMechanic const* s : group)
+                {
+                    Milliseconds from{ 0 }, to{ 0 };
+                    PlayerWindow(*s, _now, _opt.postResolveHold, from, to);
+                    Geo::Pose live;
+                    Shape const shape = _reg.EffectiveShape(*s, live);
+                    inputs.push_back({ ClaimantsOf(*s, _reg.EligiblePlayers(*s), shape, live), SoakRuleOf(*s, from) });
+                }
+                std::vector<std::vector<uint64>> const lists = Assign::ExclusiveSoakClaimers(inputs);
+                for (std::size_t i = 0; i < group.size(); ++i)
+                    _groupClaims[group[i]->id] = lists[i];
+                return _groupClaims[m.id];
             }
 
             // Stack Cluster(n): a sticky leader (slot 0 claim on the board, else the medoid); the others gather
@@ -995,6 +1042,7 @@ namespace BossMechanics
             std::unordered_map<uint32, std::size_t> _baseHazards;   // registry hazard id -> index in _in.hazards
             uint32 _eligibleFor = 0;
             std::vector<ObjectGuid> _eligible;
+            std::unordered_map<uint32, std::vector<uint64>> _groupClaims;   // OneClaimPerBot: mechanic id -> claimers
         };
 
         void RunPlayerPass(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
