@@ -217,7 +217,18 @@ namespace
         std::vector<LiveCast> casts;
         InterruptibleCasts(target, reg, now, casts);
         if (casts.empty())
+        {
+            // RV-1: an encounter unit busy with an uninterruptible cast or channel; a kick on it stops nothing.
+            if (st.descriptor.IsEncounterUnit(target->GetGUID()) && target->IsNonMeleeSpellCast(false))
+            {
+                j.cast.uninterruptibleOnly = true;
+                Spell const* cur = target->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+                if (!cur)
+                    cur = target->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+                j.first = { target->GetGUID().GetRawValue(), cur ? cur->GetSpellInfo()->Id : 0u, Milliseconds(0) };
+            }
             return j;
+        }
         j.cast.casting = true;
         Descriptor const& d = st.descriptor.descriptor;
         Desc::Context const ctx = ContextOf(st.descriptor, bot);
@@ -409,6 +420,7 @@ namespace
             case Kick::StockVerdict::Claimed: return "claimed";
             case Kick::StockVerdict::Listed: return "listed";
             case Kick::StockVerdict::Hold: return "hold";
+            case Kick::StockVerdict::Nothing: return "stops nothing";
             default: return "allow";
         }
     }
@@ -832,7 +844,7 @@ float MechanicBotKickMultiplier::GetValue(Action* action)
     if (!Kick::Find(spellId) && !StopperLands(target, info))
         return 1.f;
     TargetJudgement const j = JudgeTarget(bot, *st, *reg, target, RecoveryOf(info), now);
-    Kick::StockVerdict const verdict = Kick::JudgeStockKick(j.cast);
+    Kick::StockVerdict const verdict = Kick::JudgeStockKick(j.cast, Kick::Find(spellId) != nullptr);
     if (verdict == Kick::StockVerdict::Allow)
         return 1.f;
     if (Kick::MarkOnce(st->kick.marks, j.first, MarkStockDrop, now, kMarkKeep))

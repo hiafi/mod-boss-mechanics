@@ -277,6 +277,8 @@ namespace BossMechanics
         MeasuredFrom measuredFrom = MeasuredFrom::Group;
         uint8 count = 0;                // Spread/RunOut: how many random targets when none are given
         uint8 soakCount = 0;            // Soak: bodies needed (at least; extra bodies never fail)
+        // Soak, OneClaimPerBot: a player claims at most one live Soak of this tag (the flagged ones only).
+        bool oneClaimPerBot = false;
         uint8 clusterMinOthers = 0;     // Stack Cluster(n): each eligible player needs n others within the radius
         // Frontal/Zone: one player is never hit: the victim of the anchor when the anchor is a creature, else the
         // owner's victim (ExemptVictim).

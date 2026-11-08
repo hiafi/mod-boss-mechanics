@@ -161,6 +161,46 @@ namespace
         CHECK(Assign::SoakClaimers(dup, Rule(2)) == Guids{ 4 });
     }
 
+    // Scholomance STAGE-R-B-MALICIA-LATE-REPORT S-4: a drain spills several souls (Soak count 1, lowest Soul first).
+    // Ranked alone, every soul goes to the same lowest-meter bot; an exclusive group gives each soul its own bot.
+    void TestExclusiveGroup()
+    {
+        using Assign::SoakInput;
+        SoakRule const rule = Rule(1, true, true, 40);
+        std::vector<Claimant> const players{ Bot(1, 2, 300), Bot(2, 5, 400), Bot(3, 9, 200) };
+        // Alone: bot 1 (lowest Soul) claims all three souls.
+        CHECK(Assign::SoakClaimers(players, rule) == Guids{ 1 });
+        std::vector<SoakInput> const three{ { players, rule }, { players, rule }, { players, rule } };
+        CHECK(Assign::ExclusiveSoakClaimers(three) == (std::vector<Guids>{ Guids{ 1 }, Guids{ 2 }, Guids{ 3 } }));
+        // More souls than bots: the extra soul has no claimer (nobody claims twice).
+        std::vector<SoakInput> four = three;
+        four.push_back({ players, rule });
+        CHECK(Assign::ExclusiveSoakClaimers(four).back().empty());
+        // Same answer every call (every bot computes it).
+        CHECK(Assign::ExclusiveSoakClaimers(three) == Assign::ExclusiveSoakClaimers(three));
+
+        // A live claim stays home: bot 1 claimed the second soul, so the first soul goes to bot 2 and the second
+        // keeps bot 1 (no hop to the earlier soul).
+        std::vector<Claimant> second = players;
+        second[0].claimedSince = 1000;
+        std::vector<SoakInput> const sticky{ { players, rule }, { second, rule } };
+        CHECK(Assign::ExclusiveSoakClaimers(sticky) == (std::vector<Guids>{ Guids{ 2 }, Guids{ 1 } }));
+        // ... unless it stands inside the earlier soul: then it takes that one, and the later soul re-picks.
+        std::vector<Claimant> first = players;
+        first[0].insideNow = true;
+        std::vector<SoakInput> const inside{ { first, rule }, { second, rule } };
+        CHECK(Assign::ExclusiveSoakClaimers(inside) == (std::vector<Guids>{ Guids{ 1 }, Guids{ 2 } }));
+
+        // A human inside one soul is not counted inside another of the group.
+        std::vector<Claimant> withHuman{ Human(9, true), Bot(1, 2, 300) };
+        std::vector<SoakInput> const humans{ { withHuman, rule }, { withHuman, rule } };
+        CHECK(Assign::ExclusiveSoakClaimers(humans) == (std::vector<Guids>{ Guids{ 9 }, Guids{ 1 } }));
+
+        // A one-member group is plain SoakClaimers (a lone soul, or a boss that never sets OneClaimPerBot).
+        CHECK(Assign::ExclusiveSoakClaimers({ { players, rule } }).front() == Assign::SoakClaimers(players, rule));
+        CHECK(Assign::ExclusiveSoakClaimers({}).empty());
+    }
+
     void TestClusterLeader()
     {
         using P = Assign::Point;
@@ -198,6 +238,7 @@ int main()
     TestHumansInsideFirst();
     TestStickyClaims();
     TestLastingSoakKeepsClaim();
+    TestExclusiveGroup();
     TestLateBotsLast();
     TestClusterLeader();
     TestSlotOf();

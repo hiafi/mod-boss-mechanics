@@ -321,6 +321,8 @@ namespace BossMechanics::Kick
         bool claimedByOther = false;    // a listed one is claimed by another bot
         bool listedDue = false;         // unlisted only: a listed cast is due before this bot's kick is back and no
                                         // other kicker covers it (Desc::HoldKickCovered(0, ...))
+        bool uninterruptibleOnly = false;   // nothing interruptible, but the unit is an encounter unit that is casting
+                                            // or channeling (Corvane's leash): a kick on it stops nothing
     };
 
     enum class StockVerdict : std::uint8_t
@@ -329,14 +331,18 @@ namespace BossMechanics::Kick
         DoNotKick,  // never kicked
         Claimed,    // another bot kicks it
         Listed,     // `boss kick` owns listed casts (the order, the hold and the claim live there)
-        Hold        // unlisted, and a listed cast is due before the kick is back
+        Hold,       // unlisted, and a listed cast is due before the kick is back
+        Nothing     // a real kick on an encounter unit whose current cast is not interruptible: it stops nothing and
+                    // only puts the kick on cooldown before the next listed cast (STAGE-R-B-RAVENIAN-REPORT RV-1)
     };
 
-    // The stock-kick multiplier's verdict (only while a descriptor with an interrupt list applies to the bot).
-    inline StockVerdict JudgeStockKick(TargetCast const& t)
+    // The stock-kick multiplier's verdict (only while a descriptor with an interrupt list applies to the bot). `kick`:
+    // the action is a real kick (Kick::Find); a stun or silence used as an interrupt still stops a channel (CastStop)
+    // or has its own use, so it is never dropped for Nothing.
+    inline StockVerdict JudgeStockKick(TargetCast const& t, bool kick = true)
     {
         if (!t.casting)
-            return StockVerdict::Allow;
+            return t.uninterruptibleOnly && kick ? StockVerdict::Nothing : StockVerdict::Allow;
         if (t.doNotKick)
             return StockVerdict::DoNotKick;
         if (t.claimedByOther)
