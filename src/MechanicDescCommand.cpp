@@ -122,12 +122,16 @@ namespace BossMechanics
                 handler->PSendSysMessage("  purge {} on {}: priority {}", SpellLabel(x.auraId), UnitOrEntry(map,
                     x.unitEntry, 0), int32(x.priority));
             for (TargetEntry const& t : d.targets)
-                handler->PSendSysMessage("  target {}: priority {:+}, {}{}{}{}{}", UnitOrEntry(map, t.entry, t.guid),
+                handler->PSendSysMessage("  target {}: priority {:+}, {}{}{}{}{}", t.hostilePlayers
+                    ? std::string("hostile players") : UnitOrEntry(map, t.entry, t.guid),
                     int32(t.priority), WhoName(t.who), t.aoeOk ? ", AoE ok" : "", t.partnerEntry
                     ? Acore::StringFormat(", together with {} within {:.0f}%", t.partnerEntry, t.togetherPct)
                     : std::string(), t.breakOut ? ", break-out" : "", When(t.when));
             for (IgnoreEntry const& x : d.ignores)
                 handler->PSendSysMessage("  ignore {}{}", UnitOrEntry(map, x.entry, x.guid), When(x.when));
+            for (uint32 aura : d.hostilePlayerAuras)
+                handler->PSendSysMessage("  hostile player aura {} (a charmed teammate with it is a target)",
+                    SpellLabel(aura));
             for (EncounterUnit const& u : e.units)
                 handler->PSendSysMessage("  unit {} (entry {}){}", UnitLabel(map, u.guid.GetRawValue()), u.entry,
                     u.despawnAtEnd ? ", despawns at the end" : "");

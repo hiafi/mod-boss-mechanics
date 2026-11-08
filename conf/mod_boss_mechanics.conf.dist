@@ -49,10 +49,12 @@ BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
 #                     level (a level 60 heroic template reads the 60h row). Maps or difficulties without a pin,
 #                     the open world and the sim use the owner's level. Empty: no pins.
 #        Example:     "36:20 36h:60 289:60"
-#        Default:     "36:20 36h:60" - Deadmines normal is level 20, heroic level 60
+#        Default:     "36:20 36h:60" - Deadmines normal is level 20, heroic level 60 (the code's fallback for a
+#                     missing or malformed value). This file ships "36:20 36h:60 33:20 33h:60": Shadowfang Keep
+#                     normal is level 20 too (its level 21 bosses read the level 20 row), heroic level 60.
 #
 
-BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60"
+BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60"
 
 #
 #    BossMechanics.Telegraph.FollowMode

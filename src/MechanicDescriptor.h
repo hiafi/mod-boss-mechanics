@@ -15,7 +15,9 @@
  * - interrupts (WP-I): MatchInterrupt, OrderInterrupts, NextDue, DueCasts, HoldKick(Covered), PickKicker,
  *   ClaimBook;
  * - dispels and purges (WP-P): IsUrgent, OrderDispels, PickPurge;
- * - targets and the ignore list (WP-T): Fits, PickTarget, IsIgnored.
+ * - targets and the ignore list (WP-T): Fits, PickTarget, IsIgnored;
+ * - turned teammates (SFK F1): IsHostilePlayer, read by TargetEntry::HostilePlayers and the playerbots fork's
+ *   hostile-teammate hook (MechanicBotTargets.cpp).
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DESCRIPTOR_H
@@ -146,6 +148,16 @@ namespace BossMechanics
             return e;
         }
 
+        // Any player the descriptor marks hostile now (Desc::IsHostilePlayer: charmed and carrying one of
+        // Descriptor::hostilePlayerAuras), such as Arugal's turned players. `when` narrows it further. Players have no
+        // entry, so this is the only way a target entry names one.
+        static TargetEntry HostilePlayers(std::int8_t priority, Who who = Who::Dps, Condition when = {})
+        {
+            TargetEntry e(0, priority, who, std::move(when));
+            e.hostilePlayers = true;
+            return e;
+        }
+
         TargetEntry& AoeOk()
         {
             aoeOk = true;
@@ -174,6 +186,7 @@ namespace BossMechanics
         std::uint32_t partnerEntry = 0;     // kill together: hit the one with more % left
         float togetherPct = 0.f;            // ...keeping the two within this many percent
         bool breakOut = false;              // holds a player: order by the held player's role (tank, healer)
+        bool hostilePlayers = false;        // HostilePlayers: matches a hostile player, never an entry or a guid
     };
 
     // Ignored while `when` holds: no damage from bots or pets, no AoE count.
@@ -200,11 +213,16 @@ namespace BossMechanics
         std::vector<PurgeEntry> purges;
         std::vector<TargetEntry> targets;
         std::vector<IgnoreEntry> ignores;
+        // Auras that mark a charmed player as turned against the group (SFK F1: Arugal's Turned). A charmed player
+        // carrying one is a valid attack target for bots, and bots stop healing, buffing and curing it, until the
+        // aura or the charm ends. Empty: a charmed teammate stays off limits (the playerbots default).
+        std::vector<std::uint32_t> hostilePlayerAuras;
         std::uint32_t phase = 0;
 
         bool Empty() const
         {
-            return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty();
+            return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty()
+                && hostilePlayerAuras.empty();
         }
     };
 }
@@ -227,6 +245,8 @@ namespace BossMechanics::Desc
         std::uint32_t entry = 0;
         bool alive = true;
         float healthPct = 100.f;
+        bool player = false;                                    // a player (players have no entry)
+        bool charmed = false;                                   // charmed by another unit (mind control)
         std::vector<std::uint32_t> auras;                       // the referenced auras the unit has
         std::vector<std::pair<std::uint32_t, float>> near;      // entry -> yd to the nearest other live unit of it
                                                                 // (left out when there is none in range)
@@ -322,6 +342,9 @@ namespace BossMechanics::Desc
     inline References Referenced(Descriptor const& d)
     {
         References r;
+        for (std::uint32_t aura : d.hostilePlayerAuras)
+            if (aura && !Contains(r.auras, aura))
+                r.auras.push_back(aura);
         for (InterruptEntry const& e : d.interrupts)
             AddReference(r, e.when);
         for (TargetEntry const& e : d.targets)
@@ -862,6 +885,18 @@ namespace BossMechanics::Desc
         return false;
     }
 
+    // Is the unit a player turned against the group now: a charmed player carrying one of the descriptor's
+    // hostilePlayerAuras (SFK F1)? Needs the auras in the facts, which References adds.
+    inline bool IsHostilePlayer(Descriptor const& d, UnitFacts const& u)
+    {
+        if (!u.player || !u.charmed || !u.alive)
+            return false;
+        for (std::uint32_t aura : d.hostilePlayerAuras)
+            if (aura && Contains(u.auras, aura))
+                return true;
+        return false;
+    }
+
     // The held player's role, for break-out targets (tank's prison first, then the healer's, then the others').
     enum class HeldRank : std::uint8_t
     {
@@ -897,7 +932,8 @@ namespace BossMechanics::Desc
         {
             TargetEntry const& e = d.targets[i];
             bool const byGuid = e.guid != 0;
-            if (byGuid ? e.guid != u.guid : (!e.entry || e.entry != u.entry))
+            if (e.hostilePlayers ? !IsHostilePlayer(d, u)
+                : byGuid ? e.guid != u.guid : (u.player || !e.entry || e.entry != u.entry))
                 continue;
             if (!Fits(e.who, bot) || !Holds(e.when, u, ctx))
                 continue;

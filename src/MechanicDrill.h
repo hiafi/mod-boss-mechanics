@@ -10,7 +10,7 @@
  * at `atMs` after the cycle start from the test owner's scheduler (or, with `after=`, after the previous step: see
  * StepOffsets; `cycle=even|odd` skips it in the other cycles), or the drill-only pseudo shape `marker <stacks>`
  * (sets Marked (drill) 205009 on group members, see Step; drill setup never hands out Weakened). The command appends
- * `dmg=<n>` to every damage step (DamageShape). Positions are yards in map coordinates; angles in radians; "ahead" is
+ * `dmg=<n>` to every damage step (DamageStep). Positions are yards in map coordinates; angles in radians; "ahead" is
  * along the GM's facing, "left" 90 degrees counterclockwise from it.
  */
 
@@ -104,7 +104,8 @@ namespace BossMechanics::Drill
         std::uint32_t defaultCycles = 3;    // `cycles=` when not given
     };
 
-    // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage.
+    // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage (a bell soak's
+    // landing does: DamageStep).
     inline bool DamageShape(std::string_view shape)
     {
         return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker";
@@ -126,6 +127,119 @@ namespace BossMechanics::Drill
             if (t == tag)
                 return true;
         return false;
+    }
+
+    // ---- the chase (`hunt`, `soak bell=`; Shadowfang Keep build §3.9, drill `sfk-hunt`) ----------------------------
+    // `hunt <r> <ms> speed=<rate> persist=<ms> [tick=] [pick=]`: a chaser (a Mechanic Marker) starts at the selected
+    // unit and fixates one member; a circle of r on the chaser, eligible = that member only, stands through the `ms`
+    // warning (the howl), then the chaser walks at the member for `persist` ms at `rate` x player run speed,
+    // re-aimed at every pass (`tick`). The first pass that holds the member is a catch: one hit, and the hunt ends.
+    // `soak <r> <ms> bell=<n> [apart=15] [land=6] [jump=2000]`: an alarm bell, the soak on one of n fixed points
+    // `apart` yd from each other around the selected unit; the live hunt's member is not eligible. Filled at its
+    // resolve, it ends the hunt and the chaser bounds to the bell, landing `jump` ms later with a circle of `land`
+    // there: tag + 1 for everyone but the ringers, tag + 2 for the ringers (BellLandingTag, BellRingerTag).
+
+    constexpr float kPlayerRunYdS = 7.f;        // a player's base run speed (baseMoveSpeed[MOVE_RUN])
+    constexpr float kHuntRateNormal = 0.8f;     // Odo's Hunt, normal: speed_run 0.8 (SK 840-842, HANDOFF §8 #11)
+    constexpr float kHuntRateHeroic = 0.95f;    // Relentless Hunt, heroic
+    constexpr float kMaxHuntRate = 2.f;         // `speed=` above this is refused
+    constexpr std::uint32_t kMinBells = 2;
+    constexpr std::uint32_t kMaxBells = 6;
+
+    // Ledger tags of `sfk-hunt` (sweep keys `<Kind>/<tag>`): Zone/1 a catch at 80%, MissedSoak/2 a bell nobody rang,
+    // Zone/3 someone other than the ringer in the bell landing, Zone/4 the ringer in it, Zone/5 a catch at 95%.
+    constexpr std::uint32_t kHuntTagCatchNormal = 1;
+    constexpr std::uint32_t kHuntTagBell = 2;
+    constexpr std::uint32_t kHuntTagLanding = 3;
+    constexpr std::uint32_t kHuntTagRinger = 4;
+    constexpr std::uint32_t kHuntTagCatchHeroic = 5;
+
+    constexpr std::uint32_t BellLandingTag(std::uint32_t bellTag)
+    {
+        return bellTag + 1;
+    }
+
+    constexpr std::uint32_t BellRingerTag(std::uint32_t bellTag)
+    {
+        return bellTag + 2;
+    }
+
+    // The chaser's speed in yd/s at `rate` x player run speed.
+    constexpr float HuntSpeedYdS(float rate)
+    {
+        return rate * kPlayerRunYdS;
+    }
+
+    // The ring radius that puts n points `apart` yd from their neighbors (0 below two points).
+    inline float BellRing(float apart, std::uint32_t n)
+    {
+        return n < 2 ? 0.f : apart / (2.f * std::sin(Geo::kPi / static_cast<float>(n)));
+    }
+
+    // The n bell points around `center`, the first at bearing `facing`, neighbors `apart` yd apart.
+    inline std::vector<Geo::Vec3> BellPoints(Geo::Vec3 const& center, float facing, std::uint32_t n, float apart)
+    {
+        return RingSpots(center, BellRing(apart, n), n, facing);
+    }
+
+    // One step of the chase as the runtime drives it (a straight walk at the target, re-aimed every step): the chaser
+    // moves `speed` x `dtS` yd toward `target`, never past it.
+    inline Geo::Vec3 ChaseStep(Geo::Vec3 const& chaser, Geo::Vec3 const& target, float speed, float dtS)
+    {
+        float const dx = target.x - chaser.x;
+        float const dy = target.y - chaser.y;
+        float const d = std::sqrt(dx * dx + dy * dy);
+        float const step = speed * dtS;
+        if (d <= step || d < 1e-4f)
+            return { target.x, target.y, chaser.z };
+        return { chaser.x + dx / d * step, chaser.y + dy / d * step, chaser.z };
+    }
+
+    // A desk model of one hunt (the host test reads the bar's premises with it): the chaser stands through `warnMs`,
+    // then walks at `chaserYdS` for `chaseMs`, judged every `tickMs` from the end of the warning. The member starts
+    // `startGap` yd away and, from `reactMs` after the hunt starts, walks straight away from the chaser at `fleeYdS`
+    // (0: stands). The ms of the first pass with the member within `radius`, or nullopt (never caught).
+    struct ChaseModel
+    {
+        float startGap = 6.f;
+        float radius = 3.f;
+        float chaserYdS = HuntSpeedYdS(kHuntRateNormal);
+        float fleeYdS = kPlayerRunYdS;
+        std::uint32_t reactMs = 0;
+        std::uint32_t warnMs = 2000;
+        std::uint32_t chaseMs = 10000;
+        std::uint32_t tickMs = 200;
+    };
+
+    inline std::optional<std::uint32_t> CatchMs(ChaseModel const& m)
+    {
+        constexpr std::uint32_t kStepMs = 50;
+        Geo::Vec3 chaser{ 0.f, 0.f, 0.f };
+        Geo::Vec3 member{ m.startGap, 0.f, 0.f };
+        std::uint32_t const end = m.warnMs + m.chaseMs;
+        std::uint32_t nextPass = m.warnMs;
+        for (std::uint32_t t = 0; t <= end; t += kStepMs)
+        {
+            if (t >= nextPass)
+            {
+                if (Geo::Dist2d(chaser.x, chaser.y, member.x, member.y) <= m.radius)
+                    return t;
+                nextPass += std::max<std::uint32_t>(m.tickMs, 1);
+            }
+            float const dt = static_cast<float>(kStepMs) / 1000.f;
+            if (t >= m.reactMs && m.fleeYdS > 0.f)
+            {
+                // Straight away from the chaser.
+                float const dx = member.x - chaser.x;
+                float const dy = member.y - chaser.y;
+                float const d = std::max(std::sqrt(dx * dx + dy * dy), 1e-4f);
+                member.x += dx / d * m.fleeYdS * dt;
+                member.y += dy / d * m.fleeYdS * dt;
+            }
+            if (t >= m.warnMs)
+                chaser = ChaseStep(chaser, member, m.chaserYdS, dt);
+        }
+        return std::nullopt;
     }
 
     inline std::vector<Def> const& All()
@@ -247,6 +361,20 @@ namespace BossMechanics::Drill
                     { 25000, "circle 5 2000 at=each weak=1 tag=11" },
                     { 0, "circle 5 1500 at=each after=resolve weak=1 tag=12" },
                 }, 2 },     // two cycles: the cone and the line once each
+            // Shadowfang Keep build §3.9 (the chase): Odo's Hunt (OD1), the alarm bell (OD3) and its landing (OD4),
+            // and the Echo of Odo (BS5). 0 s: a chaser starts at the creature and fixates a random non-tank; a 3 yd
+            // circle on it, eligible = that player only, stands through a 2 s howl, then the chaser walks at the
+            // player for 10 s at 80% of player run speed (passes every 200 ms; the first one that holds the player is
+            // a catch and ends the hunt). 0.5 s: a bell, a 1-body Soak 2 yd on one of three points 19 yd apart (the
+            // room's bells, section 7 #24) around the creature, not the hunted player, not the tank; filled at its 5 s
+            // resolve (the walk plus the 1 s ring), it ends the hunt and the chaser bounds to the bell, landing 2 s
+            // later with a 6 yd circle (tag 3 for the others, 4 for the ringer). 15 s: the heroic hunt, 95% speed and no bell (spent).
+            { "sfk-hunt", "Odo's Hunt: a 3 yd chaser at 80% for 10 s, a bell soak that ends it (6 yd landing), "
+                "then a 95% hunt with no bell", 30000, false, {
+                    { 0, "hunt 3 2000 speed=0.8 persist=10000 tick=200 pick=nontank pct=35 tag=1" },
+                    { 500, "soak 2 5000 need=1 role=nontank bell=3 apart=19 land=6 jump=2000 pct=35 weak=1 tag=2" },
+                    { 15000, "hunt 3 2000 speed=0.95 persist=10000 tick=200 pick=nontank pct=35 tag=5" },
+                }, 2 },     // two cycles a run; the sweep runs sfk-hunt:4 (120 s)
         };
         return drills;
     }
@@ -316,6 +444,21 @@ namespace BossMechanics::Drill
                 return std::nullopt;
         }
         return v;
+    }
+
+    // Does the runner add `dmg=` to this step? Every damage shape, and a bell soak (`soak ... bell=<n>`: its landing
+    // circle carries the damage keys).
+    inline bool DamageStep(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.empty())
+            return false;
+        if (t[0] == "soak")
+        {
+            std::optional<std::string_view> const bell = Value(line, "bell");
+            return bell && Number(*bell).value_or(0.f) > 0.f;
+        }
+        return DamageShape(t[0]);
     }
 
     // ---- step timing (after=, cycle=) ------------------------------------------------------------------------------

@@ -266,6 +266,9 @@ namespace
     {
         auto withPet = [&](Player* player, DispelRules::MemberRank rank)
         {
+            // SFK F1: a teammate turned against the group (and its pet) is no one's to cure.
+            if (BotTargets::IsHostilePlayer(botAI, bot, player))
+                return;
             fn(player, rank);
             if (Pet* pet = player->GetPet())
                 fn(pet, rank);

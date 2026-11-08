@@ -386,7 +386,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
-.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt> [cycles=3 (alexei 1)] [seed=] [dmg=1]
+            [self=0]
 .mech bots [all]
 ```
 
@@ -417,6 +418,7 @@ are never touched. Invite the bots you test with.
 | | | the baiter gets no Weakened, so `rule=fewest` needs `aura=` + `rider=` of a rotation debuff (205008) |
 | holdstill | window (s) | `tol=` (0.3 yd); every eligible player |
 | spot | radius | `ring=` (10): one spot per group member on a ring around the anchor point |
+| hunt | catch radius | `speed=` (0.8, x player run speed), `persist=` (the chase, required), `tick=`, `pick=` |
 
 A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
 group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
@@ -472,6 +474,17 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   long). `offset=<deg>` turns a frontal (not with `rear=1`). Drill steps also take `after=resolve` (start `atMs`
   after the previous step of the cycle resolves), `after=with` (`atMs` after it starts) and `cycle=even|odd` (only in
   those cycles); the runner strips them before the `.mech test` parser (`src/MechanicDrill.h`, `StepOffsets`).
+- Shadowfang Keep build §3.9 (the chase, drill `sfk-hunt`): `hunt <r> <ms> speed=<rate> persist=<ms>` summons a
+  chaser (a Mechanic Marker: invisible, not selectable or attackable) at the selected unit and fixates a member
+  (`pick=`); a circle of r on the chaser, eligible for that member only, stands through the `<ms>` warning, then the
+  chaser walks at the member for `persist` ms at `rate` x a player's 7 yd/s (its run speed is set to the rate, so the
+  bots read the drift), re-aimed at every pass (`tick=`). The first pass that holds the member is a catch (its hit is
+  the ledger entry) and ends the hunt; so does the member dying. `soak <r> <ms> bell=<n> [apart=15] [land=6]
+  [jump=2000]` is an alarm bell: the soak lands on one of n points `apart` yd from their neighbors on a ring around
+  the selected unit (the first at your facing), and the member of the command's (or drill run's) live hunt is not
+  eligible. Filled at its resolve, it ends that hunt, the chaser bounds to the bell, and `jump` ms later a circle of
+  `land` lands there with the soak line's damage keys: tag + 1 for everyone but the ringers, tag + 2 (no marker of its
+  own) for the ringers. A hunt caught before the bell resolves leaves no landing; a bell with no hunt still lands.
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -548,6 +561,13 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     non-tank's spot (odd cycles) (SN1, SN2, SN3). 25 s: circle 5 under every member, then circle 5 under every member
     where it stands as the first wave lands (RZ1, RZ10). Tags: first shapes 1, 4, 6, 8, 11; follow-ups 2 and 3 (second
     and third dash), 5 (aftershocks), 7 (Haft Slam), 9 (cone), 10 (line), 12 (Lookout).
+  - `sfk-hunt` (Shadowfang Keep build §3.9: Odo's Hunt OD1, the bell OD3 and its landing OD4, the Echo of Odo BS5;
+    30 s, two cycles by default): 0 s, a hunt on a random non-tank, 3 yd catch circle, 2 s howl, then 10 s at 80% run
+    speed (5.6 yd/s), passes every 200 ms; 0.5 s, a bell, 1-body Soak 2 yd on one of three points 15 yd apart around
+    the creature (not the hunted, `role=nontank`), resolving at 5.5 s: rung, the hunt ends and a 6 yd landing follows
+    2 s later (`weak=1`); 15 s, the heroic hunt at 95% (6.65 yd/s) with no bell. `pct=35` (Maul, the landing) in the
+    percent mode. Tags: Zone/1 catch at 80%, MissedSoak/2 bell not rung, Zone/3 others in the landing, Zone/4 the
+    ringer in it, Zone/5 catch at 95%. The sweep runs `sfk-hunt:4` (120 s, a program runs once per sim iteration).
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.

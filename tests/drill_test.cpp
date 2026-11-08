@@ -25,7 +25,7 @@ namespace
     constexpr float kMarginYd = 0.5f;
 
     std::set<std::string_view> const kTestShapes = { "circle", "donut", "cone", "rearcone", "line", "projectile",
-        "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot" };
+        "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt" };
 
     struct Parsed
     {
@@ -211,11 +211,12 @@ namespace
                 CHECK(Drill::Value(step.line, "tag").has_value());
                 // dmg= comes from the drill; get-in kinds take none.
                 CHECK(!Drill::Value(step.line, "dmg"));
-                if (!Drill::DamageShape(p.shape))
+                if (!Drill::DamageStep(step.line))
                     CHECK(!Drill::Value(step.line, "weak"));
             }
         }
-        for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups" })
+        for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
+            "sfk-hunt" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -493,7 +494,8 @@ namespace
         for (Drill::Def const& d : Drill::All())
         {
             std::string_view const name = d.name;
-            CHECK(d.defaultCycles == (name == "alexei" ? 1u : name == "deadmines-followups" ? 2u : 3u));
+            CHECK(d.defaultCycles == (name == "alexei" ? 1u
+                : name == "deadmines-followups" || name == "sfk-hunt" ? 2u : 3u));
             CHECK(d.defaultCycles * d.cycleMs <= 180000u);
         }
     }

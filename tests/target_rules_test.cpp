@@ -330,6 +330,46 @@ namespace
     }
 }
 
+    // SFK F1: turned players over Arugal engage DPS (the stock pickers stand down) and leave tanks and healers stock;
+    // during Moonrise they rank below him, so the focus keeps DPS on Arugal.
+    void TestTurnedPlayers()
+    {
+        constexpr std::uint32_t kTurned = 300590;
+        constexpr std::uint32_t kArugal = 4275;
+        auto Turned = [](Key guid, bool on)
+        {
+            UnitFacts u = Facts(guid, 0, 70.f);
+            u.player = true;
+            u.charmed = on;
+            if (on)
+                u.auras = { kTurned };
+            return u;
+        };
+        Descriptor d;
+        d.hostilePlayerAuras = { kTurned };
+        d.targets.push_back(TargetEntry::HostilePlayers(1, Who::Dps, Condition::Phase(0)));
+        d.targets.push_back(TargetEntry::HostilePlayers(-1, Who::Dps, Condition::Phase(1)));
+        std::vector<UnitFacts> f{ Facts(kOwner, kArugal, 60.f), Turned(30, true) };
+        Context ctx;
+        Focus focus = DecideFocus(d, Candidates(f), kOwner, Dps(true), 0, ctx);
+        CHECK(focus.target == 30 && focus.Engaged() && focus.outranksBoss);
+        CHECK(SuppressPicker(Picker::Assist, focus) && SuppressPicker(Picker::Aoe, focus));
+        focus = DecideFocus(d, Candidates(f), kOwner, Tank(), 0, ctx);
+        CHECK(focus.target == kOwner && !focus.Engaged());
+        focus = DecideFocus(d, Candidates(f), kOwner, Healer(), 0, ctx);
+        CHECK(!focus.Engaged());
+
+        ctx.phase = 1;
+        focus = DecideFocus(d, Candidates(f), kOwner, Dps(), 30, ctx);
+        CHECK(focus.target == kOwner && focus.Engaged() && !focus.outranksBoss);
+
+        // Released (charm and aura gone): the boss, nothing engaged.
+        ctx.phase = 0;
+        f[1] = Turned(30, false);
+        focus = DecideFocus(d, Candidates(f), kOwner, Dps(), 30, ctx);
+        CHECK(focus.target == kOwner && !focus.Engaged());
+    }
+
 int main()
 {
     TestNoList();
@@ -342,5 +382,6 @@ int main()
     TestIgnoreNames();
     TestMinion();
     TestClocks();
+    TestTurnedPlayers();
     return Report("target_rules_test");
 }

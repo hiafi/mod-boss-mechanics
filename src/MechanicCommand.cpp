@@ -9,7 +9,8 @@
  *                 [seed=]
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
- *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups> [cycles=3] [seed=] [dmg=1] [self=0]
+ *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt> [cycles=3] [seed=] [dmg=1]
+ *               [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -41,6 +42,10 @@
  * then), `reach=1` also ends it there, and `frontal offset=<deg>` turns a frontal. Drill steps also take `after=` and
  * `cycle=` (MechanicDrill.h, StepOffsets), which the runner strips before this parser.
  *
+ * Shadowfang Keep build §3.9 (drill `sfk-hunt`): `hunt` summons a chaser at the selected unit that walks at a member
+ * with a catch circle on it, and `soak bell=<n>` is an alarm bell that ends the hunt when filled and lands a circle
+ * there (RegisterHunt, RegisterBell; MechanicDrill.h "the chase").
+ *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
 
@@ -63,6 +68,7 @@
 #include "MechanicProviders.h"
 #include "MechanicTelegraph.h"
 #include "MechanicWeakened.h"
+#include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
@@ -97,9 +103,22 @@ namespace
     constexpr uint32 kFirstMinefieldGroup = 1000;               // cap groups above the hand-typed `group=` values
     constexpr char const* kNoMemberMessage = "no alive member of your group on this map (self=1 includes you)";
 
+    // One `hunt` (MechanicDrill.h, "the chase"): its chaser, the member it fixates, its catch circle. Shared by the
+    // circle's resolve callback and a later `soak bell=` of the same command (or drill run), which ends it.
+    struct HuntState
+    {
+        ObjectGuid chaser;
+        ObjectGuid hunted;
+        uint32 zone = 0;
+        Milliseconds endsAt{ 0 };       // game time: the end of the chase
+        bool live = false;              // cleared by a catch, a bell, or the hunted member gone
+    };
+    using HuntPtr = std::shared_ptr<HuntState>;
+
     // The dice of one command. Delayed registrations share it, so they keep drawing from the same seeded sequence.
     // `lastMember` is the member the last pick landed on (`pick=same`); `chain` the members picked since the last pick
-    // that was not `pick=other`; `lastEnd` the far end of the last fixed line registered (`at=last`).
+    // that was not `pick=other`; `lastEnd` the far end of the last fixed line registered (`at=last`); `hunt` the last
+    // `hunt` registered (a `soak bell=` ends it).
     struct Dice
     {
         explicit Dice(uint32 seed) : rng(seed) { }
@@ -108,6 +127,7 @@ namespace
         ObjectGuid lastMember;
         std::vector<ObjectGuid> chain;
         std::optional<Position> lastEnd;
+        HuntPtr hunt;
     };
     using RngPtr = std::shared_ptr<Dice>;
 
@@ -434,12 +454,18 @@ namespace
         bool fix = false;               // fix=1: frozen at registration toward where the to= unit stands
         bool reach = false;             // reach=1: fixed and ending at that spot (at least `size` long)
         float minDist = 0.f;            // min=: to=member prefers members at least this far from the source
+        // the chase (Shadowfang Keep build §3.9; MechanicDrill.h)
+        float huntRate = Drill::kHuntRateNormal;    // hunt speed=: x player run speed
+        uint32 bells = 0;               // soak bell=<n>: one of n bell points, ends the hunt when filled
+        float bellApart = 15.f;         // soak apart=: the bell points' spacing
+        float landRadius = 6.f;         // soak land=: the landing circle at the rung bell
+        Milliseconds jump{ 2000 };      // soak jump=: the bound to the bell (the landing's warning)
     };
 
     bool IsShapeName(std::string const& s)
     {
         static char const* const shapes[] = { "circle", "donut", "cone", "rearcone", "line", "projectile", "mine",
-            "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot" };
+            "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt" };
         for (char const* name : shapes)
             if (s == name)
                 return true;
@@ -798,10 +824,221 @@ namespace
         return ground > INVALID_HEIGHT && std::fabs(ground - z) <= 5.f ? ground : z;
     }
 
+    // ---- the chase (`hunt`, `soak bell=`; MechanicDrill.h, Shadowfang Keep build §3.9) ------------------------------
+    // The chaser lingers this long after its chase or its landing, then despawns.
+    constexpr Milliseconds kChaserLinger = Milliseconds(1000);
+
+    bool HuntLive(HuntState const& h)
+    {
+        return h.live && GameTime::GetGameTimeMS() < h.endsAt;
+    }
+
+    // Ends a hunt: its circle gets no more passes, the chaser stops and despawns after `linger`.
+    void EndHunt(Map* map, HuntState& h, Milliseconds linger)
+    {
+        if (!h.live)
+            return;
+        h.live = false;
+        if (Registry* reg = Registry::Get(map))
+            reg->Cancel(h.zone);
+        if (Creature* chaser = map->GetCreature(h.chaser))
+        {
+            chaser->GetMotionMaster()->Clear();
+            chaser->StopMoving();
+            chaser->DespawnOrUnsummon(linger);
+        }
+    }
+
+    // `hunt`: a chaser (a Mechanic Marker, not selectable or attackable) at the selected unit fixates one member
+    // (pick=); a circle of `size` on it, eligible = that member only, persistent for the chase. The circle's first pass
+    // (at the end of the warning, the howl) starts the walk and every pass re-aims it at the member, at `huntRate` x
+    // player run speed; a pass that holds the member is a catch (its hit is the ledger entry) and ends the hunt, as
+    // does the member dying or leaving the map. The chaser despawns on its own after the chase (timed summon).
+    std::vector<uint32> RegisterHunt(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
+    {
+        Unit* start = ObjectAccessor::GetUnit(*owner, spec.selected);
+        if (!start || !start->IsInWorld() || start->GetMap() != owner->GetMap())
+        {
+            err = "the hunt's start unit (the selected creature) is gone";
+            return {};
+        }
+        Player* hunted = PickMember(owner, spec, dice);
+        if (!hunted)
+        {
+            err = kNoMemberMessage;
+            return {};
+        }
+        Map* map = owner->GetMap();
+        Milliseconds const life = spec.warn + spec.persist + kChaserLinger;
+        TempSummon* chaser = owner->SummonCreature(Ids::NPC_MECHANIC_MARKER, start->GetPositionX(),
+            start->GetPositionY(), start->GetPositionZ(), start->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN,
+            static_cast<uint32>(life.count()));
+        if (!chaser)
+        {
+            err = Acore::StringFormat("could not summon the chaser ({})", Ids::NPC_MECHANIC_MARKER);
+            return {};
+        }
+        chaser->SetReactState(REACT_PASSIVE);
+        chaser->SetLevel(owner->GetLevel(), false);
+        if (chaser->GetPhaseMask() != owner->GetPhaseMask())
+            chaser->SetPhaseMask(owner->GetPhaseMask(), true);
+        // The run speed the bots read for the circle's drift (MechanicBotView AnchorDriftSpeed) and the walk uses.
+        chaser->SetSpeed(MOVE_RUN, spec.huntRate, true);
+
+        HuntPtr const h = std::make_shared<HuntState>();
+        h->chaser = chaser->GetGUID();
+        h->hunted = hunted->GetGUID();
+        h->endsAt = GameTime::GetGameTimeMS() + spec.warn + spec.persist;
+        dice.hunt = h;
+
+        TestSpec circle = spec;
+        circle.shape = "circle";
+        circle.unitAnchor = true;
+        circle.unit = chaser->GetGUID();
+        circle.target = hunted->GetGUID();
+        Eligibility elig = spec.eligibility.value_or(Eligibility());
+        elig.carriers = { hunted->GetGUID() };
+        circle.eligibility = elig;
+        std::vector<uint32> ids = RegisterTest(owner, circle, err);
+        if (ids.empty())
+        {
+            chaser->DespawnOrUnsummon();
+            return ids;
+        }
+        h->zone = ids.front();
+        h->live = true;
+        float const speed = Drill::HuntSpeedYdS(spec.huntRate);
+        MechanicRef(map, h->zone, false).OnResolve([map, h, speed](ResolveResult const& r)
+        {
+            if (r.fizzled || !h->live)
+                return;
+            Creature* chaser = map->GetCreature(h->chaser);
+            Player* member = chaser ? ObjectAccessor::GetPlayer(*chaser, h->hunted) : nullptr;
+            if (!r.hits.empty() || !chaser || !member || !member->IsAlive() || member->GetMap() != map)
+            {
+                EndHunt(map, *h, kChaserLinger);
+                return;
+            }
+            chaser->GetMotionMaster()->MovePoint(0, member->GetPosition(), FORCED_MOVEMENT_NONE, speed);
+        });
+        return ids;
+    }
+
+    // The landing at a rung bell: a circle of `landRadius` with the bell's `jump` as warning and its damage keys, one
+    // for everyone but the ringers (BellLandingTag) and one, without a marker of its own, for the ringers
+    // (BellRingerTag), so the ledger tells a ringer who did not step clear from anyone else caught in it.
+    void LandAtBell(Creature* owner, TestSpec const& bellSpec, Position const& bell,
+        std::vector<ObjectGuid> const& ringers)
+    {
+        TestSpec land = bellSpec;
+        land.shape = "circle";
+        land.size = bellSpec.landRadius;
+        land.warn = bellSpec.jump;
+        land.unitAnchor = false;
+        land.point = bell;
+        land.persist = Milliseconds(0);
+        land.lane = false;
+        land.ordering.reset();
+        land.eligibility.reset();
+        GuidSet const ringerSet(ringers.begin(), ringers.end());
+        Eligibility others;
+        for (Player const* p : GroupMembers(owner, bellSpec.gm, bellSpec.includeGm))
+            if (!ringerSet.count(p->GetGUID()))
+                others.carriers.insert(p->GetGUID());
+        std::string err;
+        if (!others.carriers.empty())   // empty carriers would mean everyone
+        {
+            TestSpec one = land;
+            one.eligibility = others;
+            one.tag = Drill::BellLandingTag(bellSpec.tag);
+            RegisterTest(owner, one, err);
+        }
+        if (!ringerSet.empty())
+        {
+            TestSpec one = land;
+            Eligibility e;
+            e.carriers = ringerSet;
+            one.eligibility = e;
+            one.tag = Drill::BellRingerTag(bellSpec.tag);
+            one.tele = false;           // the same circle as the one above
+            RegisterTest(owner, one, err);
+        }
+    }
+
+    // `soak bell=<n>`: the soak on one of n bell points (`bellApart` yd apart on a ring around the selected unit, the
+    // first at the parse facing, so they stay put for a drill run). The member of the command's live hunt is not
+    // eligible. Filled at its resolve (`need` bodies), it ends that hunt (the chaser bounds to the bell) and lands
+    // there `jump` ms later (LandAtBell). A hunt that ended first (a catch) leaves the bell rung for nothing; with no
+    // hunt at all (`.mech test soak bell=3` alone) the landing still follows a fill.
+    std::vector<uint32> RegisterBell(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
+    {
+        Position center = spec.point;
+        if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+            center = selected->GetPosition();
+        std::vector<Geo::Vec3> const bells = Drill::BellPoints({ center.GetPositionX(), center.GetPositionY(),
+            center.GetPositionZ() }, spec.facing, spec.bells, spec.bellApart);
+        Geo::Vec3 const b = bells[dice.rng.Index(static_cast<uint32>(bells.size()))];
+        Position const bell(b.x, b.y, GroundZ(owner, b.x, b.y, b.z), spec.facing);
+
+        HuntPtr const hunt = dice.hunt && HuntLive(*dice.hunt) ? dice.hunt : nullptr;
+        GuidSet carriers;
+        for (Player const* p : GroupMembers(owner, spec.gm, spec.includeGm))
+            if (!hunt || p->GetGUID() != hunt->hunted)
+                carriers.insert(p->GetGUID());
+        if (carriers.empty())
+        {
+            err = kNoMemberMessage;
+            return {};
+        }
+
+        TestSpec soak = spec;
+        soak.unitAnchor = false;
+        soak.point = bell;
+        soak.weak = false;              // the landing carries Weakened, never the soak
+        soak.once = false;
+        Eligibility elig = spec.eligibility.value_or(Eligibility());
+        elig.carriers = carriers;
+        soak.eligibility = elig;
+        std::vector<uint32> ids = RegisterTest(owner, soak, err);
+        if (ids.empty())
+            return ids;
+
+        Map* map = owner->GetMap();
+        ObjectGuid const ownerGuid = owner->GetGUID();
+        MechanicRef(map, ids.front(), false).OnResolve([map, ownerGuid, spec, bell, hunt](ResolveResult const& r)
+        {
+            if (r.fizzled || r.count < spec.need)
+                return;                 // not rung: the MissedSoak is in the ledger
+            if (hunt && !HuntLive(*hunt))
+                return;                 // caught first (or the chase is over): he went back to the tank
+            Creature* testOwner = map->GetCreature(ownerGuid);
+            if (!testOwner)
+                return;
+            if (hunt)
+            {
+                Creature* chaser = map->GetCreature(hunt->chaser);
+                EndHunt(map, *hunt, spec.jump + kChaserLinger);
+                if (chaser && chaser->IsInWorld())
+                {
+                    float const secs = std::max(static_cast<float>(spec.jump.count()) / 1000.f, 0.1f);
+                    float const dist = chaser->GetExactDist2d(&bell);
+                    chaser->GetMotionMaster()->MoveJump(bell, std::max(dist / secs, 1.f), 10.f);
+                }
+            }
+            LandAtBell(testOwner, spec, bell, r.hits);
+        });
+        return ids;
+    }
+
     // One repeat of `.mech test`: resolves the landing (at=member|group|gm|last|each, anchor=member, to=, shift=,
-    // scatter=, fix=) and the spot ring now, so a delayed repeat follows the bots, then registers.
+    // scatter=, fix=) and the spot ring now, so a delayed repeat follows the bots, then registers. `hunt` and
+    // `soak bell=` place themselves (RegisterHunt, RegisterBell).
     std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
     {
+        if (spec.shape == "hunt")
+            return RegisterHunt(owner, spec, dice, err);
+        if (spec.shape == "soak" && spec.bells)
+            return RegisterBell(owner, spec, dice, err);
         Barrage::Rng& rng = dice.rng;
         if (spec.atEach)
         {
@@ -1178,7 +1415,31 @@ namespace
             spec.runoutCount = static_cast<uint8>(std::clamp<int32>(opt.Int("count", 0), 0, 40));
         }
         if (s == "soak")
+        {
             spec.need = static_cast<uint8>(std::clamp<int32>(opt.Int("need", 2), 0, 40));
+            // bell=<n>: the soak is an alarm bell on one of n points; filled, it ends the hunt (MechanicDrill.h).
+            int32 const bells = opt.Int("bell", 0);
+            if (bells != 0 && (bells < static_cast<int32>(Drill::kMinBells) || bells > static_cast<int32>(
+                Drill::kMaxBells)))
+                opt.MarkBad("bell");
+            else if (bells)
+            {
+                spec.bells = static_cast<uint32>(bells);
+                spec.bellApart = opt.Float("apart", 15.f);
+                spec.landRadius = opt.Float("land", 6.f);
+                spec.jump = opt.Ms("jump", Milliseconds(2000));
+                if (spec.bellApart <= 0.f)
+                    opt.MarkBad("apart");
+                if (spec.landRadius <= 0.f)
+                    opt.MarkBad("land");
+            }
+        }
+        if (s == "hunt")
+        {
+            spec.huntRate = opt.Float("speed", Drill::kHuntRateNormal);
+            if (spec.huntRate <= 0.f || spec.huntRate > Drill::kMaxHuntRate)
+                opt.MarkBad("speed");
+        }
         if (s == "stack" || s == "soak")
         {
             std::string const shape = opt.Str("shape", "circle");
@@ -1288,7 +1549,8 @@ namespace
         }
 
         // common keys
-        bool const noDamage = s == "stack" || s == "soak" || s == "holdstill" || s == "spot";
+        // A bell soak reads the damage keys for its landing (LandAtBell).
+        bool const noDamage = s == "stack" || (s == "soak" && !spec.bells) || s == "holdstill" || s == "spot";
         if (!noDamage)
         {
             spec.dmg = opt.Int("dmg", -1);
@@ -1419,6 +1681,27 @@ namespace
             return "a frontal takes rear=1 or offset=, not both";
         if (spec.atEach && (s == "spot" || s == "spread" || s == "runout" || s == "bait" || s == "holdstill"))
             return "at=each puts a zone, stack or soak under every member";
+        if (s == "hunt")
+        {
+            if (selected == gm)
+                return "hunt needs a selected unit: the chaser starts at it";
+            if (atPoint || spec.unitAnchor || spec.anchorMember || spec.to != TestSpec::To::None || spec.shifted)
+                return "hunt starts at the selected unit and fixates a member it picks (pick=): leave at=, anchor= "
+                    "and shift= out";
+            if (spec.persist <= Milliseconds(0))
+                return "hunt needs persist=<ms>: how long the chase lasts";
+            if (spec.tick <= Milliseconds(0))
+                return "hunt needs tick= > 0: how often the chase is re-aimed and judged";
+        }
+        if (spec.bells)
+        {
+            if (spec.lane || spec.ordering || atPoint || spec.unitAnchor || spec.anchorMember || spec.shifted
+                || spec.persist > Milliseconds(0))
+                return "bell= places the soak on one of its points: no shape=line, order=, at=, anchor=, shift= or "
+                    "persist=";
+            if (!spec.need)
+                return "bell= needs need= >= 1: the bodies that ring it";
+        }
 
         std::string const bad = opt.Bad();
         if (!bad.empty())
@@ -1576,7 +1859,7 @@ namespace
                 planned.push_back(std::move(p));
                 continue;
             }
-            if (!head.empty() && Drill::DamageShape(head[0]) && !opt.percent)
+            if (Drill::DamageStep(line) && !opt.percent)
                 line += Acore::StringFormat(" dmg={}", dmg);
             std::vector<std::string_view> const stepTokens = Acore::Tokenize(line, ' ', false);
             Options stepOpt;
@@ -2379,7 +2662,7 @@ public:
         }
 
         bool const landsOnMembers = spec.atMember || spec.atGroup || spec.atEach || spec.anchorMember
-            || spec.to == TestSpec::To::Member || s == "spot";
+            || spec.to == TestSpec::To::Member || s == "spot" || s == "hunt" || spec.bells;
         if (landsOnMembers && GroupMembers(owner, spec.gm, spec.includeGm).empty())
         {
             handler->SendErrorMessage("{}", kNoMemberMessage);
@@ -2439,6 +2722,10 @@ public:
         if (s == "bait")
             handler->PSendSysMessage("The test owner moved to {}: the bait lands on whoever is farthest from it.",
                 spec.atGm || selected == gm ? "you" : selected->GetName());
+        if (s == "hunt")
+            handler->PSendSysMessage("The chaser starts at {} and walks at {:.2f} x run speed ({:.1f} yd/s) for {} ms "
+                "after the warning (seed {}).", selected->GetName(), spec.huntRate,
+                Drill::HuntSpeedYdS(spec.huntRate), spec.persist.count(), rng->rng.Seed());
         std::string const unused = opt.Unused();
         if (!unused.empty())
             handler->PSendSysMessage("Ignored keys for {}: {}", s, unused);
