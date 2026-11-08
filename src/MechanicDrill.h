@@ -365,14 +365,14 @@ namespace BossMechanics::Drill
             // and the Echo of Odo (BS5). 0 s: a chaser starts at the creature and fixates a random non-tank; a 3 yd
             // circle on it, eligible = that player only, stands through a 2 s howl, then the chaser walks at the
             // player for 10 s at 80% of player run speed (passes every 200 ms; the first one that holds the player is
-            // a catch and ends the hunt). 0.5 s: a bell, a 1-body Soak 2 yd on one of three points 15 yd apart around
-            // the creature, not the hunted player, not the tank; filled at its 5 s resolve (the walk plus the 1 s
-            // ring), it ends the hunt and the chaser bounds to the bell, landing 2 s later with a 6 yd circle (tag 3
-            // for the others, 4 for the ringer). 15 s: the heroic hunt, 95% speed and no bell (spent).
+            // a catch and ends the hunt). 0.5 s: a bell, a 1-body Soak 2 yd on one of three points 19 yd apart (the
+            // room's bells, section 7 #24) around the creature, not the hunted player, not the tank; filled at its 5 s
+            // resolve (the walk plus the 1 s ring), it ends the hunt and the chaser bounds to the bell, landing 2 s
+            // later with a 6 yd circle (tag 3 for the others, 4 for the ringer). 15 s: the heroic hunt, 95% speed and no bell (spent).
             { "sfk-hunt", "Odo's Hunt: a 3 yd chaser at 80% for 10 s, a bell soak that ends it (6 yd landing), "
                 "then a 95% hunt with no bell", 30000, false, {
                     { 0, "hunt 3 2000 speed=0.8 persist=10000 tick=200 pick=nontank pct=35 tag=1" },
-                    { 500, "soak 2 5000 need=1 role=nontank bell=3 apart=15 land=6 jump=2000 pct=35 weak=1 tag=2" },
+                    { 500, "soak 2 5000 need=1 role=nontank bell=3 apart=19 land=6 jump=2000 pct=35 weak=1 tag=2" },
                     { 15000, "hunt 3 2000 speed=0.95 persist=10000 tick=200 pick=nontank pct=35 tag=5" },
                 }, 2 },     // two cycles a run; the sweep runs sfk-hunt:4 (120 s)
         };

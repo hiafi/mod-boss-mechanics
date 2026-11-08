@@ -76,12 +76,13 @@ namespace
         // Maul is a DoT with a stun: no Weakened (SK ruling 17).
         CHECK(!Drill::Value(hunt, "weak"));
 
-        // OD3: a 1-body Soak 2 yd on one of three bells 15 yd apart, not the tank (the hunted is left out at run time),
-        // registered after the hunt (so the run's hunt state is set), resolving inside the chase.
+        // OD3: a 1-body Soak 2 yd on one of three bells 19 yd apart (the room's, section 7 #24), not the tank (the
+        // hunted is left out at run time), registered after the hunt (so the run's hunt state is set), resolving
+        // inside the chase.
         CHECK(d.steps[1].atMs == 500);
         CHECK(Shape(bell) == "soak" && Size(bell) == 2.f && Key(bell, "need", 0.f) == 1.f);
         CHECK(Is(bell, "role", "nontank"));
-        CHECK(Key(bell, "bell", 0.f) == 3.f && Key(bell, "apart", 0.f) == 15.f);
+        CHECK(Key(bell, "bell", 0.f) == 3.f && Key(bell, "apart", 0.f) == 19.f);
         CHECK(Key(bell, "tag", 0.f) == static_cast<float>(Drill::kHuntTagBell));
         float const chaseStart = static_cast<float>(d.steps[0].atMs) + Warn(hunt);
         float const chaseEnd = chaseStart + Key(hunt, "persist", 0.f);
