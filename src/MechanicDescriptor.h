@@ -177,6 +177,13 @@ namespace BossMechanics
             return *this;
         }
 
+        // For one bot only (its raw ObjectGuid): a per-bot pick the script makes, such as Jandice's Shell Game guess.
+        TargetEntry& OnlyFor(std::uint64_t botGuid)
+        {
+            bot = botGuid;
+            return *this;
+        }
+
         std::uint32_t entry = 0;            // entry, or one unit (follow the guid through swaps)
         std::uint64_t guid = 0;             // raw ObjectGuid; set: matches that unit only, whatever its entry
         std::int8_t priority = 0;           // the boss is 0; negative = below the boss
@@ -187,6 +194,7 @@ namespace BossMechanics
         float togetherPct = 0.f;            // ...keeping the two within this many percent
         bool breakOut = false;              // holds a player: order by the held player's role (tank, healer)
         bool hostilePlayers = false;        // HostilePlayers: matches a hostile player, never an entry or a guid
+        std::uint64_t bot = 0;              // OnlyFor: set, the entry concerns that bot alone (raw ObjectGuid)
     };
 
     // Ignored while `when` holds: no damage from bots or pets, no AoE count.
@@ -850,6 +858,7 @@ namespace BossMechanics::Desc
         bool tank = false;
         bool healer = false;
         bool melee = false;     // a melee damage dealer (ignored for tanks and healers)
+        Key guid = 0;           // the bot itself (TargetEntry::OnlyFor); 0 matches no OnlyFor entry
     };
 
     inline bool Fits(Who who, BotFacts const& bot)
@@ -935,7 +944,7 @@ namespace BossMechanics::Desc
             if (e.hostilePlayers ? !IsHostilePlayer(d, u)
                 : byGuid ? e.guid != u.guid : (u.player || !e.entry || e.entry != u.entry))
                 continue;
-            if (!Fits(e.who, bot) || !Holds(e.when, u, ctx))
+            if (!Fits(e.who, bot) || (e.bot && e.bot != bot.guid) || !Holds(e.when, u, ctx))
                 continue;
             if (!best || (byGuid && !bestByGuid)
                 || (byGuid == bestByGuid && e.priority > d.targets[*best].priority))

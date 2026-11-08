@@ -201,7 +201,7 @@ namespace
         CHECK(rings[0].resolveMs - rings[0].startMs == 2000);
         rings.insert(rings.end(), out.begin(), out.end());
         rings.insert(rings.end(), in.begin(), in.end());
-        float const inner[] = { 0.f, 6.f, 12.f, 12.f, 6.f, 0.f };
+        float const inner[] = { 0.f, 6.f, 12.06f, 12.06f, 6.f, 0.f };
         float const outer[] = { 6.f, 12.f, 18.f, 18.f, 12.f, 6.f };
         std::uint32_t const gap[] = { 0, 1500, 1500, 1000, 1000, 1000 };
         for (std::size_t i = 0; i < rings.size(); ++i)
@@ -211,6 +211,9 @@ namespace
             CHECK(Size(line) == outer[i]);
             CHECK(Key(line, "inner", 0.f) == inner[i]);
             CHECK((inner[i] == 0.f) == (Shape(line) == "circle"));
+            // The 12-18 yd ring sits exactly on the 0.67 donut ratio step, so the drawn hole is the real one.
+            if (outer[i] == 18.f)
+                CHECK(std::fabs(inner[i] / outer[i] - BossMechanics::Ids::kDonutRatios[5]) < 1e-5f);
             if (i)
             {
                 CHECK(rings[i].resolveMs - rings[i - 1].resolveMs == gap[i]);
