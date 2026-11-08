@@ -308,6 +308,8 @@ namespace BossMechanics
         // to the left of the hitbox's, instead of the hitbox (ApplyDrawStrip). drawWidth 0 = draw the hitbox.
         float drawLateral = 0.f;
         float drawWidth = 0.f;
+        // Decoy() (shape kinds, no mine; Judge::DecoyFits): drawn like a real one, hits nobody, never in the bot view.
+        bool decoy = false;
 
         // callbacks (owner scripts; dropped when the encounter ends, never called once the owner left the map)
         std::function<void(Unit* hit)> onHit;

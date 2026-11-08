@@ -137,6 +137,10 @@ namespace BossMechanics
         MechanicRef& Tag(uint32 tag);
         MechanicRef& NoTelegraph();
         MechanicRef& NoFillTimer();                     // outline only until the danger is live (no growing fill)
+        // Zone/Frontal, not a mine (Judge::DecoyFits), in the registering statement: drawn exactly like a real one,
+        // but its resolve hits nobody (no damage, failure, Weakened, rider or onHit; onResolve fires with no hits)
+        // and bots never see it, so they treat its ground as safe (Jandice's heroic fake sigil).
+        MechanicRef& Decoy();
         MechanicRef& OnHit(std::function<void(Unit* hit)> fn);
         MechanicRef& OnResolve(std::function<void(ResolveResult const&)> fn);
 
@@ -164,6 +168,12 @@ namespace BossMechanics
         LaneBuilder& Lanes(Axis axis, LaneSpec const& spec, Milliseconds warn);
         // Lanes of `width` covering the frame across `axis`, all but one random lane (Bloodlines).
         LaneBuilder& ExceptOne(float width, Milliseconds warn, Axis axis = Axis::X);
+        // After ExceptOne: its free lane is marked too, as a Decoy() with that call's warning and lane color (heroic
+        // Bloodlines: every lane marked, one harmless). It draws only the part of the free lane no real lane covers
+        // (DecoyLaneStrip), so it tiles with its neighbors like a real lane. The lane set keeps the whole free lane
+        // as free (the bots' safe lane); the decoy is in Handles() and Each() (harmless there). Once per ExceptOne;
+        // without one before it, a warning and nothing.
+        LaneBuilder& DecoyFree();
         // A persistent cell at every crossing of an X lane and a Y lane of this set (L10). Cells draw in the
         // encounter's `cells` color and show only their outline until they burn (NoFillTimer). Lanes laid along the
         // set's second axis draw in its `crossLanes` color.
@@ -182,10 +192,20 @@ namespace BossMechanics
         // take the encounter's crossLanes color.
         void ColorSecondAxis(Axis axis, std::size_t firstNew);
 
+        // The last ExceptOne's free lane, for DecoyFree: the strip to draw, its warning, and the index in the set's
+        // lanes of that call's first real lane (its color is the decoy's).
+        struct FreeLane
+        {
+            LanePlacement place;
+            Milliseconds warn{ 0 };
+            std::size_t firstLane = 0;
+        };
+
         Map* _map = nullptr;
         ObjectGuid _owner;
         uint32 _laneSet = 0;
         std::vector<uint32> _created;
+        std::optional<FreeLane> _free;
     };
 }
 

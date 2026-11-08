@@ -242,6 +242,116 @@ namespace BossMechanics::Drill
         return std::nullopt;
     }
 
+    // ---- Scholomance shapes (Scholomance build §3.9, drill `scholomance-shapes`) -----------------------------------
+    // The short warnings of the Scholomance build that need a drill before its heroic sign-off. Landing keys of
+    // `.mech test` this adds (the runtime is MechanicCommand.cpp):
+    //   away=<yd>      a point anchor moves exactly that far at a random bearing (MA6: a circle 2 yd off each player;
+    //                  GD4: a portal on the room's edge);
+    //   at=prev        the centre of the previous point-anchored circle of this command (or drill run); none yet: the
+    //                  selected unit (PK2: the next specimen stands inside the last ring; with away=);
+    //   at=predict     where a member (pick=) will be `lead=` ms later at its heading and speed, on it while it
+    //                  stands (IB1: MoveHeading, PredictSpot);
+    //   grid=<n> apart=<yd> decoys=<k>    (circle) n x n circles `apart` yd apart, centred on the anchor point and
+    //                  squared to the facing, k of them Decoy() at random (JB1 heroic: GridPoints, PickDistinct);
+    //   decoy=1        the shape is a Decoy() (Mechanic::Decoy; lanes safe=1: the free lane drawn as one).
+
+    constexpr std::uint32_t kMaxGrid = 5;               // grid= at most 5 x 5
+    constexpr std::uint32_t kDefaultPredictLeadMs = 1500;
+
+    // A grid of circles of radius r leaves no gap between four neighbors when apart <= r x sqrt(2).
+    inline bool GridCovers(float r, float apart)
+    {
+        return apart > 0.f && apart <= r * std::sqrt(2.f) + 1e-4f;
+    }
+
+    // n x n points `apart` yd apart centred on `center`, rows along `facing` (row-major from the back left).
+    inline std::vector<Geo::Vec3> GridPoints(Geo::Vec3 const& center, float facing, std::uint32_t n, float apart)
+    {
+        std::vector<Geo::Vec3> out;
+        out.reserve(static_cast<std::size_t>(n) * n);
+        float const half = (static_cast<float>(n) - 1.f) / 2.f;
+        for (std::uint32_t i = 0; i < n; ++i)
+            for (std::uint32_t j = 0; j < n; ++j)
+                out.push_back(Shifted(center, facing, (static_cast<float>(i) - half) * apart,
+                    (half - static_cast<float>(j)) * apart));
+        return out;
+    }
+
+    // k distinct indices below n, in pick order; `index(m)` returns a random index below m (k is capped at n).
+    template <class IndexFn>
+    std::vector<std::uint32_t> PickDistinct(std::uint32_t n, std::uint32_t k, IndexFn&& index)
+    {
+        std::vector<std::uint32_t> pool(n);
+        for (std::uint32_t i = 0; i < n; ++i)
+            pool[i] = i;
+        std::vector<std::uint32_t> out;
+        for (std::uint32_t taken = 0; taken < k && !pool.empty(); ++taken)
+        {
+            std::uint32_t const at = std::min<std::uint32_t>(index(static_cast<std::uint32_t>(pool.size())),
+                static_cast<std::uint32_t>(pool.size()) - 1);
+            out.push_back(pool[at]);
+            pool.erase(pool.begin() + at);
+        }
+        return out;
+    }
+
+    // `away=`: `p` moved `yd` along `bearing`.
+    inline Geo::Vec3 Away(Geo::Vec3 const& p, float bearing, float yd)
+    {
+        return Shifted(p, bearing, yd, 0.f);
+    }
+
+    // `at=predict`: the direction a mover goes from its movement keys (forward, back, strafe), relative to its
+    // orientation; nullopt when it stands or the keys cancel out. A server-driven move (a bot's spline) sets forward
+    // and faces along its path.
+    inline std::optional<float> MoveHeading(float orientation, bool forward, bool back, bool left, bool right)
+    {
+        float const ahead = (forward ? 1.f : 0.f) - (back ? 1.f : 0.f);
+        float const side = (left ? 1.f : 0.f) - (right ? 1.f : 0.f);
+        if (ahead == 0.f && side == 0.f)
+            return std::nullopt;
+        return orientation + std::atan2(side, ahead);
+    }
+
+    // Where the mover stands `leadMs` from now at `speed` yd/s along `heading`; where it stands now without one.
+    inline Geo::Vec3 PredictSpot(Geo::Vec3 const& at, std::optional<float> heading, float speed, std::uint32_t leadMs)
+    {
+        if (!heading || speed <= 0.f)
+            return at;
+        return Away(at, *heading, speed * static_cast<float>(leadMs) / 1000.f);
+    }
+
+    // Ledger tags of `scholomance-shapes` (sweep keys `Zone/<tag>`). The lead-ins (1, 6) warn 2 s like any first shape
+    // and are reported; every other tag is a §3.9 short warning under the sweep's bar (ScholoBarTag).
+    constexpr std::uint32_t kScholoTagFuse = 1;         // PK2: the first fuse ring, 2 s
+    constexpr std::uint32_t kScholoTagChain = 2;        // PK2: chained rings, 1 s each
+    constexpr std::uint32_t kScholoTagBarrage = 3;      // MA6: three offset waves, 1.5 s, 1 s apart
+    constexpr std::uint32_t kScholoTagRead = 4;         // IB1: the first marker on the read player, 1.5 s
+    constexpr std::uint32_t kScholoTagForesight = 5;    // IB1: the predicted markers, 1.5 s each
+    constexpr std::uint32_t kScholoTagOssuary = 6;      // RG4: the first ring, 2 s
+    constexpr std::uint32_t kScholoTagOut = 7;          // RG4: rings outward, 1.5 s apart
+    constexpr std::uint32_t kScholoTagIn = 8;           // RG4 heroic: rings back inward, 1 s apart
+    constexpr std::uint32_t kScholoTagSigil = 9;        // JB1 heroic: the real sigils and the room's edge, 6 s
+    constexpr std::uint32_t kScholoTagPortal = 10;      // GD4: portal lanes from the edge through players, 2 s
+    constexpr std::uint32_t kScholoBarTags[] = { 2, 3, 4, 5, 7, 8, 9, 10 };
+
+    inline bool ScholoBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kScholoBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // JB1 heroic in the drill: a 3 x 3 grid of 8 yd sigils 11 yd apart (one a decoy) and the room's edge, a donut
+    // from kSigilEdgeInner (inside the grid's outer rim, about 17.7 yd) to kSigilEdgeOuter (ratio 0.25, a ladder
+    // step, so the drawn hole is the real one): the decoy's circle is the only safe ground within a 6 s run.
+    constexpr float kSigilRadius = 8.f;
+    constexpr float kSigilApart = 11.f;
+    constexpr std::uint32_t kSigilGrid = 3;
+    constexpr float kSigilEdgeInner = 17.f;
+    constexpr float kSigilEdgeOuter = 68.f;
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -375,6 +485,48 @@ namespace BossMechanics::Drill
                     { 500, "soak 2 5000 need=1 role=nontank bell=3 apart=19 land=6 jump=2000 pct=35 weak=1 tag=2" },
                     { 15000, "hunt 3 2000 speed=0.95 persist=10000 tick=200 pick=nontank pct=35 tag=5" },
                 }, 2 },     // two cycles a run; the sweep runs sfk-hunt:4 (120 s)
+            // Scholomance build §3.9: the short warnings, heroic numbers (pct= in the percent mode). 0 s, Polkelt PK2:
+            // a 6 yd fuse ring 3 yd off a non-tank (2 s), then two chained rings, each 4 yd off the last one's centre
+            // (the next specimen inside it), 1 s each. 5 s, Malicia MA6: three waves 1 s apart, a 4 yd circle 2 yd
+            // off every member (1.5 s). 10 s, Illucia IB1: a 4 yd marker on any member (1.5 s), then four more, each
+            // where that member will be 1.5 s later (at its heading and speed) as the last one lands. 19 s,
+            // Rattlegore RG4: rings 0-6, 6-12, 12-18 yd on the creature (2 s, then 1.5 s apart), then back inward
+            // 12-18, 6-12, 0-6 (1 s apart). 28 s, Jandice JB1 heroic: a 3 x 3 grid of 8 yd sigils 11 yd apart on the
+            // group, one a decoy, and the room's edge (a donut from 17 yd), 6 s: the decoy's circle is the only safe
+            // ground. 35 s, Gandling GD4 heroic: three 4 yd lanes from points 20 yd off the group, each through a
+            // different non-tank and on 40 yd (2 s).
+            { "scholomance-shapes", "chained fuse rings, offset barrage, Foresight chain, Ossuary rings out and in, "
+                "decoy sigil grid, portal lanes", 40000, false, {
+                    { 0, "circle 6 2000 at=member pick=nontank away=3 school=nature pct=40 weak=1 tag=1" },
+                    { 0, "circle 6 1000 at=prev away=4 after=resolve school=nature pct=40 weak=1 tag=2" },
+                    { 0, "circle 6 1000 at=prev away=4 after=resolve school=nature pct=40 weak=1 tag=2" },
+                    { 5000, "circle 4 1500 at=each away=2 school=shadow pct=30 tag=3" },
+                    { 1000, "circle 4 1500 at=each away=2 after=with school=shadow pct=30 tag=3" },
+                    { 1000, "circle 4 1500 at=each away=2 after=with school=shadow pct=30 tag=3" },
+                    { 10000, "circle 4 1500 at=member pick=any school=shadow pct=40 weak=1 tag=4" },
+                    { 0, "circle 4 1500 at=predict pick=same lead=1500 after=resolve school=shadow pct=40 weak=1 "
+                        "tag=5" },
+                    { 0, "circle 4 1500 at=predict pick=same lead=1500 after=resolve school=shadow pct=40 weak=1 "
+                        "tag=5" },
+                    { 0, "circle 4 1500 at=predict pick=same lead=1500 after=resolve school=shadow pct=40 weak=1 "
+                        "tag=5" },
+                    { 0, "circle 4 1500 at=predict pick=same lead=1500 after=resolve school=shadow pct=40 weak=1 "
+                        "tag=5" },
+                    { 19000, "circle 6 2000 anchor=target pct=50 tag=6" },
+                    { 0, "donut 12 1500 inner=6 anchor=target after=resolve pct=50 tag=7" },
+                    { 0, "donut 18 1500 inner=12 anchor=target after=resolve pct=50 tag=7" },
+                    { 0, "donut 18 1000 inner=12 anchor=target after=resolve pct=50 tag=8" },
+                    { 0, "donut 12 1000 inner=6 anchor=target after=resolve pct=50 tag=8" },
+                    { 0, "circle 6 1000 anchor=target after=resolve pct=50 tag=8" },
+                    { 28000, "circle 8 6000 at=group grid=3 apart=11 decoys=1 school=shadow pct=60 tag=9" },
+                    { 0, "donut 68 6000 inner=17 at=group after=with school=shadow pct=60 tag=9" },
+                    { 35000, "line 40 2000 width=4 at=group away=20 to=member pick=nontank fix=1 school=arcane "
+                        "pct=40 weak=1 tag=10" },
+                    { 0, "line 40 2000 width=4 at=group away=20 to=member pick=other fix=1 after=with "
+                        "school=arcane pct=40 weak=1 tag=10" },
+                    { 0, "line 40 2000 width=4 at=group away=20 to=member pick=other fix=1 after=with "
+                        "school=arcane pct=40 weak=1 tag=10" },
+                } },        // three cycles a run (120 s): the sweep runs scholomance-shapes:3
         };
         return drills;
     }

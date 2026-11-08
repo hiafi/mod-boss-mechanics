@@ -1274,6 +1274,7 @@ namespace BossMechanics
             c.eligible = c.inside && IsEligible(*m, u);
             c.tankExempted = c.eligible && IsTankExempted(*m, u);
             c.hitThisPass = done.count(u->GetGUID()) != 0;
+            c.decoy = m->decoy;
             if (!Judge::KeepResolveTarget(m->kind, c))
                 return true;
             done.insert(u->GetGUID());
@@ -1324,6 +1325,10 @@ namespace BossMechanics
     // ----------------------------------------------------------------------------------------------------------------
     bool Registry::CastsSpell(ActiveMechanic const& m) const
     {
+        // A decoy never casts: its telegraph-only pass keeps nobody (Judge::KeepResolveTarget), so onResolve gets no
+        // hits and nothing reaches the ledger, Weakened, a rider or onHit.
+        if (m.decoy)
+            return false;
         return m.damage.HasDamage() || m.damage.riderSpell || m.weakened || m.onHit;
     }
 
@@ -1360,7 +1365,7 @@ namespace BossMechanics
         else
         {
             // Telegraph-only (no damage, rider, Weakened or onHit): nobody is hit and nothing reaches the ledger;
-            // the result still lists who stood inside.
+            // the result still lists who stood inside (a decoy lists nobody).
             GuidSet& done = m.hitPerPass[pass];
             for (Player* p : CandidatePlayers(m))
             {
@@ -1371,6 +1376,7 @@ namespace BossMechanics
                 c.eligible = IsEligible(m, p);
                 c.tankExempted = IsTankExempted(m, p);
                 c.hitThisPass = done.count(p->GetGUID()) != 0;
+                c.decoy = m.decoy;
                 if (!Judge::KeepResolveTarget(m.kind, c))
                     continue;
                 done.insert(p->GetGUID());

@@ -64,11 +64,24 @@ namespace BossMechanics
             bool eligible = true;           // Registry::IsEligible (pets: their owner's eligibility)
             bool tankExempted = false;      // Registry::IsTankExempted
             bool hitThisPass = false;       // already kept by an earlier cast of the same pass
+            bool decoy = false;             // the mechanic is a Decoy() (DecoyFits): it keeps nobody
         };
+
+        // Decoy() (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane): a Zone or Frontal drawn exactly
+        // like a real one that hits nobody. Its resolve keeps no target (KeepResolveTarget), so it deals no damage,
+        // posts no failure, stacks no Weakened, casts no rider and calls no onHit; onResolve still fires, with no
+        // hits (the script's pop visual). Bots never see it: the view skips it like an empty floor. A mine cannot be
+        // one (its armed ring is a tell of its own, and a body sets it off).
+        constexpr bool DecoyFits(Kind k, bool mine)
+        {
+            return IsShapeKind(k) && !mine;
+        }
 
         // The resolve filter's rule (Registry::FilterResolveTargets and the telegraph-only pass).
         constexpr bool KeepResolveTarget(Kind k, Candidate const& c)
         {
+            if (c.decoy)
+                return false;
             if (!c.alive || !c.playerControlled || c.gameMaster)
                 return false;
             if (PlayersOnly(k) && !c.player)

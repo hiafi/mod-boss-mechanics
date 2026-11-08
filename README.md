@@ -90,7 +90,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Zone(owner, Shapes::Circle/Donut/Cone/Line/LineFacing(...), warn)` | Any shape on a point or unit anchor |
 | `Circle`, `Donut`, `Cone(owner, source, angle, len, warn, exempt)`, `Line` | Zone shortcuts |
 | `Mine(owner, pos, r, arm, grace)` | Ring + fill while arming, dashed ring once armed; `grace` inside detonates it |
-| `RoomFrame(owner, frame)` -> `LaneBuilder` | `.Lanes`, `.ExceptOne`, `.BurnCrossings`, `.Each` (`BossMechanics.h`) |
+| `RoomFrame(owner, frame)` -> `LaneBuilder` | `.Lanes`, `.ExceptOne`, `.DecoyFree`, `.BurnCrossings`, `.Each` |
 | `Spread(owner, r, warn)`, `RunOut(owner, target, r, warn)` | Circle on each carrier; hits the other players inside |
 | `Stack(owner, at, r, warn)`, `Soak(owner, at, r, count, warn)` | Get-in circles; results to `onResolve` |
 | `Stack(owner, spec, warn)`, `Soak(owner, spec, count, warn)` | Any shape (`ZoneSpec`; a lane: `Shapes::LineFacing`) |
@@ -107,7 +107,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
 `AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `Count(n)`, `Targets(set)`,
 `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`, `NoTelegraph()`,
-`NoFillTimer()`, `OnHit(fn)`, `OnResolve(fn)`.
+`NoFillTimer()`, `Decoy()`, `OnHit(fn)`, `OnResolve(fn)`.
 
 M3 options:
 
@@ -120,6 +120,28 @@ M3 options:
 | `Park(unit)` | shape kinds | the tank holds `unit` (default the owner) inside this shape; bots only |
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
+
+**Decoys** (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane). `Decoy()` fits a Zone or Frontal that
+is not a mine (`Judge::DecoyFits`) and must be set in the registering statement. The marker is drawn exactly like a
+real one (same shape, color, fill timer), but the resolve keeps nobody (`Judge::KeepResolveTarget`): no damage, no
+ledger failure, no Weakened, no rider, no `onHit`. `onResolve` still fires, with no hits, so the script plays its
+"pops harmlessly" visual there. Bots never see a decoy (the view and the tank's drag-out skip it), so its ground reads
+as safe floor and the solver sends them into it when everything else is covered. `.mech list` flags it `decoy`.
+
+```cpp
+// Heroic Blood Sigil: 7 real circles and the empty-handed reflection's decoy.
+Mechanic::Circle(me, Anchor(reflection), 8.f, 6s).Damage(60.f).School(SPELL_SCHOOL_SHADOW).Tag(1);
+Mechanic::Circle(me, Anchor(decoyReflection), 8.f, 6s).Decoy().Tag(1)
+    .OnResolve([this](BossMechanics::ResolveResult const&) { /* Vanish Visual on the decoy */ });
+// Heroic Bloodlines: every lane marked, the free one harmless.
+Mechanic::RoomFrame(me, aisle).ExceptOne(6.f, 5s, axis).DecoyFree().Each([](MechanicRef& l) { l.Damage(70.f); });
+```
+
+`LaneBuilder::DecoyFree()` follows an `ExceptOne` and marks its free lane as a decoy with that call's warning and lane
+color. It draws only the part of the free lane no real lane covers (`DecoyLaneStrip`, `MechanicMath.h`): the clamped
+last lane overlaps the one before it, so a decoy beside it is narrower, and the decoy tiles with the real lanes the way
+they tile with each other. The lane set still lists the whole free lane in `freeLanes` (the bots' safe lane). The
+decoy is in `Handles()` and `Each()`; options there are harmless on it.
 
 Damage is a percent of the reference health (`ReferenceHealthProvider`; keyed rows from the config, see
 [Reference health](#reference-health)), one flat number per target set by the resolve spell, so boss buffs and the creature damage rate never change it
@@ -319,6 +341,7 @@ resizes send one value update per fill marker per step (~7 per second), like a m
   `PieceWorldPose` / `MarkerModelToWorld` are the placement the host test pins against `Geo::Contains`.
 - Lanes: `ExceptOne`'s last lane is clamped inside the frame and overlaps the one before it; its marker draws only
   the strip the others leave uncovered (`CoverLaneDrawnStrip`, `ApplyDrawStrip`), its hitbox stays the whole lane.
+  `DecoyFree()` draws the free lane's uncovered strip the same way (`DecoyLaneStrip`).
   Lanes laid along the second axis of a set draw in the encounter's `crossLanes` color (yellow) and crossing cells in
   `cells` (purple), outline only until they burn, so a crossing does not stack six layers of one color.
 - Both layers use the same rounding, so the full fill is exactly the outline.
@@ -386,8 +409,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
-.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt> [cycles=3 (alexei 1)] [seed=] [dmg=1]
-            [self=0]
+.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes>
+            [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -485,6 +508,20 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   eligible. Filled at its resolve, it ends that hunt, the chaser bounds to the bell, and `jump` ms later a circle of
   `land` lands there with the soak line's damage keys: tag + 1 for everyone but the ringers, tag + 2 (no marker of its
   own) for the ringers. A hunt caught before the bell resolves leaves no landing; a bell with no hunt still lands.
+- Scholomance build (WP-X, and WP-G §3.9, drill `scholomance-shapes`):
+  - `decoy=1` (circle, donut, cone, rearcone, frontal, line, projectile): the shape is a `Decoy()` (drawn, hits
+    nobody, not in the bot view). On `lanes` it needs `safe=1` and marks the safe lane as a decoy (`DecoyFree`).
+  - `grid=<n> [apart=<yd>] [decoys=<k>]` (circle): n x n circles (n 2-5) `apart` yd apart (default 1.375 x the
+    radius; at most radius x 1.41, so the circles leave no gap), centred on the landing and squared to your facing;
+    `k` of them, picked by the dice, are decoys. Not with `anchor=`, `at=each` or `decoy=1`.
+  - `away=<yd>`: a point landing moves exactly that far at a random bearing (after `at=`, before a line's source is
+    read: `at=group away=20 to=member fix=1` is a lane from a point 20 yd off the group through a member). Not with
+    `anchor=`.
+  - `at=prev`: the centre of the last point-anchored circle this command (or drill run) registered (a grid: its
+    centre); none yet, the selected unit. With `away=`: a chain hopping from ring to ring.
+  - `at=predict [lead=1500]`: where a member (`pick=`) will stand `lead` ms from now at its heading and speed, read
+    from its movement keys (forward, back, strafe; walk and back speeds) and snapped to the floor; on it while it
+    stands. A bot's spline move sets forward and faces along its path.
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -568,11 +605,25 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     2 s later (`weak=1`); 15 s, the heroic hunt at 95% (6.65 yd/s) with no bell. `pct=35` (Maul, the landing) in the
     percent mode. Tags: Zone/1 catch at 80%, MissedSoak/2 bell not rung, Zone/3 others in the landing, Zone/4 the
     ringer in it, Zone/5 catch at 95%. The sweep runs `sfk-hunt:4` (120 s, a program runs once per sim iteration).
+  - `scholomance-shapes` (Scholomance build §3.9: the short warnings before the heroic sign-off; 40 s, three cycles by
+    default = 120 s, heroic numbers in `pct=`): 0 s, Polkelt PK2, a 6 yd fuse ring 3 yd off a non-tank (2 s), then
+    two chained rings, each 4 yd off the last one's centre, 1 s each (`at=prev away=4`). 5 s, Malicia MA6, three
+    waves 1 s apart of a 4 yd circle 2 yd off every member (1.5 s, `at=each away=2`). 10 s, Illucia IB1, a 4 yd marker
+    on any member (1.5 s), then four more, each registered as the last lands where that member will be 1.5 s later
+    (`at=predict pick=same`). 19 s, Rattlegore RG4, rings 0-6, 6-12, 12-18 yd on the creature (2 s, then 1.5 s
+    apart), then back inward 12-18, 6-12, 0-6 (1 s apart). 28 s, Jandice JB1 heroic, a 3 x 3 grid of 8 yd sigils 11 yd
+    apart on the group, one a decoy, and the room's edge as a donut 17-68 yd, 6 s: the decoy's circle is the only safe
+    ground. 35 s, Gandling GD4 heroic, three 4 x 40 yd lanes from points 20 yd off the group, each through a different
+    non-tank (2 s). Weakened on PK2, IB1 and GD4 (rulings 20, 21). Tags (`Zone/<tag>`): 1 first fuse, 2 chained
+    fuses, 3 barrage, 4 first Foresight marker, 5 predicted markers, 6 first ring, 7 rings out, 8 rings in, 9 sigils and
+    the edge, 10 portal lanes; 1 and 6 are 2 s lead-ins (reported), the rest are under the sweep's bar
+    (`Drill::kScholoBarTags`). The sweep runs `scholomance-shapes:3`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
 
-- `.mech list`: id, kind, shape, color, tag, time to resolve and to expiry, marker count.
+- `.mech list`: id, kind, shape, color, tag, time to resolve and to expiry, marker count, and the flags projectile,
+  mine, persistent, decoy.
 - `.mech markers [range]`: every live marker within range (100 yd) of the GM, one line each: mechanic id, layer
   (outline / fill), display decoded (shape, color, ladder step, line aspect k), the scale the creature really has and
   the one the server asked for, native and current display, x y z o, distance and bearing from the GM (absolute and
