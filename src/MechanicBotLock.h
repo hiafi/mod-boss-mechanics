@@ -48,6 +48,11 @@
  * chase valve (BossMechanics.Bots.ChaseReleaseMs): a melee bot or tank refused that long walks in on a short horizon
  * (M5 CD; it is not released). Facing-only actions are refused in Escape (M5 CD, LockRules::FacingOnlyRefused).
  *
+ * Stratholme X3 (the Jump kind): while the bot's hop is in flight (BotBrain::Hopping, under a second) every action is
+ * refused, ours too, released or not, uncounted (a move, an attack's MotionMaster::Clear, a facing spline or a cast's
+ * turn would cut the hop). While a hop is due (MechanicBotState::nextHopAt), a cast-time spell that would end after it
+ * starts is refused in Idle and Watch too; Hold reads it through leaveBy.
+ *
  * Multipliers are per engine, so the strategy registers this in the combat and the non-combat engine alike.
  */
 

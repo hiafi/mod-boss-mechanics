@@ -27,7 +27,8 @@ namespace BossMechanics
         Soak,
         Bait,
         HoldStill,
-        Spot
+        Spot,
+        Jump        // Stratholme X3: a sweep at its resolve that spares whoever is in the air (MechanicJump.h)
     };
 
     namespace Judge
@@ -40,10 +41,10 @@ namespace BossMechanics
         }
 
         // Decision §7.8: the circles of Spread, RunOut and Bait hit players only (bots cannot place pets); Zones and
-        // Frontals still hit pets and guardians.
+        // Frontals still hit pets and guardians. A Jump (Stratholme X3) trips players only: a pet cannot jump.
         constexpr bool PlayersOnly(Kind k)
         {
-            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait;
+            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait || k == Kind::Jump;
         }
 
         // Decision §7.7: a shape kind anchored on a player never hits that player (Cookie's chowder cone; the apex
@@ -65,6 +66,7 @@ namespace BossMechanics
             bool tankExempted = false;      // Registry::IsTankExempted
             bool hitThisPass = false;       // already kept by an earlier cast of the same pass
             bool decoy = false;             // the mechanic is a Decoy() (DecoyFits): it keeps nobody
+            bool airborne = false;          // Jump: in the air at the resolve (Jump::Clear, MechanicJump.h)
         };
 
         // Decoy() (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane): a Zone or Frontal drawn exactly
@@ -77,6 +79,14 @@ namespace BossMechanics
             return IsShapeKind(k) && !mine;
         }
 
+        // Lethal() (Stratholme X4: The Unforgiven's Cordon, Galford's Pyre and north wall, the kit's LethalWall): a
+        // Zone or Frontal the bots never cross. Not a mine (its grace is a crossing rule of its own) and not a decoy
+        // (bots never see one). Bots only: the resolve is unchanged (the kit's OnResolve kills whoever stands inside).
+        constexpr bool LethalFits(Kind k, bool mine, bool decoy)
+        {
+            return IsShapeKind(k) && !mine && !decoy;
+        }
+
         // The resolve filter's rule (Registry::FilterResolveTargets and the telegraph-only pass).
         constexpr bool KeepResolveTarget(Kind k, Candidate const& c)
         {
@@ -86,6 +96,8 @@ namespace BossMechanics
                 return false;
             if (PlayersOnly(k) && !c.player)
                 return false;
+            if (k == Kind::Jump && c.airborne)
+                return false;   // Stratholme X3: the sweep passes under a player in the air
             return c.inside && c.eligible && !c.tankExempted && !c.hitThisPass;
         }
 

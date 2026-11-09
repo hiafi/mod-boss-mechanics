@@ -176,6 +176,14 @@ namespace BossMechanics
         // have stopped) a cast and were judged as kicks (also in kicksLanded, duplicateKicks, doNotKickKicks or
         // kicksWasted).
         uint32 castStops = 0;
+        // Stratholme X3 (the Jump kind, MechanicBotBrain.cpp StepJump): hops launched (a spline in flight), launches
+        // the motion master refused (noted for the Jump.CountPlanned fallback only), Jumps the bot could not hop for
+        // (rooted, stunned, frozen, in a vehicle or water, already falling), and Jumps its brain reached too late (at
+        // or after the resolve).
+        uint32 hops = 0;
+        uint32 hopsRefused = 0;
+        uint32 hopsBlocked = 0;
+        uint32 hopsLate = 0;
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;

@@ -172,6 +172,19 @@ namespace BossMechanics::ViewRules
         return Solver::MakeInterval(now, std::max(now, std::max(window.from, window.to)));
     }
 
+    // Stratholme X4 (MechanicRef::Lethal): a lethal wall is never crossed, not even in its warning. The kit arms its
+    // walls 2 s after the pull grip (handoff §10): a bot that started across in that warning would stand in the wall
+    // when it lights. Its window opens now (an Instant or Interval keeps its end); a mine or a projectile keeps its
+    // own timing (Lethal does not fit a mine, and a projectile's per-point windows hang on its launch time).
+    inline Solver::Timing LethalTiming(Solver::Timing const& t, Ms now)
+    {
+        if (t.type != Solver::TimingType::Instant && t.type != Solver::TimingType::Interval)
+            return t;
+        Solver::Timing out = t;
+        out.from = std::min(t.from, now);
+        return out;
+    }
+
     // Stratholme F-1b (R-1-KIT F2): a Spread/RunOut registered with no warning (resolveAt <= createdAt) and no
     // persistence cannot be dodged: it resolves on the registry's next tick (a script's hit routed through the
     // registry, DungeonKit's RegistryHit: a RunOut measured from the boss, reach + 10 yd, on the tank too). It stays

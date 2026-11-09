@@ -10,7 +10,7 @@
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
- *               |stratholme-followups> [cycles=3] [seed=] [dmg=1] [self=0]
+ *               |stratholme-followups|stratholme-drops|stratholme-jump> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -62,6 +62,10 @@
  * RegisterTest `dropSpot` lambda): a circle room around the selected unit, the GM's facing as the travel direction,
  * and the test owner's live persistent point circles as enterable preferred spots (`prefer`) or as avoid points
  * (`avoid`, the Ultimatum's bone piles).
+ *
+ * Stratholme build X3 (drill `stratholme-jump`): `jump <r> <ms>` is a Mechanic::Jump circle of r on the anchor: at the
+ * end of the warning it hits every scope member inside who is on the ground (damage keys as a circle); whoever is in
+ * the air is spared, and bots hop for it (MechanicJump.h).
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -500,7 +504,7 @@ namespace
     bool IsShapeName(std::string const& s)
     {
         static char const* const shapes[] = { "circle", "donut", "cone", "rearcone", "line", "projectile", "mine",
-            "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt" };
+            "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump" };
         for (char const* name : shapes)
             if (s == name)
                 return true;
@@ -834,6 +838,13 @@ namespace
             }
             MechanicRef ref = Mechanic::Spot(owner, spec.spots, spec.warn, spec.size);
             ApplyCommon(ref, spec, false, false);
+            keep(ref);
+        }
+        else if (s == "jump")
+        {
+            // Stratholme X3: a circle of `size` that sweeps at the end of the warning; whoever is in the air is spared.
+            MechanicRef ref = Mechanic::Jump(owner, anchor, spec.size, spec.warn);
+            ApplyCommon(ref, spec, true, false);
             keep(ref);
         }
         if (ids.empty() && err.empty())
@@ -1486,7 +1497,7 @@ namespace
     }
 
     constexpr char const* kTestUsage = "Usage: .mech test <shape> <size> <ms> [key=value ...]; shapes: circle donut "
-        "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot; "
+        "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot jump; "
         "rider=<spell> takes only the module's spells 205008-205099";
 
     // What a `.mech test` line is parsed against (M4): the reference unit stands in for the GM (`anchor=me`, the
@@ -1927,7 +1938,8 @@ namespace
             return "min= measures a to=member pick from the line's source: add to=member";
         if (spec.offset != 0.f && s == "frontal" && spec.rear)
             return "a frontal takes rear=1 or offset=, not both";
-        if (spec.atEach && (s == "spot" || s == "spread" || s == "runout" || s == "bait" || s == "holdstill"))
+        if (spec.atEach && (s == "spot" || s == "spread" || s == "runout" || s == "bait" || s == "holdstill"
+            || s == "jump"))
             return "at=each puts a zone, stack or soak under every member";
         if (spec.away > 0.f && (spec.unitAnchor || spec.anchorMember))
             return "away= moves a point anchor; leave anchor= out";
@@ -3339,11 +3351,11 @@ public:
             reg->ForEachActive(now, [&](ActiveMechanic const& m)
             {
                 ++shown;
-                handler->PSendSysMessage("#{} {} {} {} tag {} | resolve {:+} ms, expire {:+} ms | {} markers{}{}{}{}",
+                handler->PSendSysMessage("#{} {} {} {} tag {} | resolve {:+} ms, expire {:+} ms | {} markers{}{}{}{}{}",
                     m.id, KindName(m.kind), DescribeShape(m.shape), ColorName(m.color), m.tag,
                     (m.resolveAt - now).count(), (m.expireAt - now).count(), m.markers.size(),
                     m.projectile ? " projectile" : "", m.mine ? (m.mine->armed ? " mine(armed)" : " mine") : "",
-                    m.persist ? " persistent" : "", m.decoy ? " decoy" : "");
+                    m.persist ? " persistent" : "", m.decoy ? " decoy" : "", m.lethal ? " lethal" : "");
             });
         handler->PSendSysMessage("{} active mechanic(s) on this map.", shown);
         return true;

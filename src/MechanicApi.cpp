@@ -19,7 +19,8 @@ namespace
 
     bool IsDamageKind(Kind k)
     {
-        return k == Kind::Zone || k == Kind::Frontal || k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait;
+        return k == Kind::Zone || k == Kind::Frontal || k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait
+            || k == Kind::Jump;
     }
 
     bool IsShapeKind(Kind k)
@@ -563,9 +564,18 @@ namespace BossMechanics
     MechanicRef& MechanicRef::Decoy()
     {
         ActiveMechanic const* cur = Get();
-        if (ActiveMechanic* m = Edit("Decoy", cur && !cur->committed
+        if (ActiveMechanic* m = Edit("Decoy", cur && !cur->committed && !cur->lethal
             && Judge::DecoyFits(cur->kind, cur->mine.has_value())))
             m->decoy = true;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::Lethal()
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("Lethal", cur && !cur->committed
+            && Judge::LethalFits(cur->kind, cur->mine.has_value(), cur->decoy)))
+            m->lethal = true;
         return *this;
     }
 
@@ -1004,6 +1014,24 @@ namespace Mechanic
         {
             m.spots = spots;
         });
+    }
+
+    MechanicRef Jump(Unit* owner, ZoneSpec const& spec, Milliseconds warn)
+    {
+        if (!SizeOk(ShapeSizeOk(spec.shape), "Jump", owner))
+            return MechanicRef();
+        std::optional<Anchor> const to = spec.to;
+        return Register(owner, "Jump", Kind::Jump, spec.anchor, spec.shape, warn, [&to](ActiveMechanic& m)
+        {
+            m.to = to;
+        });
+    }
+
+    MechanicRef Jump(Unit* owner, Anchor const& at, float r, Milliseconds warn)
+    {
+        if (!SizeOk(r > 0.f, "Jump", owner))
+            return MechanicRef();
+        return Register(owner, "Jump", Kind::Jump, at, Shape::Circle(r), warn);
     }
 
     void Cancel(Unit* owner, MechanicHandle h)

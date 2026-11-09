@@ -112,14 +112,17 @@ void MechanicBotStrategy::AppendTargetExclusions(GuidSet& exclusions, TargetValu
 bool MechanicBotRepositionTrigger::IsActive()
 {
     MechanicBotState* st = Think(botAI, _state);
-    return st && st->mode == MechanicBotMode::Escape && !MovingToTarget(bot, *st);
+    // X3: not while the bot's hop flies (the walk resumes under it when it lands).
+    return st && st->mode == MechanicBotMode::Escape && !MovingToTarget(bot, *st)
+        && !BotBrain::Hopping(bot, *st, Now());
 }
 
 bool MechanicBotHoldTrigger::IsActive()
 {
     MechanicBotState* st = Think(botAI, _state);
+    // X3: the bot's own hop is not foreign motion.
     return st && (st->mode == MechanicBotMode::Hold || st->mode == MechanicBotMode::Freeze)
-        && BotBrain::HasForeignMotion(bot);
+        && BotBrain::HasForeignMotion(bot) && !BotBrain::Hopping(bot, *st, Now());
 }
 
 bool MechanicBotFaceTrigger::IsActive()

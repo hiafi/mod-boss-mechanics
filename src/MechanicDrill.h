@@ -435,6 +435,18 @@ namespace BossMechanics::Drill
         return false;
     }
 
+    // ---- Stratholme jump (Stratholme build X3, drill `stratholme-jump`) ---------------------------------------------
+    // The Jump kind (Mechanic::Jump, MechanicJump.h): `jump <r> <ms>` sweeps a circle of r at the end of the warning
+    // and spares whoever is in the air; bots hop for it. Timmy's Jump Rope (TC8, TC9; ST "M4. Jump Rope"): three 2 s
+    // casts back to back, the trip 25% plus Weakened; heroic Freeze Tag runs beside it (a 6 yd RunOut on a non-tank
+    // that lands in the third skip's hop); and the heroic fallback Double Dutch (ST, Timmy's heroic): five skips of 2,
+    // 2, 1.5, 1.5 and 1.5 s. Ledger tags (sweep keys `Jump/<tag>`, `RunOut/<tag>`): the bar is no Jump hit at all.
+    constexpr std::uint32_t kJumpTagRope = 1;           // TC8: three 2 s skips back to back
+    constexpr std::uint32_t kJumpTagTag = 2;            // TC2: Freeze Tag's RunOut during the rope
+    constexpr std::uint32_t kJumpTagDutch = 3;          // Double Dutch: the two 2 s skips
+    constexpr std::uint32_t kJumpTagDutchFast = 4;      // Double Dutch: the three 1.5 s skips
+    constexpr float kJumpRopeRadius = 40.f;             // the whole square around the selected unit
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -673,6 +685,22 @@ namespace BossMechanics::Drill
                     { 22000, "circle 4 6000 anchor=member pick=nontank drop=behind,edge room=25 school=holy pct=30 "
                         "weak=1 tag=5" },
                 }, 4 },     // four cycles a run (120 s): the sweep runs stratholme-drops:4
+            // Stratholme build X3: the Jump kind (heroic numbers, pct= in the percent mode). 0 s, Timmy TC8: Jump Rope,
+            // three 2 s skips back to back over the square (a 40 yd circle on the creature), each trip 25% plus
+            // Weakened. 3.5 s, heroic Freeze Tag beside it (TC2): a 6 yd RunOut on a non-tank (2 s) that resolves in
+            // the third skip's hop. 10 s, the heroic fallback Double Dutch: five skips of 2, 2, 1.5, 1.5, 1.5 s.
+            { "stratholme-jump", "jump rope: three 2 s skips with a freeze tag beside them, then double dutch",
+                20000, false, {
+                    { 0, "jump 40 2000 anchor=target pct=25 weak=1 tag=1" },
+                    { 2000, "jump 40 2000 anchor=target pct=25 weak=1 tag=1" },
+                    { 3500, "runout 6 2000 at=member pick=nontank pct=30 weak=1 tag=2" },
+                    { 4000, "jump 40 2000 anchor=target pct=25 weak=1 tag=1" },
+                    { 10000, "jump 40 2000 anchor=target pct=25 weak=1 tag=3" },
+                    { 12000, "jump 40 2000 anchor=target pct=25 weak=1 tag=3" },
+                    { 14000, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
+                    { 15500, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
+                    { 17000, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
+                }, 6 },     // six cycles a run (120 s): the sweep runs stratholme-jump:6
         };
         return drills;
     }

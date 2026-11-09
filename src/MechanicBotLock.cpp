@@ -382,6 +382,16 @@ namespace
         AiObjectContext* context = botAI->GetAiObjectContext();
         Milliseconds const now = GameTime::GetGameTimeMS();
 
+        // Stratholme X3: a hop for a Jump is in flight (under a second). Anything would cut it: a move or an attack
+        // (MotionMaster::Clear), a facing spline, a cast's turn to its target. Everything waits, ours too, uncounted,
+        // released or not.
+        if (BotBrain::Hopping(bot, st, now))
+        {
+            Judgement j = Blocked(LockVerdict::BlockMove);
+            j.quiet = true;
+            return j;
+        }
+
         // A released bot (stuck, rooted, past the escape ceiling) is the stock AI's.
         if (BotBrain::Released(botAI, st, now))
             return Allow();
@@ -463,7 +473,10 @@ namespace
                 }
             }
         }
-        if (idleOrWatch && !afterBreak && !lookAway)
+        // X3: a hop is due (the bot has a Jump to hop for): in Idle and Watch too, a cast-time spell must end before it
+        // starts (below, with the casts after a break).
+        bool const hopDue = st.nextHopAt < Solver::kForever;
+        if (idleOrWatch && !afterBreak && !lookAway && !hopDue)
             return Allow();
         if (afterBreak && dynamic_cast<UseItemAction*>(action))
             return Blocked(LockVerdict::BlockCast);
@@ -560,7 +573,14 @@ namespace
         if (frozen)
             return Allow();
         if (castsOnly)
-            return afterBreak ? Blocked(LockVerdict::BlockCast) : Allow();
+        {
+            if (afterBreak)
+                return Blocked(LockVerdict::BlockCast);
+            // X3: it would end after the hop starts (the hop would stop it).
+            if (hopDue && !Solver::CastAllowed(now, busy, st.nextHopAt, Milliseconds(GetConfig().bots.safetyMarginMs)))
+                return Blocked(LockVerdict::BlockCast);
+            return Allow();
+        }
         // Escape: it would fail while moving (PlayerbotAI::CastSpell refuses it and delays the AI), so only a standing
         // bot's block feeds the forced-leak check.
         if (mode == MechanicBotMode::Escape)
