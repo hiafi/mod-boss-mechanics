@@ -135,6 +135,9 @@ namespace BossMechanics
         MechanicRef& Tolerance(float yd);               // HoldStill: movement allowed in the window (default 0.3)
         // Shape kinds: the tank should hold `unit` (nullptr: the owner) inside this shape. Bots only.
         MechanicRef& Park(Unit const* unit = nullptr);
+        // Shape kinds anchored on a player (AnchorOn) or aimed at one (a line's `to` end): where that player's bot
+        // carries the shape before it lands (DropSpotRule, MechanicRegistry.h; Stratholme X2). Bots only.
+        MechanicRef& DropSpot(BossMechanics::DropSpotRule const& rule);
         // telegraph and bookkeeping
         MechanicRef& Color(BossMechanics::Color color);
         MechanicRef& Tag(uint32 tag);

@@ -1,4 +1,5 @@
-// Standalone tests for src/MechanicRoute.h (STAGE-M3-HANDOFF §4 WP-E; M4 §3.7 the U minefield, WP-P).
+// Standalone tests for src/MechanicRoute.h (STAGE-M3-HANDOFF §4 WP-E; M4 §3.7 the U minefield, WP-P; Stratholme X1
+// soft blockers: other players' carried shapes at their live spots).
 // Build: tests/run.sh.
 
 #include "check.h"
@@ -1108,8 +1109,164 @@ namespace
     }
 }
 
+namespace
+{
+    // Stratholme X1: Barthilas's Infection carriers walking to the Sick Ward, 5 yd circles at their live spots, as
+    // soft blockers. A carrier's circle on the straight line bot -> goal: the route goes round it (no grid shortcut
+    // through it either); with soft blockers off the route is the straight line; a carrier wall the bot cannot pass
+    // round inside the box is crossed (soft never blocks); hard hazards still win.
+    Hazard Carrier(std::uint32_t id, float x, float y, float r = 5.f)
+    {
+        Hazard h = MakeHazard(id, Shape::Circle(r), Pose{ x, y, 0.f, 0.f },
+            Solver::MakeInterval(kNow - Ms(1000), kNow + Ms(20000)));
+        h.synthetic = true;
+        return h;
+    }
+
+    void TestSoftCarriers()
+    {
+        Vec3 const bot{ 0.f, 0.f, 0.f };
+        Vec3 const goal{ 24.f, 0.f, 0.f };
+        RouteParams rp;
+        rp.padYd = 10.f;
+
+        // Off: no soft hazards, nothing in the way: one straight leg.
+        {
+            Input in = MakeInput(bot);
+            StraightOracle oracle;
+            RouteStats st;
+            Plan const plan = Solver::Route(in, goal, oracle, rp, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+            CHECK(st.legs == 1u);
+            CHECK(st.softCells == 0u && st.softCrossed == 0u);
+            CHECK(!Solver::SoftCrossed(in, { bot, goal }, kNow));
+        }
+
+        // A carrier in the middle of the line: round it, every leg outside its circle.
+        {
+            Input in = MakeInput(bot);
+            in.softHazards.push_back(Carrier(1, 12.f, 0.f));
+            CHECK(Solver::SoftCrossed(in, { bot, goal }, kNow));
+            StraightOracle oracle;
+            RouteStats st;
+            Plan const plan = Solver::Route(in, goal, oracle, rp, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+            CHECK(st.softCells > 0u);
+            CHECK(st.softCrossed == 0u);
+            CHECK(st.legs >= 2u);
+            CHECK(!Solver::SoftCrossed(in, plan.path, kNow));
+            Input probe = in;
+            probe.hazards = in.softHazards;
+            CHECK(Deepest(probe, plan.path, 1) > 0.f);
+            CHECK(!plan.waypoints.empty() && Dist(plan.waypoints.back(), goal) < 0.01f);
+            // Soft blockers never touch Solve's checks: the same Input passes the straight path.
+            CHECK(Solver::CheckPath(in, { bot, goal }, kNow, false).ok);
+
+            // softCost 0: soft blockers off, the straight line again.
+            RouteParams off = rp;
+            off.softCost = 0;
+            RouteStats st0;
+            Plan const straight = Solver::Route(in, goal, oracle, off, &st0);
+            CHECK(st0.found && st0.legs == 1u && st0.softCells == 0u);
+            CHECK(Solver::SoftCrossed(in, straight.path, kNow));
+        }
+
+        // A wall of carriers across the whole box (no growing): crossed, not blocked (a hard wall leaves no route).
+        {
+            Input in = MakeInput(bot);
+            for (int k = -4; k <= 4; ++k)
+                in.softHazards.push_back(Carrier(10 + k + 4, 12.f, static_cast<float>(k) * 5.f));
+            StraightOracle oracle;
+            RouteStats st;
+            RouteParams boxed = rp;
+            boxed.growYd = 0.f;
+            Plan const plan = Solver::Route(in, goal, oracle, boxed, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+            CHECK(st.softCrossed > 0u);
+            Input hard = MakeInput(bot);
+            hard.hazards = in.softHazards;
+            RouteStats sh;
+            Solver::Route(hard, goal, oracle, boxed, &sh);
+            CHECK(!sh.found);
+        }
+
+        // A soft blocker over before the bot gets there does not count.
+        {
+            Input in = MakeInput(bot);
+            Hazard h = Carrier(1, 12.f, 0.f);
+            h.timing = Solver::MakeInterval(kNow - Ms(2000), kNow + Ms(200));
+            in.softHazards.push_back(h);
+            CHECK(!Solver::SoftCrossed(in, { bot, goal }, kNow));
+            StraightOracle oracle;
+            RouteStats st;
+            Solver::Route(in, goal, oracle, rp, &st);
+            CHECK(st.found && st.legs == 1u && st.softCrossed == 0u);
+        }
+
+        // Starting inside a carrier's circle: leaving it is no crossing, and the route still leaves.
+        {
+            Input in = MakeInput(bot);
+            in.softHazards.push_back(Carrier(1, 1.f, 0.f, 4.f));
+            CHECK(!Solver::SoftCrossed(in, { bot, Vec3{ -10.f, 0.f, 0.f } }, kNow));
+            StraightOracle oracle;
+            RouteStats st;
+            Plan const plan = Solver::Route(in, goal, oracle, rp, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+        }
+
+        // A blob of five overlapping carriers: round it in a few legs (the pull may cut the margin band, never a
+        // circle), never inside one.
+        {
+            Input in = MakeInput(bot);
+            for (int k = 0; k < 5; ++k)
+                in.softHazards.push_back(Carrier(20 + k, 6.f + 3.f * k, k % 2 ? 2.f : -2.f));
+            StraightOracle oracle;
+            RouteStats st;
+            RouteParams wide = rp;
+            wide.padYd = 16.f;
+            Plan const plan = Solver::Route(in, goal, oracle, wide, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+            std::printf("route soft blob: %u legs, %u soft cells, %u entered, relaxed %u\n", st.legs, st.softCells,
+                st.softCrossed, st.softPullDropped);
+            CHECK(st.legs >= 2u && st.legs <= 6u && st.softCrossed == 0u);
+            CHECK(st.softPullDropped == 0u);
+            Input probe = in;
+            probe.hazards = in.softHazards;
+            CHECK(Deepest(probe, plan.path, 1) > 0.f);
+        }
+
+        // Too many bends for maxLegs: the pull relaxes (then drops) the soft rule; a route is still found.
+        {
+            Input in = MakeInput(bot);
+            for (int k = 0; k < 5; ++k)
+                in.softHazards.push_back(Carrier(30 + k, 4.f + 4.f * k, k % 2 ? 3.f : -3.f));
+            StraightOracle oracle;
+            RouteStats st;
+            RouteParams few = rp;
+            few.maxLegs = 1;
+            Plan const plan = Solver::Route(in, goal, oracle, few, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+            CHECK(st.softPullDropped == 2u && st.legs == 1u);
+        }
+
+        // Hard hazards keep blocking with soft ones around: a mine on the detour side is still avoided.
+        {
+            Input in = MakeInput(bot);
+            in.softHazards.push_back(Carrier(1, 12.f, 0.f));
+            AddMine(in, 50, 12.f, 7.f);
+            StraightOracle oracle;
+            RouteStats st;
+            Plan const plan = Solver::Route(in, goal, oracle, rp, &st);
+            CHECK(st.found && plan.outcome == Outcome::Move);
+            CHECK(Deepest(in, plan.path, 50) > 0.f);
+            CHECK(st.softCrossed == 0u);
+        }
+    }
+}
+
 int main()
 {
+    TestSoftCarriers();
     TestUShapedMines();
     TestClosedRing();
     TestCellCap();

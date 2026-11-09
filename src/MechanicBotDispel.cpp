@@ -323,14 +323,53 @@ namespace
 
     bool ClaimedByOther(Player* bot, Unit const* unit, uint32 auraId);
 
+    // Stratholme X1 (DispelEntry::when): is the listed entry `i`'s aura held on `member` now? Judged on the bot's own
+    // view, whose copy the Custom results are keyed by (the UrgentView copy keeps the entries' order, not their
+    // address), with the facts FactsOf caches per tick.
+    class HeldJudge
+    {
+    public:
+        HeldJudge(Player* bot, MechanicBotState& st) : _st(st), _reg(Registry::Get(bot->GetMap())),
+            _ctx(ContextOf(st.descriptor, bot))
+        {
+        }
+
+        bool operator()(Unit const* member, std::size_t i) const
+        {
+            Descriptor const& d = _st.descriptor.descriptor;
+            if (i >= d.dispels.size() || d.dispels[i].when.kind == CondKind::Always)
+                return false;
+            if (!_reg)
+                return true;    // nothing to judge on: hold it (the view has no encounter then anyway)
+            return Desc::DispelHeld(d.dispels[i], FactsOf(_st.descriptor, *_reg, member, Now()), _ctx);
+        }
+
+        // Any listed entry with a condition (the stock fallback then checks for held auras).
+        bool Any() const
+        {
+            for (DispelEntry const& e : _st.descriptor.descriptor.dispels)
+                if (e.when.kind != CondKind::Always)
+                    return true;
+            return false;
+        }
+
+    private:
+        MechanicBotState& _st;
+        Registry const* _reg;
+        Desc::Context _ctx;
+    };
+
     // The listed harmful auras of the types in `typeMask` on one member. `stockSkip`: pass over a not-yet-urgent
     // aura with less than the stock skip left, as HasAuraToDispel does. `claimer`: pass over an aura another bot
-    // cures right now (R m-7; nullptr: keep them).
-    void Gather(Descriptor const& view, Unit* member, DispelRules::MemberRank rank, uint32 typeMask, bool stockSkip,
-        std::vector<Desc::Affliction>& afflictions, std::vector<Listed>& where, Player* claimer = nullptr)
+    // cures right now (R m-7; nullptr: keep them). A held aura (HeldJudge) goes in with Affliction::held set, so
+    // OrderDispels leaves it out and the stock fallback can pass over its member.
+    void Gather(Descriptor const& view, HeldJudge const& judge, Unit* member, DispelRules::MemberRank rank,
+        uint32 typeMask, bool stockSkip, std::vector<Desc::Affliction>& afflictions, std::vector<Listed>& where,
+        Player* claimer = nullptr)
     {
-        for (DispelEntry const& e : view.dispels)
+        for (std::size_t i = 0; i < view.dispels.size(); ++i)
         {
+            DispelEntry const& e = view.dispels[i];
             Aura const* aura = member->GetAura(e.auraId);
             if (!aura || aura->IsRemoved())
                 continue;
@@ -343,7 +382,8 @@ namespace
             if (stockSkip && !Desc::IsUrgent(e, left)
                 && DispelRules::NormalSkipped(Ms(aura->GetDuration()), StockSkip()))
                 continue;
-            afflictions.push_back({ member->GetGUID().GetRawValue(), e.auraId, left, static_cast<uint8>(rank) });
+            afflictions.push_back({ member->GetGUID().GetRawValue(), e.auraId, left, static_cast<uint8>(rank),
+                judge(member, i) });
             where.push_back({ member, info->Dispel, aura });
         }
     }
@@ -391,12 +431,13 @@ namespace
             return std::nullopt;
 
         Descriptor const view = DispelRules::UrgentView(*d, StockSkip());
+        HeldJudge const judge(bot, st);
         std::vector<Desc::Affliction> afflictions;
         std::vector<Listed> where;
         ForEachMember(botAI, bot, [&](Unit* member, DispelRules::MemberRank rank)
         {
             if (AliveHere(member, bot))
-                Gather(view, member, rank, mask, false, afflictions, where);
+                Gather(view, judge, member, rank, mask, false, afflictions, where);
         });
         for (Desc::DispelPick const& pick : Desc::OrderDispels(view, afflictions, true))
         {
@@ -756,6 +797,60 @@ MechanicBotDispelTargetValue::MechanicBotDispelTargetValue(PlayerbotAI* botAI) :
         LOG_INFO(kLog, "Bot {}: party member to dispel is the boss-mechanics override", bot->GetName());
 }
 
+namespace
+{
+    // Stratholme X1: the stock predicate (PartyMemberToDispelPredicate) that also passes over a member whose every
+    // dispellable aura of the type is a held listed one (DispelEntry::when), so the stock cure rows leave it alone too.
+    // The aura walk mirrors PlayerbotAI::HasAuraToDispel on a friendly target.
+    class UnheldDispelPredicate : public FindPlayerPredicate, public PlayerbotAIAware
+    {
+    public:
+        UnheldDispelPredicate(PlayerbotAI* botAI, uint32 type, std::vector<Desc::Affliction> const& afflictions)
+            : PlayerbotAIAware(botAI), _type(type), _afflictions(afflictions)
+        {
+        }
+
+        bool Check(Unit* unit) override
+        {
+            if (!unit->IsAlive() || !botAI->HasAuraToDispel(unit, _type))
+                return false;
+            uint64 const key = unit->GetGUID().GetRawValue();
+            auto heldHere = [&](uint32 auraId)
+            {
+                for (Desc::Affliction const& a : _afflictions)
+                    if (a.held && a.member == key && a.auraId == auraId)
+                        return true;
+                return false;
+            };
+            bool anyHeld = false;
+            for (Desc::Affliction const& a : _afflictions)
+                anyHeld = anyHeld || (a.held && a.member == key);
+            if (!anyHeld)
+                return true;
+            Unit::VisibleAuraMap const* visible = unit->GetVisibleAuras();
+            if (!visible)
+                return false;
+            for (auto const& [slot, app] : *visible)
+            {
+                Aura const* aura = app ? app->GetBase() : nullptr;
+                if (!aura || aura->IsPassive() || aura->IsRemoved())
+                    continue;
+                if (sPlayerbotAIConfig.DispelAuraDuration && aura->GetDuration()
+                    && aura->GetDuration() < int32(sPlayerbotAIConfig.DispelAuraDuration))
+                    continue;
+                SpellInfo const* info = aura->GetSpellInfo();
+                if (info && !info->IsPositive() && info->Dispel == _type && !heldHere(aura->GetId()))
+                    return true;
+            }
+            return false;
+        }
+
+    private:
+        uint32 _type;
+        std::vector<Desc::Affliction> const& _afflictions;
+    };
+}
+
 Unit* MechanicBotDispelTargetValue::Calculate()
 {
     _pick = ObjectGuid::Empty;
@@ -767,13 +862,14 @@ Unit* MechanicBotDispelTargetValue::Calculate()
 
     uint32 const type = static_cast<uint32>(std::atoi(qualifier.c_str()));
     Descriptor const view = DispelRules::UrgentView(*d, StockSkip());
+    HeldJudge const judge(bot, *st);
     std::vector<Desc::Affliction> afflictions;
     std::vector<Listed> where;
     ForEachMember(botAI, bot, [&](Unit* member, DispelRules::MemberRank rank)
     {
         // R m-7: an aura another bot cures right now (its claim) is not offered to the stock cure rows.
         if (AliveHere(member, bot) && Check(member))
-            Gather(view, member, rank, DispelRules::Bit(type), true, afflictions, where, bot);
+            Gather(view, judge, member, rank, DispelRules::Bit(type), true, afflictions, where, bot);
     });
     std::vector<Desc::DispelPick> const picks = Desc::OrderDispels(view, afflictions);
     if (!picks.empty())
@@ -782,6 +878,12 @@ Unit* MechanicBotDispelTargetValue::Calculate()
         _pick = unit->GetGUID();
         _pickAura = afflictions[picks.front().affliction].auraId;
         return unit;
+    }
+    // Stratholme X1: a held aura is no one's to cure, the stock rows' included.
+    if (judge.Any())
+    {
+        UnheldDispelPredicate predicate(botAI, type, afflictions);
+        return FindPartyMember(predicate);
     }
     return PartyMemberToDispel::Calculate();
 }
@@ -793,10 +895,20 @@ Unit* MechanicBotDispelTargetValue::Get()
     if (lastCheckTime && !_pick.IsEmpty() && bot)
     {
         Unit* unit = ObjectAccessor::GetUnit(*bot, _pick);
-        if (!unit || !unit->HasAura(_pickAura) || ClaimedByOther(bot, unit, _pickAura))
+        if (!unit || !unit->HasAura(_pickAura) || ClaimedByOther(bot, unit, _pickAura) || HeldNow(unit))
             Reset();
     }
     return PartyMemberToDispel::Get();
+}
+
+bool MechanicBotDispelTargetValue::HeldNow(Unit const* unit)
+{
+    // Stratholme X1: the pick's entry became held since (an ally walked within its spacing).
+    MechanicBotState* st = BotBrain::StateOf(botAI);
+    if (!st || !st->descriptor.Active())
+        return false;
+    std::optional<std::size_t> const k = Desc::FindDispel(st->descriptor.descriptor, _pickAura);
+    return k && HeldJudge(bot, *st)(unit, *k);
 }
 
 bool MechanicBotDispelUrgentTrigger::IsActive()

@@ -14,7 +14,7 @@
  * (MechanicDescriptorPresets.h). Bots read a copy through their DescriptorView and decide with the rules below:
  * - interrupts (WP-I): MatchInterrupt, OrderInterrupts, NextDue, DueCasts, HoldKick(Covered), PickKicker,
  *   ClaimBook;
- * - dispels and purges (WP-P): IsUrgent, OrderDispels, PickPurge;
+ * - dispels and purges (WP-P): IsUrgent, DispelHeld, OrderDispels, PickPurge;
  * - targets and the ignore list (WP-T): Fits, PickTarget, IsIgnored;
  * - turned teammates (SFK F1): IsHostilePlayer, read by TargetEntry::HostilePlayers and the playerbots fork's
  *   hostile-teammate hook (MechanicBotTargets.cpp).
@@ -49,30 +49,60 @@ namespace BossMechanics
         InZone,         // the unit stands in registry mechanic `id` (a script passes its MechanicHandle's id)
         Phase,          // the descriptor's phase is `id`
         OwnerBelowPct,  // the encounter owner's health is below `value` percent
+        NearPlayer,     // another live player is within `value` yd of the unit (Stratholme X1: Maleki's spacing rule)
+        All,            // every condition in `all` holds (none: holds)
+        Not,            // the first condition in `all` does not hold (none: holds)
         Custom          // fn(unit), scripts only (programs use the kinds above); evaluated once per unit and tick
                         // while the encounter owner is in the world. The lambda may still run on a bot's stale copy
                         // for one map update after the boss despawned: capture guids only (never `this`, a
                         // Creature* or an InstanceScript*) and resolve them through the passed unit's map.
     };
 
-    // A condition on one unit: the caster of an interrupt entry, the candidate of a target or ignore entry.
+    // A condition on one unit: the caster of an interrupt entry, the candidate of a target or ignore entry, the
+    // afflicted member of a dispel entry. All and Not combine others (Maleki's dispel: no player within 8 yd and not
+    // during the Eye, `AllOf({ Not(NearPlayer(8)), Not(Phase(EYE)) })`).
     struct Condition
     {
         CondKind kind = CondKind::Always;
         std::uint32_t id = 0;       // aura id, unit entry, registry mechanic id or phase
         float value = 0.f;          // yards or percent
         std::function<bool(Unit const* unit)> fn;   // Custom (scripts only; programs use the kinds)
+        std::vector<Condition> all; // All: the conditions; Not: the one negated
 
+        static Condition Make(CondKind kind, std::uint32_t id, float value)
+        {
+            Condition c;
+            c.kind = kind;
+            c.id = id;
+            c.value = value;
+            return c;
+        }
         static Condition Always() { return {}; }
-        static Condition HasAura(std::uint32_t auraId) { return { CondKind::HasAura, auraId, 0.f, nullptr }; }
-        static Condition LacksAura(std::uint32_t auraId) { return { CondKind::LacksAura, auraId, 0.f, nullptr }; }
-        static Condition NearUnit(std::uint32_t entry, float yd) { return { CondKind::NearUnit, entry, yd, nullptr }; }
-        static Condition InZone(std::uint32_t mechanicId) { return { CondKind::InZone, mechanicId, 0.f, nullptr }; }
-        static Condition Phase(std::uint32_t phase) { return { CondKind::Phase, phase, 0.f, nullptr }; }
-        static Condition OwnerBelowPct(float pct) { return { CondKind::OwnerBelowPct, 0, pct, nullptr }; }
+        static Condition HasAura(std::uint32_t auraId) { return Make(CondKind::HasAura, auraId, 0.f); }
+        static Condition LacksAura(std::uint32_t auraId) { return Make(CondKind::LacksAura, auraId, 0.f); }
+        static Condition NearUnit(std::uint32_t entry, float yd) { return Make(CondKind::NearUnit, entry, yd); }
+        static Condition InZone(std::uint32_t mechanicId) { return Make(CondKind::InZone, mechanicId, 0.f); }
+        static Condition Phase(std::uint32_t phase) { return Make(CondKind::Phase, phase, 0.f); }
+        static Condition OwnerBelowPct(float pct) { return Make(CondKind::OwnerBelowPct, 0, pct); }
+        // Another live player (not the unit itself; pets and creatures do not count) within `yd` of the unit.
+        static Condition NearPlayer(float yd) { return Make(CondKind::NearPlayer, 0, yd); }
+        static Condition AllOf(std::vector<Condition> conditions)
+        {
+            Condition c = Make(CondKind::All, 0, 0.f);
+            c.all = std::move(conditions);
+            return c;
+        }
+        static Condition Not(Condition condition)
+        {
+            Condition c = Make(CondKind::Not, 0, 0.f);
+            c.all.push_back(std::move(condition));
+            return c;
+        }
         static Condition Custom(std::function<bool(Unit const*)> f)
         {
-            return { CondKind::Custom, 0, 0.f, std::move(f) };
+            Condition c = Make(CondKind::Custom, 0, 0.f);
+            c.fn = std::move(f);
+            return c;
         }
     };
 
@@ -110,8 +140,8 @@ namespace BossMechanics
     struct DispelEntry
     {
         DispelEntry(std::uint32_t auraId_ = 0, std::uint8_t priority_ = 1, bool urgent_ = false,
-            std::chrono::milliseconds deadline_ = std::chrono::milliseconds(0))
-            : auraId(auraId_), priority(priority_), urgent(urgent_), deadline(deadline_)
+            std::chrono::milliseconds deadline_ = std::chrono::milliseconds(0), Condition when_ = {})
+            : auraId(auraId_), priority(priority_), urgent(urgent_), deadline(deadline_), when(std::move(when_))
         {
         }
 
@@ -119,6 +149,10 @@ namespace BossMechanics
         std::uint8_t priority = 1;          // higher first
         bool urgent = false;                // loss of control: before everything, past the healers' 50% gate
         std::chrono::milliseconds deadline{ 0 };    // urgent once the aura has this little left (0 = never)
+        // Judged on the afflicted member (Stratholme X1). While it does not hold the aura is held: no bot cures it,
+        // neither the listed walk nor the stock cure rows (they pass over a member whose only aura of the type is
+        // held). Urgency does not override it.
+        Condition when;
     };
 
     struct PurgeEntry
@@ -260,6 +294,8 @@ namespace BossMechanics::Desc
                                                                 // (left out when there is none in range)
         std::vector<std::uint32_t> zones;                       // the referenced mechanics the unit stands in
         std::vector<std::pair<Condition const*, bool>> custom;  // Custom results (keyed by the view's own copy)
+        float nearestPlayerYd = -1.f;                           // yd to the nearest other live player within
+                                                                // References::playerRange (-1: none, or unasked)
     };
 
     // What every condition shares: the descriptor's phase and the owner's health.
@@ -297,6 +333,15 @@ namespace BossMechanics::Desc
                 return ctx.phase == c.id;
             case CondKind::OwnerBelowPct:
                 return ctx.ownerHealthPct < c.value;
+            case CondKind::NearPlayer:
+                return u.nearestPlayerYd >= 0.f && u.nearestPlayerYd <= c.value;
+            case CondKind::All:
+                for (Condition const& sub : c.all)
+                    if (!Holds(sub, u, ctx))
+                        return false;
+                return true;
+            case CondKind::Not:
+                return c.all.empty() || !Holds(c.all.front(), u, ctx);
             case CondKind::Custom:
                 for (auto const& [cond, result] : u.custom)
                     if (cond == &c)
@@ -307,13 +352,15 @@ namespace BossMechanics::Desc
     }
 
     // Everything the descriptor's conditions read, so the view gathers only that: aura ids, NearUnit entries with the
-    // largest range asked of each, zone ids, and the Custom conditions (pointers into `d`: valid while `d` is).
+    // largest range asked of each, zone ids, the largest NearPlayer range, and the Custom conditions (pointers into
+    // `d`, nested ones included: valid while `d` is).
     struct References
     {
         std::vector<std::uint32_t> auras;
         std::vector<std::pair<std::uint32_t, float>> near;
         std::vector<std::uint32_t> zones;
         std::vector<Condition const*> custom;
+        float playerRange = 0.f;
     };
 
     inline void AddReference(References& r, Condition const& c)
@@ -338,6 +385,14 @@ namespace BossMechanics::Desc
                 if (!Contains(r.zones, c.id))
                     r.zones.push_back(c.id);
                 break;
+            case CondKind::NearPlayer:
+                r.playerRange = std::max(r.playerRange, c.value);
+                break;
+            case CondKind::All:
+            case CondKind::Not:
+                for (Condition const& sub : c.all)
+                    AddReference(r, sub);
+                break;
             case CondKind::Custom:
                 if (c.fn)
                     r.custom.push_back(&c);
@@ -358,6 +413,8 @@ namespace BossMechanics::Desc
         for (TargetEntry const& e : d.targets)
             AddReference(r, e.when);
         for (IgnoreEntry const& e : d.ignores)
+            AddReference(r, e.when);
+        for (DispelEntry const& e : d.dispels)
             AddReference(r, e.when);
         return r;
     }
@@ -757,6 +814,12 @@ namespace BossMechanics::Desc
         return e.urgent || (e.deadline > Ms(0) && remaining <= e.deadline);
     }
 
+    // Is the entry's aura held on this member now (its `when` does not hold; Stratholme X1)? `u`: the member's facts.
+    inline bool DispelHeld(DispelEntry const& e, UnitFacts const& u, Context const& ctx)
+    {
+        return !Holds(e.when, u, ctx);
+    }
+
     inline std::optional<std::size_t> FindDispel(Descriptor const& d, std::uint32_t auraId)
     {
         for (std::size_t i = 0; i < d.dispels.size(); ++i)
@@ -772,6 +835,7 @@ namespace BossMechanics::Desc
         std::uint32_t auraId = 0;
         Ms remaining{ 0 };
         std::uint8_t rank = 0;      // the stock order of the member (master, healers, tanks, others: 0 first)
+        bool held = false;          // DispelHeld for this member now (the caller judged it): left out
     };
 
     struct DispelPick
@@ -783,7 +847,8 @@ namespace BossMechanics::Desc
 
     // The listed afflictions, best first: urgent before the rest, then the entry's priority, then the aura with less
     // time left, then the member's stock rank and key. Unlisted auras are left out (the stock order handles them,
-    // after every listed one). `urgentOnly`: the urgent ones only (the `boss dispel urgent` action).
+    // after every listed one), and so are held ones (Affliction::held). `urgentOnly`: the urgent ones only (the
+    // `boss dispel urgent` action).
     inline std::vector<DispelPick> OrderDispels(Descriptor const& d, std::vector<Affliction> const& afflictions,
         bool urgentOnly = false)
     {
@@ -791,7 +856,7 @@ namespace BossMechanics::Desc
         for (std::size_t i = 0; i < afflictions.size(); ++i)
         {
             std::optional<std::size_t> const entry = FindDispel(d, afflictions[i].auraId);
-            if (!entry)
+            if (!entry || afflictions[i].held)
                 continue;
             bool const urgent = IsUrgent(d.dispels[*entry], afflictions[i].remaining);
             if (urgentOnly && !urgent)

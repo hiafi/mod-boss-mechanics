@@ -9,8 +9,8 @@
  *                 [seed=]
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
- *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes> [cycles=3]
- *               [seed=] [dmg=1] [self=0]
+ *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
+ *               |stratholme-followups> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -52,6 +52,16 @@
  * point-anchored circle's centre, and `at=predict lead=<ms>` where a member will be (PredictedSpot; MechanicDrill.h
  * "Scholomance shapes").
  *
+ * Stratholme build (WP-G §3.9, drill `stratholme-followups`): `cone to=member|target|me` aims a cone at that unit live
+ * from its anchor (BZ1's tracking cone), and `exempt=target` (cone, line, projectile with to=) spares the aimed unit:
+ * the other scope members are its eligible carriers (MechanicDrill.h "Stratholme follow-ups"). ST's hidden flag is
+ * `tele=0`.
+ *
+ * Stratholme build X2 (drill `stratholme-drops`): `drop=<edge,away,behind,prefer> [room=<yd>] [dwell=<ms>]` on a circle
+ * anchor=member or a line to=member gives the member's bot a DropSpotRule (MechanicDropSpot.h; the RegisterTest
+ * `dropSpot` lambda): a circle room around the selected unit, the GM's facing as the travel direction, and the test
+ * owner's live persistent point circles as enterable preferred spots.
+ *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
 
@@ -67,6 +77,7 @@
 #include "MechanicBotReportHook.h"
 #include "MechanicDescCommand.h"
 #include "MechanicDrill.h"
+#include "MechanicDropSpot.h"
 #include "MechanicDrillPlan.h"
 #include "MechanicDrillRunner.h"
 #include "MechanicDummyAI.h"
@@ -475,8 +486,14 @@ namespace
         uint32 decoys = 0;              // circle grid= decoys=<k>: k of them are decoys
         float away = 0.f;               // away=<yd>: a point anchor moved exactly this far at a random bearing
         bool atPrev = false;            // at=prev: the centre of the last point-anchored circle (Dice::lastCircle)
+        // Stratholme X2: drop=<flags> on a shape a member carries (DropSpot::Flags), room= and dwell= with it.
+        std::optional<DropSpot::Flags> drop;
+        float dropRoom = 30.f;
+        Milliseconds dropDwell{ 1200 };
         bool atPredict = false;         // at=predict: where a member will be `lead` ms from now
         Milliseconds lead{ Drill::kDefaultPredictLeadMs };
+        // Stratholme build (WP-G §3.9, drill `stratholme-followups`)
+        bool exemptTo = false;          // exempt=target: the to= unit is not eligible (BZ1; RegisterRepeat)
     };
 
     bool IsShapeName(std::string const& s)
@@ -554,6 +571,34 @@ namespace
             if (spec.decoy)
                 ref.Decoy();
         };
+        // drop= (Stratholme X2): the carrier's drop spot rule, built now: a circle room of room= yd around the
+        // selected unit, the GM's facing as the travel direction, and with `prefer` every live persistent circle on a
+        // point of this test owner as an enterable preferred spot (the drill's old webs).
+        auto dropSpot = [&spec, owner](MechanicRef& ref)
+        {
+            if (!spec.drop)
+                return;
+            DropSpotRule rule;
+            Unit const* sel = ObjectAccessor::GetUnit(*owner, spec.selected);
+            if (spec.dropRoom > 0.f)
+                rule.Room(sel ? sel->GetPosition() : owner->GetPosition(), spec.dropRoom);
+            if (spec.drop->edge)
+                rule.Edge();
+            if (spec.drop->away)
+                rule.Away();
+            if (spec.drop->behind)
+                rule.Behind(spec.facing);
+            rule.MaxDwell(spec.dropDwell);
+            if (spec.drop->prefer)
+                if (Registry const* reg = Registry::Get(owner->GetMap()))
+                    reg->ForEachActive(GameTime::GetGameTimeMS(), [&rule, owner](ActiveMechanic const& m)
+                    {
+                        if (m.owner == owner->GetGUID() && m.persist && !m.decoy && !m.anchor.IsUnit()
+                            && m.IsShapeKind() && m.shape.type == ShapeType::Circle)
+                            rule.Prefer(m.anchor.point, m.shape.radius, m.id);
+                    });
+            ref.DropSpot(rule);
+        };
         // stack/soak shape=line: a lane centered on a point anchor along the GM's facing (on a unit: from the unit).
         auto laneSpec = [&spec, &anchor, anchorUnit, &here]()
         {
@@ -572,6 +617,7 @@ namespace
             ApplyCommon(ref, spec, true, true);
             park(ref);
             decoy(ref);
+            dropSpot(ref);
             keep(ref);
         }
         else if (s == "donut")
@@ -587,7 +633,19 @@ namespace
             Anchor coneAnchor = anchor;
             if (!anchorUnit)
                 coneAnchor.point.SetOrientation(spec.facing);
-            MechanicRef ref = Mechanic::Zone(owner, Shapes::Cone(coneAnchor, spec.angle, spec.size), spec.warn);
+            ZoneSpec zone = Shapes::Cone(coneAnchor, spec.angle, spec.size);
+            if (spec.to != TestSpec::To::None)
+            {
+                // to= (Stratholme BZ1): the cone turns to face that unit live (Registry::EffectiveShape).
+                Unit* toUnit = ObjectAccessor::GetUnit(*owner, spec.toUnit);
+                if (!toUnit)
+                {
+                    err = "the to= unit is gone";
+                    return ids;
+                }
+                zone.to = Anchor(toUnit);
+            }
+            MechanicRef ref = Mechanic::Zone(owner, zone, spec.warn);
             if (s == "rearcone")
                 ref.Rear();
             else if (spec.offset != 0.f)
@@ -643,6 +701,7 @@ namespace
             if (s == "line")
                 park(ref);
             decoy(ref);
+            dropSpot(ref);
             keep(ref);
         }
         else if (s == "mine")
@@ -1245,6 +1304,21 @@ namespace
             case TestSpec::To::None:
                 break;
         }
+        if (spec.exemptTo && !spec.toUnit.IsEmpty())
+        {
+            // exempt=target: every scope member but the aimed one is eligible (the GM too, as for any zone), so the
+            // aimed player leads the shape and is never hit by it; nobody left keeps a set no player is in (an empty
+            // carrier set would mean everyone).
+            std::vector<ObjectGuid> members;
+            for (Player const* p : GroupMembers(owner, spec.gm, true))
+                members.push_back(p->GetGUID());
+            std::vector<ObjectGuid> const rest = Drill::AllBut(members, spec.toUnit);
+            Eligibility elig = spec.eligibility.value_or(Eligibility());
+            elig.carriers = GuidSet(rest.begin(), rest.end());
+            if (elig.carriers.empty())
+                elig.carriers.insert(ObjectGuid::Empty);
+            spec.eligibility = elig;
+        }
         if (spec.fix && spec.to != TestSpec::To::None)
         {
             // Frozen now: a point line from the source toward where the to= unit stands (reach: ending there).
@@ -1454,10 +1528,9 @@ namespace
             spec.angle = opt.Float("angle", 90.f);
         if (s == "cone" || s == "frontal")
             spec.offset = opt.Float("offset", 0.f);
-        if (s == "line" || s == "projectile")
+        // to=member|target|me: a line (or, Stratholme BZ1, a cone) aims at that unit live from its anchor.
+        auto readTo = [&opt, &spec]()
         {
-            spec.width = opt.Float("width", s == "projectile" ? 3.f : 4.f);
-            spec.exclude = opt.Float("exclude", 0.f);
             std::string const to = opt.Str("to", "");
             if (to == "member")
                 spec.to = TestSpec::To::Member;
@@ -1467,6 +1540,14 @@ namespace
                 spec.to = TestSpec::To::Me;
             else if (!to.empty())
                 opt.MarkBad("to");
+        };
+        if (s == "cone")
+            readTo();
+        if (s == "line" || s == "projectile")
+        {
+            spec.width = opt.Float("width", s == "projectile" ? 3.f : 4.f);
+            spec.exclude = opt.Float("exclude", 0.f);
+            readTo();
             spec.reach = opt.Bool("reach", false);
             spec.fix = spec.reach || opt.Bool("fix", false);
             spec.minDist = opt.Float("min", 0.f);
@@ -1610,6 +1691,21 @@ namespace
         if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "frontal" || s == "line"
             || s == "projectile" || s == "lanes")
             spec.decoy = opt.Bool("decoy", false);
+        // drop=<edge,away,behind,prefer> (Stratholme X2): where the member carrying this shape takes it (circle
+        // anchor=member, line to=member); room=<yd> around the selected unit (0: no room), dwell=<ms>.
+        if (opt.Has("drop"))
+        {
+            if (s != "circle" && s != "line")
+                opt.MarkBad("drop");
+            else if (std::optional<DropSpot::Flags> f = DropSpot::ParseFlags(opt.Str("drop", "")))
+                spec.drop = f;
+            else
+                opt.MarkBad("drop");
+            spec.dropRoom = opt.Float("room", 30.f);
+            if (spec.dropRoom < 0.f)
+                opt.MarkBad("room");
+            spec.dropDwell = opt.Ms("dwell", Milliseconds(1200));
+        }
         if (s == "circle" && opt.Has("grid"))
         {
             int32 const grid = opt.Int("grid", 0);
@@ -1628,6 +1724,14 @@ namespace
         }
         if (s == "cone" || s == "rearcone" || s == "line" || s == "projectile")
             spec.follow = opt.Bool("follow", false);
+        // exempt=target (Stratholme BZ1): the unit the shape aims at (to=) is spared; everyone else in scope is not.
+        if ((s == "cone" || s == "line" || s == "projectile") && opt.Has("exempt"))
+        {
+            if (opt.Str("exempt", "") == "target")
+                spec.exemptTo = true;
+            else
+                opt.MarkBad("exempt");
+        }
 
         // eligibility, ordering, self-trigger
         Eligibility elig;
@@ -1802,6 +1906,10 @@ namespace
             return "to=target needs a selected unit";
         if (spec.follow && !spec.unitAnchor && !spec.anchorMember)
             return "follow=1 needs a unit anchor (anchor=me, target or member)";
+        if (s == "cone" && spec.to != TestSpec::To::None && spec.follow)
+            return "to= aims the cone at a unit: no follow=1";
+        if (spec.exemptTo && spec.to == TestSpec::To::None)
+            return "exempt=target spares the unit the shape aims at: add to=member, target or me";
         if (spec.shifted && (spec.unitAnchor || spec.anchorMember))
             return "shift= moves a point anchor; leave anchor= out";
         if (spec.cluster && spec.lane)
@@ -1820,6 +1928,8 @@ namespace
             return "away= moves a point anchor; leave anchor= out";
         if (spec.decoy && s == "lanes" && !spec.safe)
             return "decoy=1 on lanes draws the safe=1 lane as a decoy: add safe=1";
+        if (spec.drop && !spec.anchorMember && spec.to != TestSpec::To::Member)
+            return "drop= is for a shape a member carries: a circle anchor=member, or a line to=member";
         if (spec.grid)
         {
             if (spec.decoy)

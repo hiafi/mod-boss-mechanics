@@ -514,6 +514,14 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::DropSpot(DropSpotRule const& rule)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("DropSpot", cur && IsShapeKind(cur->kind) && !cur->decoy))
+            m->dropSpot = rule;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::Color(BossMechanics::Color color)
     {
         if (ActiveMechanic* m = Edit("Color", true, true))
