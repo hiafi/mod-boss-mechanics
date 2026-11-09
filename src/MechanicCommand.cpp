@@ -57,10 +57,11 @@
  * the other scope members are its eligible carriers (MechanicDrill.h "Stratholme follow-ups"). ST's hidden flag is
  * `tele=0`.
  *
- * Stratholme build X2 (drill `stratholme-drops`): `drop=<edge,away,behind,prefer> [room=<yd>] [dwell=<ms>]` on a circle
- * anchor=member or a line to=member gives the member's bot a DropSpotRule (MechanicDropSpot.h; the RegisterTest
- * `dropSpot` lambda): a circle room around the selected unit, the GM's facing as the travel direction, and the test
- * owner's live persistent point circles as enterable preferred spots.
+ * Stratholme build X2 (drill `stratholme-drops`): `drop=<edge,away,behind,prefer,avoid> [room=<yd>] [dwell=<ms>]` on
+ * a circle anchor=member or a line to=member gives the member's bot a DropSpotRule (MechanicDropSpot.h; the
+ * RegisterTest `dropSpot` lambda): a circle room around the selected unit, the GM's facing as the travel direction,
+ * and the test owner's live persistent point circles as enterable preferred spots (`prefer`) or as avoid points
+ * (`avoid`, the Ultimatum's bone piles).
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -489,7 +490,7 @@ namespace
         // Stratholme X2: drop=<flags> on a shape a member carries (DropSpot::Flags), room= and dwell= with it.
         std::optional<DropSpot::Flags> drop;
         float dropRoom = 30.f;
-        Milliseconds dropDwell{ 1200 };
+        Milliseconds dropDwell{ 800 };
         bool atPredict = false;         // at=predict: where a member will be `lead` ms from now
         Milliseconds lead{ Drill::kDefaultPredictLeadMs };
         // Stratholme build (WP-G §3.9, drill `stratholme-followups`)
@@ -572,8 +573,8 @@ namespace
                 ref.Decoy();
         };
         // drop= (Stratholme X2): the carrier's drop spot rule, built now: a circle room of room= yd around the
-        // selected unit, the GM's facing as the travel direction, and with `prefer` every live persistent circle on a
-        // point of this test owner as an enterable preferred spot (the drill's old webs).
+        // selected unit, the GM's facing as the travel direction, and every live persistent circle on a point of this
+        // test owner (the drill's old webs) as an enterable preferred spot with `prefer`, an avoid point with `avoid`.
         auto dropSpot = [&spec, owner](MechanicRef& ref)
         {
             if (!spec.drop)
@@ -589,13 +590,17 @@ namespace
             if (spec.drop->behind)
                 rule.Behind(spec.facing);
             rule.MaxDwell(spec.dropDwell);
-            if (spec.drop->prefer)
+            if (spec.drop->prefer || spec.drop->avoid)
                 if (Registry const* reg = Registry::Get(owner->GetMap()))
-                    reg->ForEachActive(GameTime::GetGameTimeMS(), [&rule, owner](ActiveMechanic const& m)
+                    reg->ForEachActive(GameTime::GetGameTimeMS(), [&rule, &spec, owner](ActiveMechanic const& m)
                     {
-                        if (m.owner == owner->GetGUID() && m.persist && !m.decoy && !m.anchor.IsUnit()
-                            && m.IsShapeKind() && m.shape.type == ShapeType::Circle)
+                        if (m.owner != owner->GetGUID() || !m.persist || m.decoy || m.anchor.IsUnit()
+                            || !m.IsShapeKind() || m.shape.type != ShapeType::Circle)
+                            return;
+                        if (spec.drop->prefer)
                             rule.Prefer(m.anchor.point, m.shape.radius, m.id);
+                        if (spec.drop->avoid)
+                            rule.Avoid(m.anchor.point, m.shape.radius);
                     });
             ref.DropSpot(rule);
         };
@@ -1691,8 +1696,8 @@ namespace
         if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "frontal" || s == "line"
             || s == "projectile" || s == "lanes")
             spec.decoy = opt.Bool("decoy", false);
-        // drop=<edge,away,behind,prefer> (Stratholme X2): where the member carrying this shape takes it (circle
-        // anchor=member, line to=member); room=<yd> around the selected unit (0: no room), dwell=<ms>.
+        // drop=<edge,away,behind,prefer,avoid> (Stratholme X2): where the member carrying this shape takes it
+        // (circle anchor=member, line to=member); room=<yd> around the selected unit (0: no room), dwell=<ms>.
         if (opt.Has("drop"))
         {
             if (s != "circle" && s != "line")
@@ -1704,7 +1709,7 @@ namespace
             spec.dropRoom = opt.Float("room", 30.f);
             if (spec.dropRoom < 0.f)
                 opt.MarkBad("room");
-            spec.dropDwell = opt.Ms("dwell", Milliseconds(1200));
+            spec.dropDwell = opt.Ms("dwell", Milliseconds(800));
         }
         if (s == "circle" && opt.Has("grid"))
         {

@@ -318,6 +318,8 @@ namespace BossMechanics
                 {
                     if (m.decoy)
                         return;     // a decoy is empty floor to the bots (Judge::DecoyFits)
+                    if (m.bounds)
+                        BoundsOf(m, *m.bounds);
                     if (m.IsShapeKind())
                     {
                         ShapeTasks(m);
@@ -605,6 +607,23 @@ namespace BossMechanics
                         d.room.push_back(ToVec(p));
                 d.roomCenter = ToVec(rule.roomCenter);
                 d.roomRadius = rule.roomRadius;
+                // F-1b: the hard bounds; a single area doubles as the room when the rule names none.
+                if (rule.bounds)
+                {
+                    AddBounds(*rule.bounds);
+                    if (d.room.empty() && d.roomRadius <= 0.f && rule.bounds->areas.size() == 1)
+                    {
+                        SpotBounds::Area const& a = rule.bounds->areas.front();
+                        for (Position const& p : a.polygon)
+                            d.room.push_back(ToVec(p));
+                        if (d.room.size() < 3)
+                        {
+                            d.room.clear();
+                            d.roomCenter = ToVec(a.center);
+                            d.roomRadius = a.radius;
+                        }
+                    }
+                }
                 d.edge = rule.edge;
                 d.away = rule.away;
                 d.behind = rule.behind;
@@ -624,6 +643,40 @@ namespace BossMechanics
                 for (DropSpotRule::Circle const& ac : rule.avoid)
                     d.avoid.push_back({ ToVec(ac.center), ac.radius, false });
                 _in.drop = std::move(d);
+            }
+
+            // Stratholme F-1b: a mechanic's hard bounds (MechanicRef::Within) hold for this bot while the mechanic's
+            // owner fights it (another fight's room on the same map never binds it).
+            void BoundsOf(ActiveMechanic const& m, SpotBounds const& b)
+            {
+                Unit const* owner = ObjectAccessor::GetUnit(*_bot, m.owner);
+                if (!owner || !owner->IsAlive() || !_bot->IsInCombatWith(owner))
+                    return;
+                AddBounds(b);
+            }
+
+            void AddBounds(SpotBounds const& b)
+            {
+                Solver::Bounds out;
+                for (SpotBounds::Area const& a : b.areas)
+                {
+                    Solver::BoundsArea area;
+                    if (a.polygon.size() >= 3)
+                        for (Position const& p : a.polygon)
+                            area.polygon.push_back(ToVec(p));
+                    area.center = ToVec(a.center);
+                    area.radius = a.radius;
+                    area.zMin = a.zMin;
+                    area.zMax = a.zMax;
+                    out.areas.push_back(std::move(area));
+                }
+                for (SpotBounds::KeepOutCircle const& k : b.keepOut)
+                    out.keepOut.push_back({ ToVec(k.center), k.radius, false });
+                out.pathInside = b.pathInside;
+                for (Solver::Bounds const& have : _in.bounds)
+                    if (DropSpot::SameBounds(have, out))
+                        return;
+                _in.bounds.push_back(std::move(out));
             }
 
             static Milliseconds TimingEndOf(Solver::Timing const& t)
@@ -701,6 +754,9 @@ namespace BossMechanics
 
             void Carriers(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
             {
+                // F-1b (R-1-KIT F2): a hit with no warning (DungeonKit's RegistryHit) is no job for anyone.
+                if (ViewRules::Undodgeable(m.createdAt, m.resolveAt, m.persist.has_value()))
+                    return;
                 std::vector<ObjectGuid> const& eligible = Eligible(m);
                 bool const meEligible = Has(eligible, _self);
                 if (m.selfTrigger.auraSpell && meEligible
@@ -770,7 +826,7 @@ namespace BossMechanics
                     }
                     // Stratholme X1: a bot carrier also at its live spot, as a soft blocker for the route search (it
                     // may still walk to its planned spot, through the others' way; a human's live spot is the hard
-                    // circle above).
+                    // circle above). F-1b (R-1-BM M-1): an aura-keyed carrier's blocker is hot from now on.
                     if (!spot || spot->source != ViewRules::SpotSource::HumanNow)
                     {
                         ViewRules::Spot live;
@@ -778,7 +834,7 @@ namespace BossMechanics
                         live.slackYd = kLiveCarrierSlackYd;
                         live.source = ViewRules::SpotSource::BotNow;
                         _in.softHazards.push_back(ViewRules::CarrierHazard(m.id, r, zTol, live, _opt.safetyMarginYd,
-                            timing));
+                            ViewRules::SoftCarrierTiming(timing, _now, m.selfTrigger.auraSpell != 0)));
                     }
                 }
                 if (!meCarrier)
@@ -1115,6 +1171,7 @@ namespace BossMechanics
             in.far = Solver::FarFrom();
             in.freeze = Solver::Freeze();
             in.drop = Solver::Drop();
+            in.bounds.clear();
             in.slot = 0;
             in.slotCount = 0;
             info.tasks.clear();
@@ -1525,7 +1582,7 @@ namespace BossMechanics
     std::string FormatSolveStats(Solver::SolveStats const& s)
     {
         return Acore::StringFormat("kept {}, probes {} (off {}, snapped {}), no path {}, end unsafe {}, crosses start "
-            "{} / other {}, budget stops {}", s.kept, s.probes, s.offMesh, s.snapped, s.noPath, s.endUnsafe,
-            s.crossStart, s.crossOther, s.budgetStops);
+            "{} / other {}, budget stops {}, out of bounds {}", s.kept, s.probes, s.offMesh, s.snapped, s.noPath,
+            s.endUnsafe, s.crossStart, s.crossOther, s.budgetStops, s.outOfBounds);
     }
 }

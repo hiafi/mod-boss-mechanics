@@ -73,7 +73,7 @@ namespace
         d.present = true;
         d.id = in.carried.front().id;
         d.landAt = in.carried.front().timing.from;
-        d.enterAt = d.landAt - Ms(1200);
+        d.enterAt = d.landAt - Ms(800);
         return d;
     }
 
@@ -102,6 +102,8 @@ namespace
         CHECK(!DropSpot::ParseFlags("edge,,away"));
         CHECK(!DropSpot::ParseFlags("wall"));
         CHECK(!DropSpot::ParseFlags("edge,wall"));
+        f = DropSpot::ParseFlags("edge,away,avoid");
+        CHECK(f && f->edge && f->away && f->avoid && !f->prefer);
     }
 
     void TestRoom()
@@ -233,7 +235,7 @@ namespace
     }
 
     // An enterable spot (an old web, a hazard of its own): the carrier waits next to it until it opens, then steps
-    // in so the landing's centre is inside it.
+    // in so the landing's center is inside it.
     void TestEnterable()
     {
         std::vector<Vec3> const allies = { { -8.f, 0.f, 0.f }, { -8.f, 6.f, 0.f }, { -10.f, -4.f, 0.f } };
@@ -266,7 +268,7 @@ namespace
         CHECK(out <= 5.f + DropSpot::kStageYd);
         CHECK(!DropSpot::InsidePrefer(in.drop, wait.target));
 
-        // At the opening (the brain's re-solve): in, its centre inside the web, arriving before the landing.
+        // At the opening (the brain's re-solve): in, its center inside the web, arriving before the landing.
         Input open = in;
         open.bot = wait.target;
         open.now = in.drop.enterAt;
@@ -392,6 +394,156 @@ namespace
             - DropSpot::kAwayPerYd * DropSpot::kAwayCapYd);
     }
 
+    // ---- Spot bounds (Stratholme F-1b, R-1-B B-1) ----
+
+    // The Baron's room in miniature: the soft circle room (r 20 round the origin) reaches 5 yd past the south wall
+    // (y = -15), where his door is (0, -15). The group stands north, so the edge and away terms pull the carrier south,
+    // through the door into the corridor. The hard bounds (the room's real outline, the door kept out) stop that.
+    Solver::Bounds BaronRoom(bool pathInside)
+    {
+        Solver::Bounds b;
+        b.areas.push_back({ { { -24.f, -15.f, 0.f }, { 24.f, -15.f, 0.f }, { 24.f, 20.f, 0.f }, { -24.f, 20.f, 0.f } },
+            {}, 0.f, -5.f, 5.f });
+        b.keepOut.push_back({ { 0.f, -15.f, 0.f }, 6.f, false });
+        b.pathInside = pathInside;
+        return b;
+    }
+
+    void TestBoundsGeometry()
+    {
+        Solver::Bounds const room = BaronRoom(true);
+        CHECK(DropSpot::InBounds(room, { 10.f, 0.f, 0.f }));
+        CHECK(!DropSpot::InBounds(room, { 10.f, -16.f, 0.f }));     // past the wall
+        CHECK(!DropSpot::InBounds(room, { 2.f, -11.f, 0.f }));      // inside, at the door
+        CHECK(!DropSpot::InBounds(room, { 10.f, 0.f, 8.f }));       // another floor
+        Solver::Bounds none;
+        CHECK(DropSpot::InBounds(none, { 1000.f, 1000.f, 0.f }));
+        // A circle area, and the union of two.
+        Solver::Bounds two;
+        two.areas.push_back({ {}, { 0.f, 0.f, 0.f }, 5.f, -100.f, 100.f });
+        two.areas.push_back({ {}, { 20.f, 0.f, 0.f }, 5.f, -100.f, 100.f });
+        CHECK(DropSpot::InBounds(two, { 3.f, 0.f, 0.f }) && DropSpot::InBounds(two, { 18.f, 0.f, 0.f }));
+        CHECK(!DropSpot::InBounds(two, { 10.f, 0.f, 0.f }));
+        // Every set holds.
+        CHECK(!DropSpot::InBounds(std::vector<Solver::Bounds>{ room, two }, { 10.f, 0.f, 0.f }));
+        CHECK(DropSpot::InBounds(std::vector<Solver::Bounds>{ room, two }, { 3.f, 0.f, 0.f }));
+
+        // pathInside: once in, the walk stays in; a start outside walks in; through the door is refused.
+        std::vector<Solver::Bounds> const all{ room };
+        CHECK(DropSpot::PathInBounds(all, { { -10.f, 0.f, 0.f }, { 10.f, 0.f, 0.f } }));
+        CHECK(!DropSpot::PathInBounds(all, { { -10.f, -10.f, 0.f }, { 0.f, -20.f, 0.f }, { 10.f, -10.f, 0.f } }));
+        CHECK(DropSpot::PathInBounds(all, { { 0.f, -25.f, 0.f }, { -10.f, -18.f, 0.f }, { -10.f, 0.f, 0.f } }));
+        CHECK(DropSpot::PathInBounds(all, { { -10.f, -10.f, 0.f }, { -12.f, -14.5f, 0.f }, { 10.f, -10.f, 0.f } })
+            == false);                                              // grazes the door's keep-out circle
+        std::vector<Solver::Bounds> loose{ room };
+        loose.front().pathInside = false;
+        CHECK(DropSpot::PathInBounds(loose, { { -10.f, -10.f, 0.f }, { 0.f, -20.f, 0.f }, { 10.f, -10.f, 0.f } }));
+
+        CHECK(DropSpot::SameBounds(room, BaronRoom(true)));
+        CHECK(!DropSpot::SameBounds(room, BaronRoom(false)));
+        CHECK(!DropSpot::SameBounds(room, two));
+    }
+
+    void TestBoundsDrop()
+    {
+        std::vector<Vec3> const allies = { { 8.f, 6.f, 0.f }, { -8.f, 6.f, 0.f }, { 0.f, 12.f, 0.f } };
+        Input in = Carrier({ 0.f, -6.f, 0.f }, 6.f, allies);
+        in.drop = RuleFor(in);
+        in.drop.roomCenter = { 0.f, 0.f, 0.f };
+        in.drop.roomRadius = 20.f;
+        in.drop.edge = true;
+        in.drop.away = true;
+
+        // Soft room only: the carrier lands south of the wall (the B-1 failure).
+        Plan const loose = RoleSolve(in);
+        CHECK(loose.outcome == Outcome::Move);
+        CHECK(loose.target.y < -15.f);
+
+        // Hard bounds: inside the room, off the door, a clean move, and the refused candidates counted.
+        in.bounds.push_back(BaronRoom(true));
+        Plan const p = RoleSolve(in);
+        CHECK(p.outcome == Outcome::Move);
+        CHECK(DropSpot::InBounds(in.bounds, p.target));
+        CHECK(DropSpot::PathInBounds(in.bounds, p.path));
+        CHECK(AlliesClear(in, p.target));
+        CHECK(p.stats.outOfBounds > 0u);
+
+        // A bot already outside (in the corridor) and safe there is never refused its own spot.
+        Input outside = Carrier({ 0.f, -22.f, 0.f }, 6.f, allies);
+        outside.bounds.push_back(BaronRoom(true));
+        CHECK(RoleSolve(outside).outcome == Outcome::Safe);
+    }
+
+    // An oracle that walks every path through a fixed corner (the navmesh through a closed door).
+    struct DoorOracle : Solver::PathOracle
+    {
+        Vec3 via;
+        bool Find(Vec3 const& from, Vec3 const& to, std::vector<Vec3>& out) override
+        {
+            out = { from, via, to };
+            return true;
+        }
+    };
+
+    void TestBoundsPath()
+    {
+        std::vector<Vec3> const allies = { { 8.f, 6.f, 0.f }, { -8.f, 6.f, 0.f }, { 0.f, 12.f, 0.f } };
+        Input in = Carrier({ 0.f, -6.f, 0.f }, 6.f, allies, 6000);    // time for the detour through the door
+        in.drop = RuleFor(in);
+        in.drop.roomCenter = { 0.f, 0.f, 0.f };
+        in.drop.roomRadius = 20.f;
+        in.drop.edge = true;
+        in.drop.away = true;
+        in.roleSolve = true;
+        in.bounds.push_back(BaronRoom(true));
+        DoorOracle door;
+        door.via = { 0.f, -18.f, 0.f };
+        Plan const p = Solver::Solve(in, door);
+        // Every clean path leaves through the door: refused; whatever the solve ends with, it is not such a move.
+        CHECK(p.outcome != Outcome::Move);
+        CHECK(p.stats.outOfBounds > 0u);
+        in.bounds.front().pathInside = false;
+        Plan const q = Solver::Solve(in, door);
+        CHECK(q.outcome == Outcome::Move);
+        CHECK(DropSpot::InBounds(in.bounds, q.target));
+    }
+
+    // A parked boss's stop keeps the bounds (a door's keep-out circle: the stock leash).
+    void TestBoundsPark()
+    {
+        Input in;
+        in.bot = { 0.f, 0.f, 0.f };
+        in.now = kNow;
+        Solver::Park& pk = in.park;
+        pk.present = true;
+        pk.inside = true;
+        pk.boss = { 0.f, 0.f, 0.f };
+        pk.stopYd = 3.f;
+        pk.triggerYd = 5.f;
+        pk.depthYd = 1.f;
+        pk.zone.shape = Shape::Circle(4.f);
+        pk.zone.poses = { Pose{ 0.f, -12.f, 0.f, 0.f } };
+        pk.zone.marginYd = 0.5f;
+        Vec3 const tank{ 0.f, -17.5f, 0.f };    // the stop is (0, -14.5), 2.5 yd into the zone
+        CHECK(Solver::Detail::ParkOk(in, tank));
+        Solver::Bounds far;
+        far.keepOut.push_back({ { 20.f, 20.f, 0.f }, 6.f, false });
+        in.bounds.push_back(far);
+        CHECK(Solver::Detail::ParkOk(in, tank));
+        Solver::Bounds door;
+        door.keepOut.push_back({ { 0.f, -16.f, 0.f }, 2.f, false });
+        in.bounds.push_back(door);
+        CHECK(!Solver::Detail::ParkOk(in, tank));
+    }
+
+    // The enterable dwell budget (R-1-BM m-2): Nerub'enkan's Stuck counts 2 s in a web.
+    void TestDwell()
+    {
+        static_assert(DropSpot::DwellFits(Ms(800), Ms(2000)));
+        static_assert(!DropSpot::DwellFits(Ms(1200), Ms(2000)));
+        CHECK(DropSpot::kEnterableExitMs == Ms(1000));
+    }
+
     // ---- the drill ----
 
     void TestDrill()
@@ -420,7 +572,17 @@ namespace
                 if (flags->find("prefer") != std::string_view::npos)
                     CHECK(step.atMs > websLiveAt);  // the old webs are live (past their 1 s warning) by then
                 if (Drill::Value(line, "to"))
+                {
                     CHECK(Drill::Value(line, "exempt") == std::string_view("target"));
+                    // HM3 (R-1-BM m-3): S15's RoomDropRule(true) = Edge + Away + avoid the piles; Away alone is inert.
+                    std::optional<DropSpot::Flags> const f = DropSpot::ParseFlags(*flags);
+                    CHECK(f && f->edge && f->away && f->avoid);
+                }
+                // A rule never leans on Away alone (a tie-breaker).
+                std::optional<DropSpot::Flags> const f = DropSpot::ParseFlags(*flags);
+                CHECK(f && (!f->away || f->edge || f->prefer));
+                if (std::optional<std::string_view> const dwell = Drill::Value(line, "dwell"))
+                    CHECK(DropSpot::DwellFits(Ms(std::stoul(std::string(*dwell))), Ms(2000)));
             }
             else
             {
@@ -453,6 +615,11 @@ int main()
     TestLane();
     TestRange();
     TestOutside();
+    TestBoundsGeometry();
+    TestBoundsDrop();
+    TestBoundsPath();
+    TestBoundsPark();
+    TestDwell();
     TestDrill();
     return Report("drop_spot_test");
 }

@@ -222,6 +222,9 @@ namespace BossMechanics::Solver
         Park park;
         // Stratholme X2: the drop spot rule of a carried shape (MechanicDropSpot.h): score terms and candidates.
         Drop drop;
+        // Stratholme F-1b: hard spot bounds (MechanicDropSpot.h, Bounds): every set holds a moved-to target (and, with
+        // pathInside, its path); a parked boss's stop too (ParkOk). Empty = anywhere.
+        std::vector<Bounds> bounds;
         // Slot ring rotation: slot × 360° / slotCount (Assign::SlotOf among the carriers; 0 = no rotation).
         std::uint32_t slot = 0, slotCount = 0;
         // Solve even when the bot's spot passes TargetOk (a role move: healer sight, reach): the spot competes as an
@@ -268,6 +271,7 @@ namespace BossMechanics::Solver
         std::uint32_t crossStart = 0;       // a path was found, it fails inside a hazard that holds the bot
         std::uint32_t crossOther = 0;       // ...inside another hazard
         std::uint32_t budgetStops = 0;      // validation passes cut short by maxPathChecks
+        std::uint32_t outOfBounds = 0;      // F-1b: a target or its path outside the hard bounds (Input::bounds)
         // M4 cost (D9): lane-frame candidates in the candidate list, and the oracle path calls spent on them.
         std::uint32_t laneCandidates = 0;
         std::uint32_t lanePathChecks = 0;
@@ -284,6 +288,7 @@ namespace BossMechanics::Solver
             crossStart += o.crossStart;
             crossOther += o.crossOther;
             budgetStops += o.budgetStops;
+            outOfBounds += o.outOfBounds;
             laneCandidates += o.laneCandidates;
             lanePathChecks += o.lanePathChecks;
         }
@@ -1043,7 +1048,8 @@ namespace BossMechanics::Solver
                 return false;                       // the tank stays outside the zone
             float const k = pk.stopYd / std::max(d, 1e-3f);
             Geo::Vec3 const stop{ p.x + (pk.boss.x - p.x) * k, p.y + (pk.boss.y - p.y) * k, pk.boss.z };
-            return ParkStopOk(pk, stop);
+            // F-1b: the boss's stop keeps the bounds too (a door's keep-out circle: the stock leash).
+            return ParkStopOk(pk, stop) && BossMechanics::DropSpot::InBounds(in.bounds, stop);
         }
 
         inline bool FreezeOk(Input const& in, Ms arrival)
@@ -2593,6 +2599,12 @@ namespace BossMechanics::Solver
             hazardFree[i] = 1;
             if (!Detail::PlayerKindsOk(in, c, arrival, nullptr))
                 continue;
+            // F-1b: a moved-to target keeps the hard bounds (the bot's own spot never fails them).
+            if (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c))
+            {
+                ++plan.stats.outOfBounds;
+                continue;
+            }
             kept.push_back({ i, dist, Detail::Score(in, c, dist, arrival, deadline, i == 0), c });
         }
 
@@ -2720,6 +2732,14 @@ namespace BossMechanics::Solver
                     if (!TargetOk(in, path.back(), arrival, horizonEnd))
                     {
                         ++out.stats.endUnsafe;
+                        continue;
+                    }
+                    // F-1b: the real end (a snap or the oracle may move it) and, with pathInside, the walk.
+                    if (!in.bounds.empty() && Detail::Dist3(path.back(), in.bot) > Detail::kMovedYd
+                        && (!BossMechanics::DropSpot::InBounds(in.bounds, path.back())
+                            || !BossMechanics::DropSpot::PathInBounds(in.bounds, path)))
+                    {
+                        ++out.stats.outOfBounds;
                         continue;
                     }
                     PathCheck const pc = CheckPath(pin, path, in.now, allowGrace);
@@ -2857,8 +2877,10 @@ namespace BossMechanics::Solver
                     continue;
                 Geo::Vec3 const& c = cands[i];
                 float const dist = Detail::Dist3(in.bot, c);
-                std::uint32_t const violated = kinds
-                    ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0;
+                // F-1b: a target outside the hard bounds ranks like one more broken rule.
+                std::uint32_t const violated = (kinds
+                    ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0)
+                    + (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c) ? 1u : 0u);
                 Ms cap = kForever;
                 bool walk = true;
                 if (top.size() >= Detail::kFallbackRanked)

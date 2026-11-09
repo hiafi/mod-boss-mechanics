@@ -138,6 +138,10 @@ namespace BossMechanics
         // Shape kinds anchored on a player (AnchorOn) or aimed at one (a line's `to` end): where that player's bot
         // carries the shape before it lands (DropSpotRule, MechanicRegistry.h; Stratholme X2). Bots only.
         MechanicRef& DropSpot(BossMechanics::DropSpotRule const& rule);
+        // Any kind but a decoy: while this is in a bot's view and its owner fights the bot, the bot's planned spots
+        // keep these hard bounds (a room's walls, its doors kept out; SpotBounds, MechanicRegistry.h; Stratholme
+        // F-1b). A Park's boss stop keeps them too. Bots only.
+        MechanicRef& Within(BossMechanics::SpotBounds const& bounds);
         // telegraph and bookkeeping
         MechanicRef& Color(BossMechanics::Color color);
         MechanicRef& Tag(uint32 tag);

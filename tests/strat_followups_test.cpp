@@ -1,7 +1,7 @@
 // Standalone tests for the Stratholme follow-ups of src/MechanicDrill.h (Stratholme build §3.9, WP-G): the
 // `stratholme-followups` drill against the build spec rows it reproduces (The Unforgiven UF1 heroic, Malor MZ7 + MZ8,
 // Baroness BA4 + BA5, Balnazzar BZ1 heroic, Willey WY9 heroic), the geometry it relies on (the crossing ranks through
-// one centre, the drawn holes of the two donuts, the tracking cone and its exempt target, the hall halves), the
+// one center, the drawn holes of the two donuts, the tracking cone and its exempt target, the hall halves), the
 // exemption helper and the sweep's program. Build: tests/run.sh.
 
 #include "BossMechanicsIds.h"
@@ -162,7 +162,7 @@ namespace
             }
     }
 
-    // UF1 heroic: a 30 x 10 rank (3 s), then the crossing rank on the other axis through the same centre, 1.5 s after
+    // UF1 heroic: a 30 x 10 rank (3 s), then the crossing rank on the other axis through the same center, 1.5 s after
     // the first passes. 45% Shadow, Weakened.
     void TestCrossingRanks()
     {
@@ -184,16 +184,16 @@ namespace
         CHECK(Is(rank[0].line, "axis", "x") && Is(rank[0].line, "frame", "30x10"));
         CHECK(Is(crossing[0].line, "axis", "y") && Is(crossing[0].line, "frame", "10x30"));
 
-        // The runtime's frame: centred on the anchor point, X along the facing (MechanicCommand.cpp, lanes). One lane
-        // as wide as the frame's span has no slack: it is centred whatever the dice say, and never falls back.
+        // The runtime's frame: centered on the anchor point, X along the facing (MechanicCommand.cpp, lanes). One lane
+        // as wide as the frame's span has no slack: it is centered whatever the dice say, and never falls back.
         for (float facing : { 0.f, 1.1f, 3.761f })
         {
-            Vec3 const centre{ 100.f, -50.f, 0.f };
-            auto frameOf = [&centre, facing](float sx, float sy)
+            Vec3 const center{ 100.f, -50.f, 0.f };
+            auto frameOf = [&center, facing](float sx, float sy)
             {
                 float const c = std::cos(facing);
                 float const n = std::sin(facing);
-                return Frame{ centre.x - c * sx / 2.f + n * sy / 2.f, centre.y - n * sx / 2.f - c * sy / 2.f, 0.f,
+                return Frame{ center.x - c * sx / 2.f + n * sy / 2.f, center.y - n * sx / 2.f - c * sy / 2.f, 0.f,
                     facing, sx, sy };
             };
             Frame const fx = frameOf(Drill::kRankLength, Drill::kRankWidth);
@@ -212,22 +212,22 @@ namespace
             LanePlacement const b = PlaceLane(fy, { Axis::Y, 0.f, Drill::kRankWidth });
             CHECK_NEAR(a.length, Drill::kRankLength, kEps);
             CHECK_NEAR(b.length, Drill::kRankLength, kEps);
-            // Both lanes' midpoints are the centre, and they cross at a right angle.
+            // Both lanes' midpoints are the center, and they cross at a right angle.
             Geo::Pose const ma = Geo::Advance(a.pose, a.pose.o, a.length / 2.f);
             Geo::Pose const mb = Geo::Advance(b.pose, b.pose.o, b.length / 2.f);
-            CHECK_NEAR(ma.x, centre.x, kEps);
-            CHECK_NEAR(ma.y, centre.y, kEps);
-            CHECK_NEAR(mb.x, centre.x, kEps);
-            CHECK_NEAR(mb.y, centre.y, kEps);
+            CHECK_NEAR(ma.x, center.x, kEps);
+            CHECK_NEAR(ma.y, center.y, kEps);
+            CHECK_NEAR(mb.x, center.x, kEps);
+            CHECK_NEAR(mb.y, center.y, kEps);
             CHECK_NEAR(std::cos(a.pose.o - b.pose.o), 0.f, kEps);
-            // A player who left the first rank sideways (6 yd off its axis, at the centre) stands in the crossing.
+            // A player who left the first rank sideways (6 yd off its axis, at the center) stands in the crossing.
             BossMechanics::Shape const lineA = BossMechanics::Shape::Line(a.length, a.width);
             BossMechanics::Shape const lineB = BossMechanics::Shape::Line(b.length, b.width);
-            Vec3 const dodged{ centre.x - std::sin(facing) * 6.f, centre.y + std::cos(facing) * 6.f, 0.f };
+            Vec3 const dodged{ center.x - std::sin(facing) * 6.f, center.y + std::cos(facing) * 6.f, 0.f };
             CHECK(!Geo::Contains(lineA, a.pose, dodged) && Geo::Contains(lineB, b.pose, dodged));
             // The safe ground is a quadrant corner: 5 yd off both axes.
-            Vec3 const corner{ centre.x + std::cos(facing) * 6.f - std::sin(facing) * 6.f,
-                centre.y + std::sin(facing) * 6.f + std::cos(facing) * 6.f, 0.f };
+            Vec3 const corner{ center.x + std::cos(facing) * 6.f - std::sin(facing) * 6.f,
+                center.y + std::sin(facing) * 6.f + std::cos(facing) * 6.f, 0.f };
             CHECK(!Geo::Contains(lineA, a.pose, corner) && !Geo::Contains(lineB, b.pose, corner));
         }
     }
@@ -392,7 +392,7 @@ namespace
         for (std::size_t i = 0; i < sides[0].size() && i < sides[1].size(); ++i)
             CHECK_NEAR(sides[0][i], -sides[1][i], kEps);
 
-        // The halves tile the 58 x 20 hall centred on the owner: a point is in exactly one of them (off the axis).
+        // The halves tile the 58 x 20 hall centered on the owner: a point is in exactly one of them (off the axis).
         for (float facing : { 0.f, 3.761f })
         {
             Vec3 const owner{ 10.f, 20.f, 0.f };

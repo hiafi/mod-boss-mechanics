@@ -200,8 +200,9 @@ namespace BossMechanics
                     Player const* p = ref.GetSource();
                     if (!p || p == unit || !p->IsAlive() || !p->IsInWorld())
                         continue;
-                    float const d = unit->GetExactDist(p);
-                    if (d <= view.refs.playerRange && (f.nearestPlayerYd < 0.f || d < f.nearestPlayerYd))
+                    float const d = Desc::NearPlayerDistance(p->GetPositionX() - unit->GetPositionX(),
+                        p->GetPositionY() - unit->GetPositionY(), p->GetPositionZ() - unit->GetPositionZ());
+                    if (d >= 0.f && d <= view.refs.playerRange && (f.nearestPlayerYd < 0.f || d < f.nearestPlayerYd))
                         f.nearestPlayerYd = d;
                 }
         for (uint32 id : view.refs.zones)

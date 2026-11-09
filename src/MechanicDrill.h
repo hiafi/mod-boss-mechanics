@@ -396,8 +396,8 @@ namespace BossMechanics::Drill
         return false;
     }
 
-    // UF1: the rank and the crossing rank, each a 30 x 10 lane through the centre of a fixed frame (frame=30x10 on X,
-    // 10x30 on Y: one lane fills the frame's width, so it is centred, never placed at random).
+    // UF1: the rank and the crossing rank, each a 30 x 10 lane through the center of a fixed frame (frame=30x10 on X,
+    // 10x30 on Y: one lane fills the frame's width, so it is centered, never placed at random).
     constexpr float kRankLength = 30.f;
     constexpr float kRankWidth = 10.f;
     // BA5: the echo is "beyond 8 yd from her". The drill draws it 8 to 32 yd (ratio 0.25, the ladder's smallest step,
@@ -405,7 +405,7 @@ namespace BossMechanics::Drill
     constexpr float kEchoInner = 8.f;
     constexpr float kEchoOuter = 32.f;
     // WY9: Willey's hall frame is 58 x 20 yd (NAVMESH-REPORT §5 (b)), halves 10 yd wide on either side of its axis.
-    // The drill centres the hall on the owner: each half is a 58 x 10 line from 29 yd behind it, 5 yd off the axis.
+    // The drill centers the hall on the owner: each half is a 58 x 10 line from 29 yd behind it, 5 yd off the axis.
     constexpr float kHallLength = 58.f;
     constexpr float kHalfWidth = 10.f;
     constexpr std::uint32_t kBarrageBlasts = 5;
@@ -414,12 +414,12 @@ namespace BossMechanics::Drill
 
     // ---- Stratholme drop spots (Stratholme build X2, drill `stratholme-drops`) --------------------------------------
     // The drop spot rule (MechanicDropSpot.h, MechanicRef::DropSpot): a shape a member carries lands where the member's
-    // bot takes it. `.mech test` keys this adds (the runtime is MechanicCommand.cpp): `drop=<edge,away,behind,prefer>`
-    // on a circle anchor=member or a line to=member, `room=<yd>` (a circle room around the selected unit, default 30),
-    // `dwell=<ms>` (an enterable spot opens this long before the landing, default 1200); `prefer` makes every live
-    // persistent circle of the test owner an enterable preferred spot. Ledger tags: the old webs (1, reported: a
-    // carrier that steps in for the drop takes a tick), and the carried shapes' hits on the others (2-5, under the
-    // bar).
+    // bot takes it. `.mech test` keys this adds (the runtime is MechanicCommand.cpp):
+    // `drop=<edge,away,behind,prefer,avoid>` on a circle anchor=member or a line to=member, `room=<yd>` (a circle room
+    // around the selected unit, default 30), `dwell=<ms>` (an enterable spot opens this long before the landing,
+    // default 800); `prefer` makes every live persistent circle of the test owner an enterable preferred spot, `avoid`
+    // an avoid point. Ledger tags: the old webs (1, reported: a carrier that steps in for the drop takes a tick), and
+    // the carried shapes' hits on the others (2-5, under the bar).
     constexpr std::uint32_t kDropTagWeb = 1;            // NE3: two old webs, 5 yd, near the group
     constexpr std::uint32_t kDropTagGlob = 2;           // NE1: a 5 yd glob onto an old web, else the edge
     constexpr std::uint32_t kDropTagRot = 3;            // BR3: a 6 yd Death and Decay to the edge, away from the group
@@ -612,7 +612,7 @@ namespace BossMechanics::Drill
                 } },        // three cycles a run (120 s): the sweep runs scholomance-shapes:3
             // Stratholme build §3.9: the chained follow-ups and the hidden Barrage, heroic numbers (pct= in the
             // percent mode). 0 s, The Unforgiven UF1 heroic: a 30 x 10 rank across the frame through the owner (3 s),
-            // then the crossing rank on the other axis through the same centre, 1.5 s after the first passes. 7 s,
+            // then the crossing rank on the other axis through the same center, 1.5 s after the first passes. 7 s,
             // Malor MZ7 + MZ8 heroic: circle 8 on the owner, tank included (2 s), then a donut 8 / 14 (1.5 s): out,
             // then back in. 13 s, Baroness BA4 + BA5 heroic: circle 12 on her (3 s), then the echo beyond 8 yd (2 s;
             // kEchoOuter). 20 s, Balnazzar BZ1 heroic: a 60 degree / 30 yd cone from him aimed at a non-tank and
@@ -653,22 +653,23 @@ namespace BossMechanics::Drill
                 } },        // three cycles a run (120 s): the sweep runs stratholme-followups:3
             // Stratholme build X2: the drop spot rule (heroic numbers, pct= in the percent mode). 0 s: two old webs
             // (Nerub'enkan NE3), 5 yd persistent circles 10 yd off the group. 2 s, NE1: a 5 yd glob on a non-tank
-            // (3 s), carried onto an old web (it may step in 1.2 s before the landing), else to the room's edge away
+            // (3 s), carried onto an old web (it may step in 0.8 s before the landing), else to the room's edge away
             // from the group. 10 s, the Baron BR3: a 6 yd Death and Decay on a non-tank (3 s) to the edge, away from
-            // the group. 16 s, the Ultimatum HM3: a 6 yd lane from the creature to a non-tank (3 s), the target exempt,
-            // missing everyone else. 22 s, Galford GF1: a 4 yd Holy Fire on a non-tank (6 s), behind the group (your
+            // the group. 16 s, the Ultimatum HM3 (S15's rule: Edge + Away + avoid the bone piles, the old webs
+            // standing in for them): a 6 yd lane from the creature to a non-tank (3 s), the target exempt, missing
+            // everyone else. 22 s, Galford GF1: a 4 yd Holy Fire on a non-tank (6 s), behind the group (your
             // facing is its travel) and at the edge. The room is a 25 yd circle around the creature.
             { "stratholme-drops", "drop spots: a glob onto an old web, rot to the edge, a lane missing the group, "
                 "holy fire behind it", 30000, false, {
                     { 0, "circle 5 1000 at=group away=10 persist=24000 tick=1000 school=nature pct=2 tag=1" },
                     { 0, "circle 5 1000 at=group away=10 persist=24000 tick=1000 after=with school=nature pct=2 "
                         "tag=1" },
-                    { 2000, "circle 5 3000 anchor=member pick=nontank drop=prefer,edge,away room=25 dwell=1200 "
+                    { 2000, "circle 5 3000 anchor=member pick=nontank drop=prefer,edge,away room=25 dwell=800 "
                         "school=nature pct=30 weak=1 tag=2" },
                     { 10000, "circle 6 3000 anchor=member pick=nontank drop=edge,away room=25 school=shadow pct=25 "
                         "weak=1 tag=3" },
-                    { 16000, "line 30 3000 width=6 anchor=target to=member pick=nontank exempt=target drop=away "
-                        "room=25 pct=50 weak=1 tag=4" },
+                    { 16000, "line 30 3000 width=6 anchor=target to=member pick=nontank exempt=target "
+                        "drop=edge,away,avoid room=25 pct=50 weak=1 tag=4" },
                     { 22000, "circle 4 6000 anchor=member pick=nontank drop=behind,edge room=25 school=holy pct=30 "
                         "weak=1 tag=5" },
                 }, 4 },     // four cycles a run (120 s): the sweep runs stratholme-drops:4

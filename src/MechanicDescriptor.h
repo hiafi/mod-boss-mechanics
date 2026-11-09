@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -277,6 +278,18 @@ namespace BossMechanics::Desc
     // ----------------------------------------------------------------------------------------------------------------
     // Conditions
     // ----------------------------------------------------------------------------------------------------------------
+
+    // NearPlayer's distance (Stratholme F-1b, R-1-BM m-1): on the plane, like the registry's circles it guards
+    // against (Maleki's Shatter), and only within their default height tolerance (Shape::zTolerance, 6 yd): a player
+    // on a walkway 4.5 yd below and 7 yd away is 7 yd away, one on another floor is not near at all. -1: not near.
+    constexpr float kNearPlayerZToleranceYd = 6.f;
+
+    inline float NearPlayerDistance(float dx, float dy, float dz)
+    {
+        if (dz > kNearPlayerZToleranceYd || dz < -kNearPlayerZToleranceYd)
+            return -1.f;
+        return std::sqrt(dx * dx + dy * dy);
+    }
 
     // What a condition may read about one unit. The view fills it once per unit and tick, and only with what the
     // descriptor references (References below): the auras, the entries of NearUnit conditions, the zones, and the

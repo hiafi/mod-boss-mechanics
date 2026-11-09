@@ -450,6 +450,19 @@ namespace BossMechanics::Solver
         inline std::uint32_t Rasterize(Input const& tight, Ms horizonEnd, Grid& g)
         {
             RasterizeInto(tight, tight.hazards, horizonEnd, g, g.hotFrom, g.hotTo);
+            // Stratholme F-1b: a pathInside bounds set the bot stands in walls off every cell outside it for the
+            // whole walk (Solve's PathInBounds; a bot starting outside is not walled in).
+            for (Bounds const& b : tight.bounds)
+            {
+                if (!b.pathInside || !BossMechanics::DropSpot::InBounds(b, g.a))
+                    continue;
+                for (std::uint32_t i = 0; i < g.Size(); ++i)
+                    if (!BossMechanics::DropSpot::InBounds(b, g.Center(i)))
+                    {
+                        g.hotFrom[i] = -kNever / 4;
+                        g.hotTo[i] = kNever / 4;
+                    }
+            }
             std::uint32_t blocked = 0;
             for (std::uint32_t i = 0; i < g.Size(); ++i)
                 if (g.hotFrom[i] <= g.hotTo[i])

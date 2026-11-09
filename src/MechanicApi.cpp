@@ -522,6 +522,14 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::Within(SpotBounds const& bounds)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("Within", cur && !cur->decoy))
+            m->bounds = bounds;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::Color(BossMechanics::Color color)
     {
         if (ActiveMechanic* m = Edit("Color", true, true))

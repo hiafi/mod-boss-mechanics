@@ -806,6 +806,15 @@ namespace
         CHECK(!Holds(Condition::Not(Condition::NearPlayer(8.f)), u, ctx));
         CHECK(Holds(Condition::Not(Condition::NearPlayer(5.f)), u, ctx));
 
+        // F-1b (R-1-BM m-1): the view measures on the plane within 6 yd of height, like Maleki's 8 yd Shatter circle.
+        // An ally 7 yd away and 4.5 yd lower (the walkway beside his plaza) is near; one on another floor is not.
+        CHECK_NEAR(Desc::NearPlayerDistance(7.f, 0.f, -4.5f), 7.f, 1e-4);
+        CHECK(Desc::NearPlayerDistance(7.f, 0.f, -4.5f) <= 8.f);
+        CHECK(std::sqrt(7.f * 7.f + 4.5f * 4.5f) > 8.f);         // the old 3D distance read "not near"
+        CHECK_NEAR(Desc::NearPlayerDistance(3.f, 4.f, 6.f), 5.f, 1e-4);
+        CHECK(Desc::NearPlayerDistance(3.f, 4.f, 6.5f) < 0.f);
+        CHECK(Desc::NearPlayerDistance(3.f, 4.f, -6.5f) < 0.f);
+
         // AllOf: every one; none holds vacuously. Not of nothing holds.
         CHECK(Holds(Condition::AllOf({}), u, ctx));
         CHECK(Holds(Condition::AllOf({ Condition::HasAura(7001), Condition::Phase(3) }), u, ctx));

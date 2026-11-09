@@ -6,6 +6,7 @@
 #include "brain_model.h"
 #include "MechanicDrillPlan.h"
 #include "MechanicRoute.h"
+#include "MechanicViewRules.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1264,9 +1265,92 @@ namespace
     }
 }
 
+namespace
+{
+    // Stratholme F-1b (R-1-BM M-1): Barthilas's Contagion RunOut is re-registered every 2 s with a 4 s warning, so the
+    // view's Instant window of an Infected carrier is always 2-4 s ahead. A healthy bot crossing past it at about 1 s
+    // never met a hot soft cell: no detour, no route round it. SoftCarrierTiming makes an aura-keyed carrier's
+    // blocker hot from now to the end of its window; any other carrier keeps its own window.
+    void TestSoftCarrierWindow()
+    {
+        Vec3 const bot{ 0.f, 0.f, 0.f };
+        Vec3 const goal{ 24.f, 0.f, 0.f };
+        RouteParams rp;
+        rp.padYd = 10.f;
+        Solver::Timing const window = Solver::MakeInstant(kNow + Ms(3000), Ms(250));   // the resolve 3 s ahead
+
+        // The window as the RunOut gives it: the crossing (about 0.3-1.9 s) is over before it opens.
+        Input raw = MakeInput(bot);
+        Hazard h = Carrier(1, 7.f, 0.f);
+        h.timing = ViewRules::SoftCarrierTiming(window, kNow, false);
+        CHECK(h.timing.from == window.from && h.timing.to == window.to);
+        raw.softHazards.push_back(h);
+        CHECK(!Solver::SoftCrossed(raw, { bot, goal }, kNow));
+
+        // Aura-keyed: hot from now to the window's end. The crossing counts, and the route goes round it.
+        Input live = MakeInput(bot);
+        h.timing = ViewRules::SoftCarrierTiming(window, kNow, true);
+        CHECK(h.timing.type == Solver::TimingType::Interval);
+        CHECK(h.timing.from == kNow && h.timing.to == window.to);
+        live.softHazards.push_back(h);
+        CHECK(Solver::SoftCrossed(live, { bot, goal }, kNow));
+        StraightOracle oracle;
+        RouteStats st;
+        Plan const plan = Solver::Route(live, goal, oracle, rp, &st);
+        CHECK(st.found && plan.outcome == Outcome::Move);
+        CHECK(st.softCells > 0u && st.softCrossed == 0u && st.legs >= 2u);
+        CHECK(!Solver::SoftCrossed(live, plan.path, kNow));
+
+        // A window already over (a stale one): never earlier than now, never inverted.
+        Solver::Timing const past = ViewRules::SoftCarrierTiming(Solver::MakeInstant(kNow - Ms(3000), Ms(250)), kNow,
+            true);
+        CHECK(past.from == kNow && past.to == kNow);
+    }
+
+    // Stratholme F-1b (R-1-B B-1): a PathInside bounds set the bot stands in walls off the grid outside it. A hard
+    // wall across the box with its only gap outside the room: without bounds the route takes the gap; with them none.
+    void TestBoundsWall()
+    {
+        Vec3 const bot{ 0.f, 0.f, 0.f };
+        Vec3 const goal{ 20.f, 0.f, 0.f };
+        RouteParams rp;
+        rp.padYd = 12.f;
+        rp.growYd = 0.f;
+        Input in = MakeInput(bot);
+        // The wall: a line of circles at x = 10 from y = -6 to y = 14 (the gap below y = -8).
+        for (int k = 0; k <= 10; ++k)
+            in.hazards.push_back(MakeHazard(60 + k, Shape::Circle(1.5f), Pose{ 10.f, -6.f + 2.f * k, 0.f, 0.f },
+                Solver::MakeInterval(kNow - Ms(1000), kNow + Ms(60000))));
+        StraightOracle oracle;
+        RouteStats open;
+        Plan const plan = Solver::Route(in, goal, oracle, rp, &open);
+        CHECK(open.found && plan.outcome == Outcome::Move);
+        bool below = false;
+        for (Vec3 const& q : plan.path)
+            below = below || q.y < -6.f;
+        CHECK(below);
+
+        Solver::Bounds room;
+        room.areas.push_back({ { { -5.f, -5.f, 0.f }, { 25.f, -5.f, 0.f }, { 25.f, 20.f, 0.f }, { -5.f, 20.f, 0.f } },
+            {}, 0.f, -100.f, 100.f });
+        room.pathInside = true;
+        in.bounds.push_back(room);
+        RouteStats walled;
+        Solver::Route(in, goal, oracle, rp, &walled);
+        CHECK(!walled.found);
+        // Not pathInside: the route search ignores it (Solve's target checks hold it).
+        in.bounds.front().pathInside = false;
+        RouteStats loose;
+        Solver::Route(in, goal, oracle, rp, &loose);
+        CHECK(loose.found);
+    }
+}
+
 int main()
 {
     TestSoftCarriers();
+    TestSoftCarrierWindow();
+    TestBoundsWall();
     TestUShapedMines();
     TestClosedRing();
     TestCellCap();
