@@ -352,6 +352,9 @@ namespace BossMechanics
                         case Kind::Spot:
                             SpotKind(m);
                             break;
+                        case Kind::Jump:
+                            JumpKind(m);
+                            break;
                         default:
                             break;
                     }
@@ -1144,6 +1147,18 @@ namespace BossMechanics
                 AddTask(m, BotTaskRole::Member, from, to);
             }
 
+            // ---- Jump (Stratholme X3) ----
+            // An eligible bot gets a Jumper task on the resolve: the brain hops so it is in the air then (StepJump,
+            // MechanicJump.h), whether it stands inside now or not (it may walk in). No hazard (a bot that hops is
+            // safe on that floor), no region, nothing on the board.
+            void JumpKind(ActiveMechanic const& m)
+            {
+                if (m.resolved || !Has(Eligible(m), _self))
+                    return;
+                Milliseconds const at = m.detonateRequested ? std::min(_now, m.resolveAt) : m.resolveAt;
+                AddTask(m, BotTaskRole::Jumper, at, at);
+            }
+
             Registry const& _reg;
             Player const* _bot;
             ObjectGuid const _self;
@@ -1209,6 +1224,19 @@ namespace BossMechanics
         return o;
     }
 
+    // F-2b (R-2-FW m-4): a live pet or guardian of the bot's in the world (a hunter's or warlock's pet, a Feral
+    // Spirit, a summoned guardian); totems and charmed units do not follow it.
+    namespace
+    {
+        bool HasFollowPet(Player const* bot)
+        {
+            for (Unit const* u : bot->m_Controlled)
+                if (u && u->IsInWorld() && u->IsAlive() && (u->IsPet() || u->IsGuardian()) && !u->IsTotem())
+                    return true;
+            return false;
+        }
+    }
+
     BotViewInfo BuildInput(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
         Solver::Input& out, PerceptionFilter const* perceive, BotViewHooks const* hooks)
     {
@@ -1231,6 +1259,9 @@ namespace BossMechanics
         float const slackRad = Geo::DegToRad(opt.facingSlackDeg);
 
         std::unordered_set<uint32> kept;     // hazard ids in the view (lane rects are filtered by them)
+        // F-2b (R-2-FW m-4): a bot with a pet or guardian beside it keeps lethal walls farther off (the kit strikes
+        // pets too).
+        bool const hasPet = HasFollowPet(bot);
         reg.ForEachActive(now - opt.postResolveHold, [&](ActiveMechanic const& m)
         {
             if (!m.IsShapeKind() || m.decoy)    // a decoy is empty floor to the bots (Judge::DecoyFits)
@@ -1244,7 +1275,13 @@ namespace BossMechanics
             bool unitAnchored = false;
             float const driftSpeed = AnchorDriftSpeed(bot, m, unitAnchored);
             Milliseconds firstAt{ 0 };
-            Solver::Timing const timing = TimingOf(m, now, opt.postResolveHold, firstAt);
+            Solver::Timing timing = TimingOf(m, now, opt.postResolveHold, firstAt);
+            // Stratholme X4: a lethal wall is hot through its warning too (ViewRules::LethalTiming).
+            if (m.lethal)
+            {
+                timing = ViewRules::LethalTiming(timing, now);
+                firstAt = timing.from;
+            }
 
             // Drift: a moving anchor may carry the shape this far before its first window; once the window is open
             // the view is refreshed every movingAnchorRecheck, so at least that much.
@@ -1255,12 +1292,15 @@ namespace BossMechanics
                     std::max(kMaxDriftLead, opt.movingAnchorRecheck));
                 drift = driftSpeed * std::chrono::duration<float>(lead).count();
             }
+            if (m.lethal)
+                drift += ViewRules::LethalPetExtraYd(opt.safetyMarginYd, hasPet);
             float const margin = opt.safetyMarginYd + drift;
 
             if (Geo::Dist2d(pose.x, pose.y, out.bot.x, out.bot.y) > Geo::Bounds(shape) + margin + reachYd)
                 return;
 
-            if (perceive && *perceive)
+            // X4: a lethal wall is seen at once (no fallibility roll: a misread wall is a dead bot, not a lesson).
+            if (perceive && *perceive && !m.lethal)
             {
                 Milliseconds until = Solver::kForever;
                 if (!(*perceive)(m.id, until))
@@ -1277,6 +1317,7 @@ namespace BossMechanics
             h.marginYd = margin;
             h.driftYd = drift;
             h.timing = timing;
+            h.lethal = m.lethal;
             h.poses.push_back(pose);
             bool const turns = m.anchor.IsUnit() && m.anchor.followFacing && !m.to && slackRad > 0.f
                 && (shape.type == ShapeType::Line || (shape.type == ShapeType::Cone && shape.angleDeg < 360.f));
@@ -1343,6 +1384,7 @@ namespace BossMechanics
             case BotTaskRole::Frozen: return "frozen";
             case BotTaskRole::Tank: return "tank";
             case BotTaskRole::Parker: return "parker";
+            case BotTaskRole::Jumper: return "jumper";
         }
         return "?";
     }
@@ -1366,7 +1408,8 @@ namespace BossMechanics
         std::unordered_set<uint32> published;
         for (BotTask const& t : info.tasks)
         {
-            if (t.role == BotTaskRole::Tank || t.role == BotTaskRole::Parker || t.role == BotTaskRole::Frozen)
+            if (t.role == BotTaskRole::Tank || t.role == BotTaskRole::Parker || t.role == BotTaskRole::Frozen
+                || t.role == BotTaskRole::Jumper)
                 continue;
             // A task ending now is pruned by this same update (STAGE-M3-R-REPORT n-13).
             if (t.to <= now || !reg.Find(t.mechanicId))

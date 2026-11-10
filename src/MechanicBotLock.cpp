@@ -316,6 +316,45 @@ namespace
         return { bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
     }
 
+    // Stratholme F-2b (R-2-B for X4): an action that carries the bot away (LockRules::AwayMove: the named "blink
+    // back" and "disengage", or a cast whose spell leaps along or against the facing) whose straight way crosses a
+    // lethal hazard (Landing::AwayPoint, Landing::CrossesLethalWall). A cast at a position is not judged (its point
+    // is the action's own).
+    bool AwayMoverCrossesLethal(PlayerbotAI* botAI, Player* bot, Action* action, Solver::Input const& in,
+        Milliseconds now, Milliseconds until)
+    {
+        LockRules::AwayMove move = LockRules::NamedMoverAway(action->getName());
+        if (move == LockRules::AwayMove::None && !LockRules::IsNamedMoverName(action->getName()))
+        {
+            CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action);
+            if (!cast || dynamic_cast<CastAtPositionAction*>(cast))
+                return false;
+            uint32 const spellId = CastSpellIdOf(botAI, cast);
+            SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+            if (!info)
+                return false;
+            bool leap = false;
+            bool leapBack = false;
+            for (SpellEffectInfo const& effect : info->GetEffects())
+            {
+                leap = leap || effect.Effect == SPELL_EFFECT_LEAP;
+                leapBack = leapBack || effect.Effect == SPELL_EFFECT_LEAP_BACK;
+            }
+            move = LockRules::SpellEffectAway(leap, leapBack);
+        }
+        if (move == LockRules::AwayMove::None)
+            return false;
+        AiObjectContext* context = botAI->GetAiObjectContext();
+        Unit* target = move == LockRules::AwayMove::AwayFromTarget ? AI_VALUE(Unit*, "current target") : nullptr;
+        bool const haveTarget = Usable(bot, target);
+        Geo::Vec3 targetPos;
+        if (haveTarget)
+            targetPos = { target->GetPositionX(), target->GetPositionY(), target->GetPositionZ() };
+        Geo::Vec3 const to = Landing::AwayPoint(move, PosOf(bot), bot->GetOrientation(),
+            haveTarget ? &targetPos : nullptr);
+        return Landing::CrossesLethalWall(in, PosOf(bot), to, now, until);
+    }
+
     // WP-F2 (R2 M-1): the melee chase toward `dest` is refused while no point of the melee ring (the bot's melee band
     // round dest) is safe over the horizon. A refusal goes on the chase clock: the brain releases a bot refused for
     // BossMechanics.Bots.ChaseReleaseMs (the safety valve, a walk-in on a short horizon since M5 CD). The
@@ -382,6 +421,16 @@ namespace
         AiObjectContext* context = botAI->GetAiObjectContext();
         Milliseconds const now = GameTime::GetGameTimeMS();
 
+        // Stratholme X3: a hop for a Jump is in flight (under a second). Anything would cut it: a move or an attack
+        // (MotionMaster::Clear), a facing spline, a cast's turn to its target. Everything waits, ours too, uncounted,
+        // released or not.
+        if (BotBrain::Hopping(bot, st, now))
+        {
+            Judgement j = Blocked(LockVerdict::BlockMove);
+            j.quiet = true;
+            return j;
+        }
+
         // A released bot (stuck, rooted, past the escape ceiling) is the stock AI's.
         if (BotBrain::Released(botAI, st, now))
             return Allow();
@@ -444,26 +493,38 @@ namespace
         // bot's hazards is refused (a Heroic Leap at the pull landed in the boss's warned front cone, too late to step
         // out), and so is the melee chase while the whole melee ring is unsafe. Escape, Hold and Freeze block every
         // mover below anyway.
+        // Stratholme F-2b (R-2-B for X4): with a lethal wall about, a gap closer whose way to its landing crosses it
+        // is refused too (Charge, Intercept, Heroic Leap, Shadowstep over the Cordon), and so is a mover that lands
+        // away (Blink, Disengage) whose way does (AwayMoverCrossesLethal). The kit kills any crossing under 30 yd.
         if (idleOrWatch && st.viewValid && !st.input.hazards.empty())
         {
-            GapCloser const g = GapCloserOf(botAI, bot, action, mode == MechanicBotMode::Watch || bot->IsInCombat());
+            Milliseconds const until = now + st.input.params.horizon;
+            bool const lethalOn = Solver::Detail::AnyLethal(st.input);
+            GapCloser const g = GapCloserOf(botAI, bot, action,
+                lethalOn || mode == MechanicBotMode::Watch || bot->IsInCombat());
+            bool refused = false;
             if (Usable(bot, g.dest))
             {
-                bool refused = false;
                 if (g.chase)
                     refused = ChaseRefused(bot, st, g.dest, now);
                 else
-                    refused = Landing::LandingUnsafe(st.input, g.spot, DestOf(g.dest), PosOf(bot), now,
-                        now + st.input.params.horizon);
-                if (refused)
-                {
-                    Judgement j = Blocked(LockVerdict::BlockMove);
-                    j.landing = true;
-                    return j;
-                }
+                    refused = Landing::LandingUnsafe(st.input, g.spot, DestOf(g.dest), PosOf(bot), now, until)
+                        || (lethalOn && Landing::CloserCrossesLethal(st.input, g.spot, DestOf(g.dest), PosOf(bot),
+                            now, until));
+            }
+            if (!refused && lethalOn && g.spot == LockRules::LandingSpot::None && !g.chase)
+                refused = AwayMoverCrossesLethal(botAI, bot, action, st.input, now, until);
+            if (refused)
+            {
+                Judgement j = Blocked(LockVerdict::BlockMove);
+                j.landing = true;
+                return j;
             }
         }
-        if (idleOrWatch && !afterBreak && !lookAway)
+        // X3: a hop is due (the bot has a Jump to hop for): in Idle and Watch too, a cast-time spell must end before it
+        // starts (below, with the casts after a break).
+        bool const hopDue = st.nextHopAt < Solver::kForever;
+        if (idleOrWatch && !afterBreak && !lookAway && !hopDue)
             return Allow();
         if (afterBreak && dynamic_cast<UseItemAction*>(action))
             return Blocked(LockVerdict::BlockCast);
@@ -560,7 +621,14 @@ namespace
         if (frozen)
             return Allow();
         if (castsOnly)
-            return afterBreak ? Blocked(LockVerdict::BlockCast) : Allow();
+        {
+            if (afterBreak)
+                return Blocked(LockVerdict::BlockCast);
+            // X3: it would end after the hop starts (the hop would stop it).
+            if (hopDue && !Solver::CastAllowed(now, busy, st.nextHopAt, Milliseconds(GetConfig().bots.safetyMarginMs)))
+                return Blocked(LockVerdict::BlockCast);
+            return Allow();
+        }
         // Escape: it would fail while moving (PlayerbotAI::CastSpell refuses it and delays the AI), so only a standing
         // bot's block feeds the forced-leak check.
         if (mode == MechanicBotMode::Escape)

@@ -4,7 +4,8 @@
  *
  * Update() runs from the strategy's triggers (the "cached value behind the trigger" of the playerbots cost rules), at
  * most once per game-time millisecond, on the bot's map thread. It keeps the bot's view of the registry current
- * (MechanicBotView), runs the mode machine Idle -> Watch -> Escape -> Hold (+ Freeze for HoldStill), and solves
+ * (MechanicBotView), runs the mode machine Idle -> Watch -> Escape -> Hold (+ Freeze for HoldStill; a hop in place for
+ * a Jump, Stratholme X3, in any mode but Freeze), and solves
  * (MechanicSolver) when the spot fails TargetOk (hazards and the player kinds) or the bot's current motion is unsafe.
  * Around every solve it refreshes the allies and publishes the plan on the registry's reservation board. It also runs
  * the tank tasks (facing, parking), the healer sight check, region tracking, the route search and the look-away
@@ -55,6 +56,10 @@ namespace BossMechanics
 
         // The bot moves by something that is not ours: a spline in flight, or a generator in the active slot.
         bool HasForeignMotion(Player const* bot);
+
+        // Stratholme X3: the bot's hop for a Jump is in flight (its spline is still the bot's). Nothing may run then:
+        // a move, an attack (MotionMaster::Clear), a facing or a cast's turn would cut it.
+        bool Hopping(Player const* bot, MechanicBotState const& st, Milliseconds now);
 
         // Hold action: the unit to face (the victim in combat), or nullptr.
         Unit* FacingTarget(Player* bot);

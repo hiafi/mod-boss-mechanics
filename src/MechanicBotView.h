@@ -8,9 +8,9 @@
  *
  * M3 adds the player kinds (Spread, RunOut, Stack, Soak, Bait, HoldStill, Spot, Zones anchored on or aimed at the bot):
  * regions, allies, carried shapes, synthetic hazards (other players' circles at their planned spots), FarFrom, Freeze
- * and the slot ring, plus the bot's tasks for the brain. The pure rules are in MechanicViewRules.h. The reservation
- * board (Registry::Reserve) is how bots see each other's planned spots: RefreshAllies right before every solve,
- * PublishReservations right after it.
+ * and the slot ring, plus the bot's tasks for the brain (Stratholme X3: a Jump is a Jumper task only). The pure rules
+ * are in MechanicViewRules.h. The reservation board (Registry::Reserve) is how bots see each other's planned spots:
+ * RefreshAllies right before every solve, PublishReservations right after it.
  *
  * Runs on the map's update thread (bots update there), like every registry read.
  */
@@ -79,7 +79,8 @@ namespace BossMechanics
         Member,     // Stack, Cluster member, Bait non-picker, Spot (be inside)
         Frozen,     // HoldStill (Freeze over the window)
         Tank,       // the exempt victim of a tank-exempt Frontal/Zone (tank facing, §3.7)
-        Parker      // the victim of a Park zone's parked unit (tank parking, §3.7)
+        Parker,     // the victim of a Park zone's parked unit (tank parking, §3.7)
+        Jumper      // an eligible player of a Jump (Stratholme X3): hop so it is in the air at the resolve (no hold)
     };
 
     char const* BotTaskRoleName(BotTaskRole role);
@@ -136,8 +137,9 @@ namespace BossMechanics
 
     // After a solve: publishes Reservation{bot, plan.target, until = the task's window end, facing (plan.facing when
     // the plan has one, else the bot's orientation), slot, claim (Claimer, Picker, Leader)} on every mechanic of
-    // info.tasks except Tank, Parker and Frozen tasks, and unreserves the bot from every other mechanic it holds a
-    // reservation on (it left them). Registry::Reserve keeps `since` and bumps ReservationRevision only on a change.
+    // info.tasks except Tank, Parker, Frozen and Jumper tasks, and unreserves the bot from every other mechanic it
+    // holds a reservation on (it left them). Registry::Reserve keeps `since` and bumps ReservationRevision only on a
+    // change.
     void PublishReservations(Registry& reg, Player const* bot, BotViewInfo const& info, Solver::Plan const& plan,
         Milliseconds now);
     // Every reservation of the bot (released, left combat, logged out, the strategy removed).

@@ -97,6 +97,11 @@ namespace BossMechanics
         uint32 routeRetryMs = 1000;                             // BossMechanics.Bots.Route.RetryMs
         // M4 (M4-SWEEP G8): a debug check of the leak detectors; 0 = off (MechanicLockRules.h ForceLeakPasses).
         uint32 forceLeaks = 0;                                  // BossMechanics.Bots.ForceLeaks
+        // Stratholme X3: the Jump kind's hop (MechanicJump.h) and the ruling 17 fallback.
+        bool jumpEnable = true;                                 // BossMechanics.Bots.Jump.Enable
+        uint32 jumpHopMs = 800;                                 // BossMechanics.Bots.Jump.HopMs
+        uint32 jumpLandAfterMs = 250;                           // BossMechanics.Bots.Jump.LandAfterMs
+        bool jumpCountPlanned = false;                          // BossMechanics.Bots.Jump.CountPlanned
     };
 
     struct ModuleConfig

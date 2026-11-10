@@ -32,6 +32,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicSolver.h` | Pure bot solver: hazards, hot windows, signed distance, candidates, path check, `Solve` |
 | `src/MechanicRoute.h` | Pure route search around hazards (grid A*, string-pulled legs): `Route`, `RouteHandoff` |
 | `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
+| `src/MechanicJump.h` | Pure Jump kind rules (Stratholme X3): the hop's timing and speeds, who counts as in the air |
 | `src/MechanicBotView.h/.cpp` | Registry -> solver input and tasks for one bot; reservations; navmesh, sight oracle |
 | `src/MechanicViewRules.h` | Pure player-kind rules of the view: planned spots, margins, separation (host-tested) |
 | `src/MechanicBotGuard.h` | `BOSS_MECHANICS_WITH_BOTS`: 1 only with mod-playerbots enabled |
@@ -96,6 +97,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Stack(owner, spec, warn)`, `Soak(owner, spec, count, warn)` | Any shape (`ZoneSpec`; a lane: `Shapes::LineFacing`) |
 | `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player; that player taking it is the job |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
+| `Jump(owner, spec, warn)`, `Jump(owner, at, r, warn)` | A sweep that hits who is on the ground (Stratholme X3) |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
 | `RefFlat(owner, pct, tank)` | Script spells: `pct`% of the owner's reference row ([below](#reference-health)) |
@@ -105,9 +107,10 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `Damage(pct)`, `TankDamage(pct)`, `FlatDamage(n)`, `School(s)`, `Spell(id)`, `Rider(spellId)`, `Weakened()`,
 `WeakenedOncePerPlayer()`, `Persistent(duration, tick)`, `Projectile(speed)`, `ProjectileUnit(unit)`,
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
-`AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`, `Count(n)`,
+`AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`,
+`MissedSoak(mode)`, `Count(n)`,
 `Targets(set)`, `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`,
-`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `OnHit(fn)`, `OnResolve(fn)`.
+`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `OnHit(fn)`, `OnResolve(fn)`.
 
 M3 options:
 
@@ -120,6 +123,8 @@ M3 options:
 | `Park(unit)` | shape kinds | the tank holds `unit` (default the owner) inside this shape; bots only |
 | `DropSpot(rule)` | shape kinds on a player | where its carrier bot takes it before it lands; bots only |
 | `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
+| `Lethal()` | Zone/Frontal, no mine or decoy | bots never plan a way across it ([below](#lethal-stratholme-x4)) |
+| `MissedSoak(mode)` | Soak | when a short pass posts `MissedSoak`: `EveryPass` (default), `OnChange`, `Never` |
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
 
@@ -192,6 +197,7 @@ prints a fresh string to paste after a gear or stat change. The pure rules are
 | Bait | hit on the farthest eligible player (`Radius`: everyone within it) | none | MissedBait |
 | HoldStill | none | none | Moved (> 0.3 yd, or `Tolerance`) |
 | Spot | none | disc on each spot | OffSpot |
+| Jump | as Zone on the players inside who are on the ground (players only) | the shape's pieces | Hit |
 
 (*) `From(Owner)`: the ring of r sits on the owner (the hitbox) and a small ring
 (`Rules::kRunOutTargetMarkerRadiusYd`, 1.5 yd, same color) follows the target, so the target knows it must run.
@@ -217,7 +223,11 @@ Rules added in M3 (the pure rules live in `src/MechanicJudge.h`, tested by `test
   first, then the lowest id; a bot's live claim stays on its soak unless it stands inside an earlier one). Soaks
   without it keep the old behavior.
 - **Lasting Stack/Soak** (`Persistent`): `MissedStack` at most once per player per mechanic; `MissedSoak` once per
-  short pass; `onResolve` once per pass. Its bot window is `[resolve, until]`.
+  short pass by default; `onResolve` once per pass. Its bot window is `[resolve, until]`.
+- **`MissedSoak(mode)`** (Soak, Stratholme F-2b; `Judge::PostMissedSoak`): `MissedSoakMode::EveryPass` (default) posts
+  on every short pass; `OnChange` posts on the first short pass and again only after a pass that was full (a lasting
+  telegraph-only Soak: UF4's firelight rings, one line per ring instead of one a second); `Never` posts none (the
+  cost is elsewhere: TC4's thaw Soaks, whose failure is the Shatter). Settable after the commit.
 - **Reservations** (bots, M3 handoff §3.6): `Reserve(id, {bot, point, until, since, facing, slot, claim})` replaces the
   bot's entry; `since` is when its current claim (claim, and a claim's slot) began, kept while that is unchanged;
   `Unreserve(id, bot)`; `ReservationRevision()` changes on a new entry, a changed point (> 0.1 yd), facing, slot or
@@ -261,8 +271,8 @@ fight does not reset the boss's penalty). `.mech weakened n` stacks belong to no
   (`Judge::HitIsJob`). Anyone else inside the landing circle failed: a `Hit`, plus Weakened on a `.Weakened()` Bait.
   A bait rotation therefore counts its own debuff, never Weakened (the drill's stand-in: Baited 205008).
 - `WeakenedOncePerPlayer()`: one stack per player per mechanic (a persistent zone ticking several times).
-- `Weakened()` fits only the kinds that cast the resolve spell (Zone, Frontal, Spread, RunOut, Bait); on Stack, Soak,
-  HoldStill or Spot it logs "does not fit" and is ignored.
+- `Weakened()` fits only the kinds that cast the resolve spell (Zone, Frontal, Spread, RunOut, Bait, Jump); on Stack,
+  Soak, HoldStill or Spot it logs "does not fit" and is ignored.
 - Known side effect: the threat aura also raises a Weakened healer's healing threat.
 
 ### Encounter lifetime
@@ -417,7 +427,7 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
-            |stratholme-followups|stratholme-drops> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |stratholme-followups|stratholme-drops|stratholme-jump> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -449,6 +459,7 @@ are never touched. Invite the bots you test with.
 | holdstill | window (s) | `tol=` (0.3 yd); every eligible player |
 | spot | radius | `ring=` (10): one spot per group member on a ring around the anchor point |
 | hunt | catch radius | `speed=` (0.8, x player run speed), `persist=` (the chase, required), `tick=`, `pick=` |
+| jump | radius | a `Jump` circle on the anchor: hits who is on the ground at the end; damage keys as a circle |
 
 A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
 group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
@@ -661,6 +672,13 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     a carrier that steps in for its drop takes a tick), 2 glob, 3 rot, 4 lane, 5 Holy Fire, all four under the
     sweep's bar (`Drill::kDropBarTags`: what the carried shapes hit besides their carrier). The sweep runs
     `stratholme-drops:4`.
+  - `stratholme-jump` (Stratholme build X3: the Jump kind; 20 s, six cycles by default = 120 s, heroic numbers in
+    `pct=`): 0 s, Timmy's Jump Rope (TC8), three 2 s skips back to back over a 40 yd circle on the creature, each
+    trip 25% plus Weakened. 3.5 s, heroic Freeze Tag beside it (TC2): a 6 yd RunOut on a non-tank (2 s) that resolves
+    inside the third skip's hop. 10 s, the heroic fallback Double Dutch: five skips of 2, 2, 1.5, 1.5 and 1.5 s. Tags
+    (`Jump/<tag>`, `RunOut/2`): 1 rope, 2 the RunOut, 3 Double Dutch's 2 s skips, 4 its 1.5 s skips. The bar: no
+    `Jump` hit at all (each one is a bot that did not hop: `.mech bots` "x3 jumps" says why). The sweep runs
+    `stratholme-jump:6`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -887,7 +905,9 @@ navmesh path calls (paths found earlier are reused):
    (no margin) on its straight line, then the nearest; candidates known to have no path are skipped and the first
    walkable one down that ranking is taken. No path to it -> NoPath, straight to the nearest exit. Only the top nine
    of the ranking are ever read (eight probes, then one with a known path), so a straight-line walk stops once it
-   cannot enter them any more (M4: the same answer, a third less time on a lane-set Fallback).
+   cannot enter them any more (M4: the same answer, a third less time on a lane-set Fallback). A lethal hazard
+   ([Lethal](#lethal-stratholme-x4)) takes no part in passes 2 and 3 (full margin, no grace) and is never crossed by
+   the Fallback or NoPath.
 
 Path walks skip a sample's test against a hazard that is not hot at that sample's time (outside its window, widened
 as the windows are; never a projectile, whose window can run past its end in the margin band, nor a hazard the walk
@@ -986,6 +1006,7 @@ solving one after another on the map thread never pick colliding spots (decision
 | | eligible, not the picker | a region of `othersRange` around the owner; the picker's landing<sup>1</sup> |
 | HoldStill | listed (targets, else eligible) | `Freeze{resolveAt - SafetyMarginMs, expireAt}` |
 | Spot | listed | a region of r at its own spot |
+| Jump | eligible | nothing (not a hazard); a Jumper task: the brain hops for it ([Jump](#jump-stratholme-x3)) |
 | Zone | anchored on the bot | carried shape (OnBot); a turning cone or line picks the facing nearest its victim |
 | | aimed at the bot (`to`) | carried shape (AimedAtBot, the registered length) |
 | | on another bot with a plan | one more pose at that bot's planned spot (a synthetic copy) |
@@ -1092,6 +1113,130 @@ Mechanic::Circle(me, target, 6.f, 3000ms).AnchorOn(target).DropSpot(DropSpotRule
   circle. The route search walls off every cell outside a `PathInside` set the bot stands in.
 - The bounds do not pick the Park zone's own spot: the script does (the kit's `PickFloorSpot`); it should use the same
   room.
+
+### Lethal (Stratholme X4)
+
+A lethal wall (the kit's `LethalWall`: The Unforgiven's Cordon, Galford's Pyre and north wall) kills whoever stands
+in it, so a bot must never plan a way across it, not even the least bad one. `MechanicRef::Lethal()` marks a Zone or
+Frontal for that (`Judge::LethalFits`: not a mine, whose grace is a crossing rule of its own, and not a decoy, which
+bots never see). Set it in the registering statement (refused after the commit, like `Decoy()`); `Decoy()` is then
+refused too. Bots only: the marker, the resolve and the eligibility are unchanged (the kit's `OnResolve` does the
+killing). `.mech list` flags it `lethal`.
+
+```cpp
+// A street of the Cordon: a telegraph-only persistent line, armed 2 s after the pull grip; whoever is inside dies.
+Mechanic::Zone(me, ZoneSpec{ Anchor(from), Shape::Line(length, 3.f), Anchor(to) }, 2000ms)
+    .Persistent(fightLength, 250ms).NoFillTimer().Lethal()
+    .OnResolve([this](BossMechanics::ResolveResult const& r) { /* the strike spell on every r.hits */ });
+```
+
+- **View** (`ViewRules::LethalTiming`): the hazard is hot from the moment it is registered (an Instant or Interval
+  keeps its end), so a bot never starts across in the 2 s before the wall arms. The fallibility roll never hides it
+  (`Fallibility.*`: a misread wall is a dead bot). `Solver::Hazard::lethal` carries the flag.
+- **Solve**: pass 1 as any hazard; pass 2 (reduced margin) keeps its full margin, so no gap between two walls is
+  slipped through at 0.25 yd (`ReducedMargins` leaves it alone); pass 3 never grants it a grace (`AnyGrace` ignores
+  it, `CheckPath` never counts a grace on it).
+- **Fallback**: a candidate whose straight line enters a lethal hazard while it is hot, or ends inside one, is out of
+  the ranking like one with no known path (`Detail::CrossesLethal`, against `Detail::LethalOnly`: the lethal hazards
+  alone at drift + `tightMarginYd`; screened lazily, only the candidates the ranking reaches). The floor of the
+  ranking (fewest hot hazards) is taken among the lethal-free candidates. Down the ranking the first candidate whose
+  real path (known, else the oracle's, at most 8 new ones) keeps out is taken; none -> NoPath.
+- **NoPath**: the nearest exit whose straight line keeps out; none -> the bot stays where it is (a NoPath to its own
+  spot; its next solve tries again). `SolveStats::lethalSkipped` counts the candidates, paths and exits refused.
+- **Escape**: `FallbackHolds` refuses a rest of the way that enters a lethal hazard (the wall armed or moved since
+  the plan), so the escape is solved again.
+- **Route search**: blocks its cells like any hot hazard, and every leg passes `CheckPath` at the full margin or at
+  `ReducedMargins` (which keeps a lethal one's full margin): a route never crosses it.
+- **Leaving**: a bot inside a lethal hazard's margin band (not the wall) may still step out on its own side (the path
+  check's start exemption: never deeper); a path across, or one that ends inside, is refused.
+- **Pets** (F-2b, R-2-FW m-4): the kit strikes pets too, and a follow pet stands 2 yd beside its owner. A bot with a
+  live pet or guardian keeps a lethal hazard `ViewRules::LethalPetExtraYd` farther off (its margin reaches the follow
+  distance + 1 yd, 3 yd), counted as drift so the reduced-margin pass and the Fallback's lethal screen keep it too.
+- **Movement spells** (F-2b, R-2-B for X4): in Idle and Watch the lock refuses a gap closer whose straight way to its
+  landing enters a lethal hazard (`Landing::CloserCrossesLethal`: Charge, Intercept, Heroic Leap, Shadowstep, Death
+  from Above over a wall to a target beyond it), and a mover that lands away whose way does (`Landing::AwayPoint`, 20
+  yd: the named `blink back` / `disengage` away from the current target, a LEAP spell along the facing, a LEAP_BACK
+  one against it). Counted in `landingBlocks`. Escape, Hold and Freeze block every mover anyway. A cast at a position
+  is not judged (its point is the action's own).
+- **Limits**: stock motion (follow, chase) is policed by Watch as before (the re-route, else hold; also while
+  released, as long as the bot's spot is safe); a released bot whose own spot is unsafe is not. The pull grip is the
+  kit's (`LethalWall`).
+
+Tests: `tests/lethal_test.cpp` (LethalFits, LethalTiming, the reduced margin, no grace, the Fallback ranking and its
+paths, NoPath, FallbackHolds, leaving the band, a pet's margin, the movement spells, and a cost line: four Cordon
+streets and 27 circles round a bot, about 0.25 ms per Fallback solve on the host, less than the same walls
+unflagged).
+
+### Jump (Stratholme X3)
+
+Timmy's Jump Rope (Stratholme TC8, TC9; ST ruling 17, handoff §7 #6): a rope sweeps the square when a cast ends and
+trips everyone on the ground. `Mechanic::Jump(owner, spec, warn)` (or `Jump(owner, at, r, warn)` for a circle) is that
+sweep: at `now + warn` the resolve spell hits every eligible **player** inside who is on the ground (pets are spared:
+they cannot jump), with the Zone options (`Damage`, `School`, `Rider`, `Weakened`, `OnHit`, `Tag`, `Color`,
+`NoTelegraph`, `NoFillTimer`, `Eligible`, `Within`). It draws its shape like a Zone; the fill reaching the edge is the
+moment to be in the air. `onResolve`'s `hits` are the tripped, its `cleared` the players inside who were in the air.
+
+```cpp
+// TC8 + TC9: three 2 s skips back to back; each trip 25% plus Weakened and a 1 s knockdown.
+Mechanic::Jump(me, Shapes::Circle(Anchor(squareCenter), 52.f), 2000ms).Damage(25.f).Weakened()
+    .Rider(SPELL_TRIP_KNOCKDOWN).Tag(9).Color(Color::Yellow);
+```
+
+**In the air** (`Registry::JumpClearBy`, pure rule `Jump::Clear` in `src/MechanicJump.h`, judged once at the resolve
+tick before the cast):
+
+- `Unit::IsFalling()`, the movement flag test: a client's jump sets `MOVEMENTFLAG_FALLING` from take-off to landing
+  (never `Player::IsFalling`, a Z test that is false on the way up);
+- a bot's hop in flight at the resolve: its brain noted the hop on this Jump (`Registry::NoteHop`) and the bot's
+  spline is still that hop's (same spline id, not finalized), or the registry saw it cover the resolve. A server-side
+  jump is a parabolic spline, which `Unit::IsFalling` does not see;
+- the fallback, `BossMechanics.Bots.Jump.CountPlanned = 1` (off by default): a bot whose brain launched (or tried to
+  launch) a hop for this Jump whose planned air time covers the resolve counts as in the air even when the spline was
+  cut or refused. A bot that could not hop at all (rooted, stunned, frozen) has no note and is tripped like a player.
+
+**A late resolve tick** (F-2b, R-2-FW m-1): a loaded world can judge the resolve on a map update 300-400 ms late, after
+the hop landed and the walk under it launched a new spline. The sweep is judged at the resolve (`resolveAt`; an early
+detonation at its own moment), not at the late tick, and the registry samples every noted hop on each map update until
+then (`Registry::SampleHops`, pure `Jump::SampleHop`): the air time it saw (same spline id: launch + time passed), or
+its planned landing when a new spline replaced it at or after that landing (less one map update) with no cut seen
+(dead, stunned, rooted, feared, confused, another controlled motion, falling). A hop replaced earlier, or with a cut
+seen, counts only as far as it was seen. The fallback's Planned window reads the resolve too.
+
+**Bots** (`MechanicBotBrain.cpp` StepJump; config `BossMechanics.Bots.Jump.*`):
+
+- The view gives every eligible bot a Jumper task on the resolve: no hazard (the floor is safe for a bot that hops), no
+  region, no reservation, no hold (it keeps fighting and moving until the hop).
+- The hop: a parabolic `MotionMaster::MoveJump` in place (a 0.15-0.25 yd step along the bot's facing, which keeps the
+  facing), or, for a bot on a live walk (an escape, a follow, a chase), along its walk (F-2b, R-2-FW m-2,
+  `Jump::SpeedsAlong`): toward the walk's next corner as far as its run speed carries it in the hop, clipped to the
+  corner (a corner under 0.5 yd away: in place), never across a lethal hazard (in place then). A player runs and jumps
+  at once; a run of skips costs the bot no ground. `HopMs` long (800), timed to land `LandAfterMs` (250) after the
+  resolve, so the bot is in the air when the resolve tick comes (up to a full map update late). A later brain step
+  launches a shorter hop that still lands then (at least 300 ms); at or after the resolve it is too late (`hopsLate`).
+  The apex follows the length like a real jump (about 1.5 yd at 800 ms), capped at 1.6 yd. One hop covers every Jump
+  whose resolve comes before it lands.
+- No hop: outside the swept shape and too far to walk in by the resolve; a HoldStill freezing the bot; rooted, stunned,
+  feared or anything else that makes `CanMove()` false; a vehicle, a transport, a taxi; swimming or flying; already
+  falling (`hopsBlocked`).
+- Before it: the next hop's start (`MechanicBotState::nextHopAt`; only Jumps whose sweep the bot can be inside by their
+  resolve, F-2b R-2-FW N-3) caps `leaveBy`, so the waker breaks a cast that would end after it, and the lock refuses a
+  cast-time spell that would (in Idle and Watch too): the hop moves the bot, which stops a cast.
+- During it (under a second): the hop sits in the motion master's controlled slot, over the walk, follow or chase, which
+  resume when it lands. The brain step ends at once, and the lock refuses every action, ours included and released or
+  not, uncounted (`BotBrain::Hopping`): a move or an attack (`MotionMaster::Clear`), a facing spline or a cast's turn
+  would cut it. An Escape's stuck clock waits the hop out and its ceiling moves by the ground the hop gave up
+  (`Jump::HopLostMs`: none along the walk, all of it in place); the reposition and hold triggers ignore it.
+- `.mech bots` prints `x3 jumps: hops (along the walk), refused, could not hop, too late`; with `Debug = 1` the registry
+  logs per resolve `Jump <id> (tag <n>): <k> in the air (<a> falling, <b> hop, <c> planned), <g> on the ground, <h>
+  hit`, and the brain each hop and each reason not to.
+
+**Fallback** (ruling 17): if the guided clear shows the hop is not reliable (bots tripped although `.mech bots` shows
+their hops), set `Jump.CountPlanned = 1`: the hop still plays, and a planned one counts.
+
+Drill: `stratholme-jump` (above). Tests: `tests/jump_test.cpp` (the filter, the hop timeline, the MoveJump speeds,
+who counts as in the air, a 400 ms late resolve tick, the hop along a walk under three back-to-back skips plus a
+RunOut, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range, and the drill's
+rows).
 
 ### Gate
 
@@ -1214,6 +1359,9 @@ named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `s
 | `TankFacing.Enable` | 1 | the tank keeps a Frontal's source faced away from the group |
 | `Park.Enable` / `Park.DepthYd` / `Park.HoldCapMs` | 1 / 1.0 / 8000 | tank parking and drag-out; stop depth; hold cap |
 | `Freeze.SettleMs` | 250 | stop moving this long before a HoldStill window |
+| `Jump.Enable` / `Jump.HopMs` | 1 / 800 | bots hop for a Jump (Stratholme X3); the hop's length (400-1200) |
+| `Jump.LandAfterMs` | 250 | the hop lands this long after the resolve (100 to HopMs - 200) |
+| `Jump.CountPlanned` | 0 | ruling 17's fallback: a hop the brain launched counts even if its spline was cut |
 | `Healer.SightWeight` / `Healer.MaxSightChecks` | 10.0 / 8 | per member out of sight (tank full, others half) / rays |
 | `Route.Enable` / `Route.RetryMs` | 1 / 1000 | route search around hazard walls; at most once per this per bot |
 | `Route.PadYd` / `Route.CellYd` | 8 / 1.0 | search box padding / smallest grid cell |

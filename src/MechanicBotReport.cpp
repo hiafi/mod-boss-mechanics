@@ -149,6 +149,11 @@ namespace BossMechanics
                 "{}, out of reach with the chase refused {} ms, chase walk-ins {}, recovery solves {}, stranded {} "
                 "ms (strand routes {}), mover auras cancelled {}", c.landingBlocks, c.motionEndStops, c.msChaseRefused,
                 c.chaseReleases, c.chaseSolves, c.msChaseStranded, c.strandRoutes, c.moverBreaks);
+            // Stratholme X3: the Jump kind's hops (MechanicBotBrain.cpp StepJump). The resolve's own count of who was
+            // in the air (and how) is the registry's debug line "Jump <id> (tag <n>): ...".
+            handler->PSendSysMessage("  x3 jumps: hops {} ({} along the walk), refused {}, could not hop {}, too late "
+                "{}{}", c.hops, c.hopsAlong, c.hopsRefused, c.hopsBlocked, c.hopsLate,
+                BotBrain::Hopping(bot, *st, now) ? " (in the air)" : "");
             // M5 WP-T: the focus and the ignore list (MechanicBotTargets.cpp).
             handler->PSendSysMessage("  {}", BotTargets::ReportLine(*st));
             // M5 WP-P: dispels and purges, and which `party member to dispel` the bot holds (MechanicBotDispel.cpp).

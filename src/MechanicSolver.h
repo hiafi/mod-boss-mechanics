@@ -74,6 +74,10 @@ namespace BossMechanics::Solver
         // avoided Soak, a Zone at its anchor's planned spot). RefreshAllies replaces these before every solve; the
         // solver treats them like any other hazard.
         bool synthetic = false;
+        // Stratholme X4 (MechanicRef::Lethal, a lethal wall): never crossed. The reduced-margin pass keeps its full
+        // margin, no grace crossing, and the Fallback, NoPath and FallbackHolds never take a way that enters it while
+        // hot (Detail::CrossesLethal). The view makes it hot from its registration on (ViewRules::LethalTiming).
+        bool lethal = false;
     };
 
     struct LaneFrame
@@ -272,6 +276,7 @@ namespace BossMechanics::Solver
         std::uint32_t crossOther = 0;       // ...inside another hazard
         std::uint32_t budgetStops = 0;      // validation passes cut short by maxPathChecks
         std::uint32_t outOfBounds = 0;      // F-1b: a target or its path outside the hard bounds (Input::bounds)
+        std::uint32_t lethalSkipped = 0;    // X4: Fallback/NoPath candidates or paths dropped for crossing a lethal
         // M4 cost (D9): lane-frame candidates in the candidate list, and the oracle path calls spent on them.
         std::uint32_t laneCandidates = 0;
         std::uint32_t lanePathChecks = 0;
@@ -289,6 +294,7 @@ namespace BossMechanics::Solver
             crossOther += o.crossOther;
             budgetStops += o.budgetStops;
             outOfBounds += o.outOfBounds;
+            lethalSkipped += o.lethalSkipped;
             laneCandidates += o.laneCandidates;
             lanePathChecks += o.lanePathChecks;
         }
@@ -1325,7 +1331,7 @@ namespace BossMechanics::Solver
                         res.timeInsideHot += dwell;
                         continue;
                     }
-                    if (allowGrace && graceOnly)
+                    if (allowGrace && graceOnly && !h.lethal)
                     {
                         res.timeInsideHot += dwell;
                         tr.graceUsed += dwell;
@@ -2485,6 +2491,8 @@ namespace BossMechanics::Solver
             bool changed = false;
             for (Hazard& h : out.hazards)
             {
+                if (h.lethal)
+                    continue;       // X4: a lethal wall keeps its full margin in every pass
                 float const m = std::min(h.marginYd, std::max(0.f, h.driftYd) + tight);
                 changed = changed || m < h.marginYd - 1e-4f;
                 h.marginYd = m;
@@ -2498,9 +2506,53 @@ namespace BossMechanics::Solver
         {
             for (Hazard const& h : in.hazards)
                 if ((h.timing.type == TimingType::MineArmed || h.timing.type == TimingType::MineArming)
-                    && h.timing.grace > in.params.graceMargin)
+                    && h.timing.grace > in.params.graceMargin && !h.lethal)
                     return true;
             return false;
+        }
+
+        // Stratholme X4: is any hazard lethal (MechanicRef::Lethal)? Without one the Fallback runs as before.
+        inline bool AnyLethal(Input const& in)
+        {
+            for (Hazard const& h : in.hazards)
+                if (h.lethal)
+                    return true;
+            return false;
+        }
+
+        // The input CrossesLethal checks against: the lethal hazards alone, each at its drift + tightMarginYd (never
+        // below kMinTightMarginYd, never above its own margin). The Fallback already gave up on the full margins, so a
+        // lethal wall is passed as close as the reduced-margin pass would pass anything, and never entered.
+        inline Input LethalOnly(Input const& in)
+        {
+            Input out;
+            out.bot = in.bot;
+            out.speed = in.speed;
+            out.now = in.now;
+            out.params = in.params;
+            float const tight = std::max(kMinTightMarginYd, in.params.tightMarginYd);
+            for (Hazard const& h : in.hazards)
+            {
+                if (!h.lethal)
+                    continue;
+                Hazard c = h;
+                c.marginYd = std::min(h.marginYd, std::max(0.f, h.driftYd) + tight);
+                out.hazards.push_back(std::move(c));
+            }
+            return out;
+        }
+
+        // Does `path`, walked from `start` as CheckPath times it, enter a lethal hazard of `lethal` (LethalOnly)
+        // while it is hot, or end inside one hot from its arrival to `until`? Leaving one the path starts in does not
+        // count while the path is leaving (CheckPath's start exemption); its end must still lie outside.
+        inline bool CrossesLethal(Input const& lethal, std::vector<Geo::Vec3> const& path, Ms start, Ms until)
+        {
+            if (lethal.hazards.empty() || path.empty())
+                return false;
+            PathCheck const pc = CheckPath(lethal, path, start, false);
+            if (!pc.ok)
+                return true;
+            return !PointSafe(lethal, path.back(), pc.arriveAt, std::max(pc.arriveAt, until));
         }
     }
 
@@ -2820,15 +2872,38 @@ namespace BossMechanics::Solver
             // The pre-filter's hazard-free candidates are exactly the ones with no hazard hot from their arrival on,
             // so the counts are only needed when there is none (or none of them has a path). M3: among equals, the
             // fewest broken hard regions and carried shapes come before the distance (decision §7.2: Zones first).
+            // Stratholme X4: a candidate whose straight line enters a lethal hazard while it is hot (or that ends in
+            // one) is out of the ranking altogether, like one known to have no path. Screened lazily (lethalBad): only
+            // the candidates the ranking reaches pay for the walk.
+            bool const lethalOn = Detail::AnyLethal(in);
+            Input const lethalIn = lethalOn ? Detail::LethalOnly(in) : Input();
+            std::vector<std::int8_t> lethalMemo(lethalOn ? cands.size() : 0, -1);
+            auto lethalBad = [&](std::uint32_t i)
+            {
+                if (!lethalOn)
+                    return false;
+                if (lethalMemo[i] < 0)
+                {
+                    lethalMemo[i] = Detail::CrossesLethal(lethalIn, { in.bot, cands[i] }, in.now, horizonEnd) ? 1 : 0;
+                    if (lethalMemo[i])
+                    {
+                        unreachable.insert(i);
+                        ++work.stats.lethalSkipped;
+                    }
+                }
+                return lethalMemo[i] == 1;
+            };
             std::vector<std::uint32_t> counts(cands.size(), 1);
             std::uint32_t minCount = std::numeric_limits<std::uint32_t>::max();
             for (std::uint32_t i = 0; i < cands.size(); ++i)
                 if (hazardFree[i] && !unreachable.count(i))
-                {
                     counts[i] = 0;
+            // The ranking's floor: a hazard-free candidate (X4: one that is lethal-free too).
+            for (std::uint32_t i = 0; i < cands.size() && minCount != 0; ++i)
+                if (hazardFree[i] && !unreachable.count(i) && !lethalBad(i))
                     minCount = 0;
-                }
             if (minCount != 0)
+            {
                 for (std::uint32_t i = 0; i < cands.size(); ++i)
                 {
                     if (unreachable.count(i))
@@ -2839,8 +2914,27 @@ namespace BossMechanics::Solver
                     for (Hazard const& h : in.hazards)
                         if (Detail::HotOver(h, c, arrival, std::max(arrival, horizonEnd), in.params.marginMs))
                             ++counts[i];
-                    minCount = std::min(minCount, counts[i]);
+                    if (!lethalOn)
+                        minCount = std::min(minCount, counts[i]);
                 }
+                if (lethalOn)
+                {
+                    // The fewest hot hazards among the lethal-free candidates, screened fewest first.
+                    std::vector<std::uint32_t> order;
+                    order.reserve(cands.size());
+                    for (std::uint32_t i = 0; i < cands.size(); ++i)
+                        if (!unreachable.count(i))
+                            order.push_back(i);
+                    std::stable_sort(order.begin(), order.end(),
+                        [&counts](std::uint32_t a, std::uint32_t b) { return counts[a] < counts[b]; });
+                    for (std::uint32_t i : order)
+                        if (!lethalBad(i))
+                        {
+                            minCount = counts[i];
+                            break;
+                        }
+                }
+            }
             struct Ranked
             {
                 Ms inside;
@@ -2873,7 +2967,7 @@ namespace BossMechanics::Solver
             top.reserve(Detail::kFallbackRanked + 1);
             for (std::uint32_t i = 0; i < cands.size() && ranked.size() < Detail::kFallbackScans; ++i)
             {
-                if (counts[i] != minCount || unreachable.count(i))
+                if (counts[i] != minCount || unreachable.count(i) || lethalBad(i))
                     continue;
                 Geo::Vec3 const& c = cands[i];
                 float const dist = Detail::Dist3(in.bot, c);
@@ -2910,8 +3004,63 @@ namespace BossMechanics::Solver
             std::vector<Geo::Vec3> path;
             bool havePath = false;
             std::uint32_t tries = 0;
+            if (lethalOn)
+            {
+                // X4: down the ranking, the first candidate whose real path (known, else the oracle's, at most
+                // kFallbackProbes new ones) keeps out of every lethal hazard. None: NoPath below, on a clear line.
+                for (Ranked const& r : ranked)
+                {
+                    std::uint32_t const i = r.index;
+                    std::vector<Geo::Vec3> p;
+                    if (auto it = paths.find(i); it != paths.end())
+                        p = it->second;
+                    else
+                    {
+                        if (tries >= Detail::kFallbackProbes)
+                            break;
+                        ++tries;
+                        Geo::Vec3 q = point[i];
+                        if (!probed[i])
+                        {
+                            ++work.stats.probes;
+                            if (!oracle.Walkable(q))
+                            {
+                                ++work.stats.offMesh;
+                                continue;
+                            }
+                            if (Detail::Dist3(q, point[i]) > Detail::kMovedYd)
+                                ++work.stats.snapped;
+                        }
+                        ++work.pathChecks;
+                        if (fromLane(i))
+                            ++work.stats.lanePathChecks;
+                        if (!oracle.Find(in.bot, q, p) || p.empty())
+                        {
+                            ++work.stats.noPath;
+                            continue;
+                        }
+                        Detail::AnchorPath(in.bot, p);
+                    }
+                    if (Detail::CrossesLethal(lethalIn, p, in.now, horizonEnd))
+                    {
+                        ++work.stats.lethalSkipped;
+                        continue;
+                    }
+                    path = std::move(p);
+                    target = path.back();
+                    targetIdx = i;
+                    havePath = true;
+                    break;
+                }
+                // No lethal-free path down the ranking: NoPath's exits only (a candidate whose path was refused, or
+                // never asked for, is not walked to blind).
+                if (!havePath)
+                    target = in.bot;
+            }
             for (Ranked const& r : ranked)
             {
+                if (lethalOn)
+                    break;
                 std::uint32_t const i = r.index;
                 if (auto it = paths.find(i); it != paths.end())
                 {
@@ -2938,7 +3087,7 @@ namespace BossMechanics::Solver
                 targetIdx = i;
                 break;
             }
-            if (!havePath)
+            if (!havePath && !lethalOn)
             {
                 ++work.pathChecks;
                 if (fromLane(targetIdx))
@@ -2960,10 +3109,26 @@ namespace BossMechanics::Solver
                     for (Geo::Pose const& pose : h.poses)
                         if (SignedDistance(h.shape, pose, in.bot) <= h.marginYd)
                             Detail::Exits(h, pose, in.bot, exits);
+                // X4: with a lethal hazard about, only a line that keeps out of it; the chosen candidate's too, and
+                // when none does the bot stays where it is (a wall is never walked into, whatever else is hot).
+                auto lethalFree = [&](Geo::Vec3 const& to)
+                {
+                    return !lethalOn || !Detail::CrossesLethal(lethalIn, { in.bot, to }, in.now, horizonEnd);
+                };
                 Geo::Vec3 to = target;
+                if (!lethalFree(to))
+                {
+                    ++work.stats.lethalSkipped;
+                    to = in.bot;
+                }
                 float best = Detail::kInf;
                 for (Geo::Vec3 const& e : exits)
                 {
+                    if (!lethalFree(e))
+                    {
+                        ++work.stats.lethalSkipped;
+                        continue;
+                    }
                     float const d = Detail::Dist2(in.bot, e);
                     if (d < best || (d == best && (e.x < to.x || (e.x == to.x && e.y < to.y))))
                     {
@@ -3030,6 +3195,14 @@ namespace BossMechanics::Solver
             return false;
         if (rest.empty() || (clearOnly && plan.exposure > Ms(0)))
             return false;
+        // X4: the rest of the way enters a lethal hazard (it armed, or moved, since the plan): solve again.
+        if (Detail::AnyLethal(in))
+        {
+            Input lethal = Detail::LethalOnly(in);
+            lethal.params.startDelay = Ms(0);
+            if (Detail::CrossesLethal(lethal, rest, in.now, horizonEnd))
+                return false;
+        }
         Input exact;
         exact.bot = in.bot;
         exact.speed = in.speed;

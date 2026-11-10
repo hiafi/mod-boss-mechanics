@@ -84,6 +84,66 @@ namespace BossMechanics::Landing
         return false;
     }
 
+    // Stratholme F-2b (R-2-B for X4): does the straight way from `bot` to `to` (a charge's line, a leap's or a
+    // teleport's ground track: the kit's wall reads any step under 30 yd as a crossing) enter a lethal hazard while it
+    // is hot, or end inside one (Solver::Detail::CrossesLethal against the lethal hazards alone)? False without one.
+    inline bool CrossesLethalWall(Solver::Input const& in, Geo::Vec3 const& bot, Geo::Vec3 const& to, Ms now, Ms until)
+    {
+        return Solver::Detail::AnyLethal(in)
+            && Solver::Detail::CrossesLethal(Solver::Detail::LethalOnly(in), { bot, to }, now, until);
+    }
+
+    // A gap closer of kind `spot` toward `d`: its way to every landing it may take crosses a lethal hazard.
+    inline bool CloserCrossesLethal(Solver::Input const& in, LockRules::LandingSpot spot, Dest const& d,
+        Geo::Vec3 const& bot, Ms now, Ms until)
+    {
+        switch (spot)
+        {
+            case LockRules::LandingSpot::None:
+                return false;
+            case LockRules::LandingSpot::Center:
+                return CrossesLethalWall(in, bot, d.center, now, until);
+            case LockRules::LandingSpot::Reach:
+            case LockRules::LandingSpot::Behind:
+                return CrossesLethalWall(in, bot, LandingPoint(spot, d, bot), now, until);
+            case LockRules::LandingSpot::CenterOrReach:
+                return CrossesLethalWall(in, bot, d.center, now, until)
+                    || CrossesLethalWall(in, bot, LandingPoint(LockRules::LandingSpot::Reach, d, bot), now, until);
+        }
+        return false;
+    }
+
+    // Where an away mover lands: kAwayMoverYd from the bot, away from `target` (AwayFromTarget; a bot on its target
+    // goes against its facing), along `facing` (Forward) or against it (Back).
+    inline Geo::Vec3 AwayPoint(LockRules::AwayMove move, Geo::Vec3 const& bot, float facing, Geo::Vec3 const* target,
+        float yd = LockRules::kAwayMoverYd)
+    {
+        float dx = std::cos(facing);
+        float dy = std::sin(facing);
+        if (move == LockRules::AwayMove::Back)
+        {
+            dx = -dx;
+            dy = -dy;
+        }
+        else if (move == LockRules::AwayMove::AwayFromTarget)
+        {
+            float const tx = target ? bot.x - target->x : 0.f;
+            float const ty = target ? bot.y - target->y : 0.f;
+            float const len = std::sqrt(tx * tx + ty * ty);
+            if (len > 0.01f)
+            {
+                dx = tx / len;
+                dy = ty / len;
+            }
+            else
+            {
+                dx = -dx;
+                dy = -dy;
+            }
+        }
+        return { bot.x + dx * yd, bot.y + dy * yd, bot.z };
+    }
+
     // Point k (0 .. kRingPoints - 1) of the melee ring of `radiusYd` round `center`, kRingPoints evenly spaced: k = 0
     // on the bot's side, then alternately either way round from it (1, -1, 2, -2, ...; the last is the far side).
     inline Geo::Vec3 RingPoint(Geo::Vec3 const& center, Geo::Vec3 const& bot, float radiusYd, uint32_t k)

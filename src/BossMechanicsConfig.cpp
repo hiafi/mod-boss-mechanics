@@ -83,6 +83,12 @@ namespace BossMechanics
             b.routeMaxLegs = GetClampedU32("BossMechanics.Bots.Route.MaxLegs", 8, 1, 32);
             b.routeRetryMs = GetClampedU32("BossMechanics.Bots.Route.RetryMs", 1000, 100, 60000);
             b.forceLeaks = GetClampedU32("BossMechanics.Bots.ForceLeaks", 0, 0, 100);
+            // Stratholme X3 (the Jump kind, MechanicJump.h): the hop, its landing after the resolve (it must still be
+            // in the air at the resolve tick, and land before a 1.5 s follow-up's hop), and the fallback.
+            b.jumpEnable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Jump.Enable", true);
+            b.jumpHopMs = GetClampedU32("BossMechanics.Bots.Jump.HopMs", 800, 400, 1200);
+            b.jumpLandAfterMs = GetClampedU32("BossMechanics.Bots.Jump.LandAfterMs", 250, 100, b.jumpHopMs - 200);
+            b.jumpCountPlanned = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Jump.CountPlanned", false);
 
             BotFallibilityConfig& f = b.fallibility;
             f.enable = sConfigMgr->GetOption<bool>("BossMechanics.Bots.Fallibility.Enable", false);

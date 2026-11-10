@@ -94,7 +94,7 @@ namespace BossMechanics
         operator MechanicHandle() const { return Handle(); }
         ActiveMechanic const* Get() const;
 
-        // damage (Zone, Frontal, Spread, RunOut, Bait)
+        // damage (Zone, Frontal, Spread, RunOut, Bait, Jump)
         MechanicRef& Damage(float pctNonTank);          // % of reference non-tank health
         MechanicRef& TankDamage(float pctTank);         // % of reference tank health, for the tank only
         MechanicRef& FlatDamage(int32 flat);            // overrides the provider (tests)
@@ -124,6 +124,10 @@ namespace BossMechanics
         // Soak: among the live Soaks of this tag that set it too, a bot claims at most one (many small pickups at once,
         // Malicia's souls); without it each Soak ranks its claimers alone and one bot can claim them all.
         MechanicRef& OneClaimPerBot();
+        // Soak (Stratholme F-2b): when a pass with fewer bodies inside than the count posts the group MissedSoak.
+        // Default EveryPass; a lasting Soak judged every pass wants OnChange (the first short pass, then again only
+        // after a full one) or Never (the cost is elsewhere). Judge::PostMissedSoak.
+        MechanicRef& MissedSoak(BossMechanics::MissedSoakMode mode);
         MechanicRef& Count(uint8 n);                    // Spread, RunOut: n random eligible targets
         MechanicRef& Targets(GuidSet const& players);   // Spread, RunOut, HoldStill
         MechanicRef& SelfTrigger(uint32 auraSpell, uint8 minStacks);    // Spread, RunOut
@@ -151,6 +155,10 @@ namespace BossMechanics
         // but its resolve hits nobody (no damage, failure, Weakened, rider or onHit; onResolve fires with no hits)
         // and bots never see it, so they treat its ground as safe (Jandice's heroic fake sigil).
         MechanicRef& Decoy();
+        // Zone/Frontal, not a mine or a decoy (Judge::LethalFits), in the registering statement: bots never plan a way
+        // across it, not in the reduced-margin pass, not under a grace, not as a Fallback, and see it from the moment
+        // it registers (hot through its warning too). For the kit's LethalWall (Stratholme X4). Bots only.
+        MechanicRef& Lethal();
         MechanicRef& OnHit(std::function<void(Unit* hit)> fn);
         MechanicRef& OnResolve(std::function<void(ResolveResult const&)> fn);
 
@@ -259,6 +267,12 @@ namespace Mechanic
         Milliseconds warn = Milliseconds(0));
     MechanicRef Spot(Unit* owner, std::unordered_map<ObjectGuid, Position> const& spots, Milliseconds warn,
         float r = BossMechanics::Rules::kDefaultSpotRadius);
+    // Stratholme X3 (Timmy's Jump Rope): a sweep over the shape at now + warn that hits every eligible player inside
+    // who is on the ground then (players only; damage, Weakened, rider and onHit as a Zone). A player in the air is
+    // spared: a client's jump (MOVEMENTFLAG_FALLING) or a bot's hop, which the bots time to land just after the
+    // resolve (BossMechanics.Bots.Jump.*). Drawn like a Zone; onResolve's `cleared` lists who was in the air.
+    MechanicRef Jump(Unit* owner, BossMechanics::ZoneSpec const& spec, Milliseconds warn);
+    MechanicRef Jump(Unit* owner, Anchor const& at, float r, Milliseconds warn);
 
     // handles
     void Cancel(Unit* owner, MechanicHandle h);

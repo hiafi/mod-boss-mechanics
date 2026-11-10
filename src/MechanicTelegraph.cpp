@@ -181,7 +181,7 @@ namespace BossMechanics::Telegraph
 
         // How a mechanic is drawn: Shape = the hitbox's pieces (shape kinds, and a Stack/Soak of any shape but a
         // circle, M3 B1, in the get-in color); Carriers = rings on players; GetIn = a disc on the anchor (Stack/Soak
-        // circles) or on each spot (Spot); None = no marker (Bait, HoldStill).
+        // circles) or on each spot (Spot); None = no marker (Bait, HoldStill). A Jump draws its shape like a Zone.
         enum class DrawPath : uint8
         {
             Shape,
@@ -203,6 +203,8 @@ namespace BossMechanics::Telegraph
                     return m.shape.type == ShapeType::Circle ? DrawPath::GetIn : DrawPath::Shape;
                 case Kind::Spot:
                     return DrawPath::GetIn;
+                case Kind::Jump:
+                    return DrawPath::Shape;     // Stratholme X3: the swept area, its fill the countdown to the jump
                 default:
                     return DrawPath::None;
             }

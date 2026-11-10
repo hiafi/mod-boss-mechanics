@@ -590,6 +590,43 @@ BossMechanics.Bots.Park.HoldCapMs = 8000
 BossMechanics.Bots.Freeze.SettleMs = 250
 
 #
+#    BossMechanics.Bots.Jump.Enable
+#        Description: Bots hop for a Jump mechanic (Timmy's Jump Rope): a hop in place timed to land just after the
+#                     resolve, so they are in the air when the sweep passes. 0: they stay on the ground (and are hit).
+#        Default:     1
+#
+
+BossMechanics.Bots.Jump.Enable = 1
+
+#
+#    BossMechanics.Bots.Jump.HopMs
+#        Description: Length of a bot's hop, take-off to landing, in milliseconds (400-1200). A player's jump is
+#                     about 800.
+#        Default:     800
+#
+
+BossMechanics.Bots.Jump.HopMs = 800
+
+#
+#    BossMechanics.Bots.Jump.LandAfterMs
+#        Description: A bot's hop lands this many milliseconds after the Jump resolves (100 to HopMs - 200), so it is
+#                     still in the air on the map update that resolves it.
+#        Default:     250
+#
+
+BossMechanics.Bots.Jump.LandAfterMs = 250
+
+#
+#    BossMechanics.Bots.Jump.CountPlanned
+#        Description: The fallback for bots whose hop is not reliable (Stratholme ruling 17): a bot whose brain
+#                     launched a hop for the Jump, timed over its resolve, counts as in the air even when the hop's
+#                     spline was cut or refused. 0: only a hop still in flight (or a real fall) counts.
+#        Default:     0
+#
+
+BossMechanics.Bots.Jump.CountPlanned = 0
+
+#
 #    BossMechanics.Bots.Healer.SightWeight
 #        Description: Healer spot score per group member out of line of sight (0-50): the tank counts full, every
 #                     other member half. A spot costs about 1 per yard walked, so this is about how far a healer

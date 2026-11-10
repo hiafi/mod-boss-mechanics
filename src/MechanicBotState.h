@@ -143,6 +143,13 @@ namespace BossMechanics
         Leaks::Tracker leak;                                // leak detectors: references and our own tokens
         CostStats cost;                                     // cost counters (zeroed with the counters)
         uint64 costRegistryKey = 0;                         // (map id << 32 | instance id) cost.livePathCalls is for
+        // ---- Stratholme X3: the Jump kind's hop (MechanicJump.h; MechanicBotBrain.cpp StepJump) ----
+        std::vector<uint32> hopDoneFor;                     // Jumps hopped for or given up (pruned with the tasks)
+        uint32 hopFor = 0;                                  // the Jump the hop in flight answers (0: none)
+        uint32 hopSplineId = 0;                             // ...its spline
+        Milliseconds hopUntil{ 0 };                         // ...its planned landing
+        Milliseconds nextHopAt = Solver::kForever;          // the next hop's planned start: the lock keeps cast-time
+                                                            // spells that would end after it out (Watch, Hold)
         Milliseconds clockAt{ 0 };                          // the mode clocks' last sample (0 = none yet)
         Milliseconds routeHandoffAt{ 0 };                   // a route's escape arrived: stock follow took over
         Geo::Vec3 routeHandoffGoal;                         // ...towards this goal

@@ -27,7 +27,18 @@ namespace BossMechanics
         Soak,
         Bait,
         HoldStill,
-        Spot
+        Spot,
+        Jump        // Stratholme X3: a sweep at its resolve that spares whoever is in the air (MechanicJump.h)
+    };
+
+    // Stratholme F-2b (R-2-A A-2): when a Soak with fewer bodies inside than its count posts its group MissedSoak
+    // (MechanicRef::MissedSoak). A lasting Soak judges every pass (UF4's firelight rings each second, TC4's thaw
+    // Soaks every 250 ms), so the default floods the ledger with one failure per pass.
+    enum class MissedSoakMode : std::uint8_t
+    {
+        EveryPass,  // the default: every short pass (a one-shot Soak has one pass)
+        OnChange,   // the first short pass, then again only after a pass that was full (a lost soak re-posts)
+        Never       // no MissedSoak at all (a telegraph-only Soak whose cost is elsewhere: TC4's Shatter)
     };
 
     namespace Judge
@@ -40,10 +51,10 @@ namespace BossMechanics
         }
 
         // Decision §7.8: the circles of Spread, RunOut and Bait hit players only (bots cannot place pets); Zones and
-        // Frontals still hit pets and guardians.
+        // Frontals still hit pets and guardians. A Jump (Stratholme X3) trips players only: a pet cannot jump.
         constexpr bool PlayersOnly(Kind k)
         {
-            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait;
+            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait || k == Kind::Jump;
         }
 
         // Decision §7.7: a shape kind anchored on a player never hits that player (Cookie's chowder cone; the apex
@@ -65,6 +76,7 @@ namespace BossMechanics
             bool tankExempted = false;      // Registry::IsTankExempted
             bool hitThisPass = false;       // already kept by an earlier cast of the same pass
             bool decoy = false;             // the mechanic is a Decoy() (DecoyFits): it keeps nobody
+            bool airborne = false;          // Jump: in the air at the resolve (Jump::Clear, MechanicJump.h)
         };
 
         // Decoy() (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane): a Zone or Frontal drawn exactly
@@ -77,6 +89,14 @@ namespace BossMechanics
             return IsShapeKind(k) && !mine;
         }
 
+        // Lethal() (Stratholme X4: The Unforgiven's Cordon, Galford's Pyre and north wall, the kit's LethalWall): a
+        // Zone or Frontal the bots never cross. Not a mine (its grace is a crossing rule of its own) and not a decoy
+        // (bots never see one). Bots only: the resolve is unchanged (the kit's OnResolve kills whoever stands inside).
+        constexpr bool LethalFits(Kind k, bool mine, bool decoy)
+        {
+            return IsShapeKind(k) && !mine && !decoy;
+        }
+
         // The resolve filter's rule (Registry::FilterResolveTargets and the telegraph-only pass).
         constexpr bool KeepResolveTarget(Kind k, Candidate const& c)
         {
@@ -86,6 +106,8 @@ namespace BossMechanics
                 return false;
             if (PlayersOnly(k) && !c.player)
                 return false;
+            if (k == Kind::Jump && c.airborne)
+                return false;   // Stratholme X3: the sweep passes under a player in the air
             return c.inside && c.eligible && !c.tankExempted && !c.hitThisPass;
         }
 
@@ -108,6 +130,21 @@ namespace BossMechanics
         constexpr bool SoakShort(std::uint32_t inside, std::uint32_t count)
         {
             return inside < count;
+        }
+
+        // Stratholme F-2b (R-2-A A-2): does this pass post a MissedSoak? `wasShort` is the mechanic's memory of the
+        // previous pass (false before the first); it is updated here.
+        constexpr bool PostMissedSoak(MissedSoakMode mode, bool isShort, bool& wasShort)
+        {
+            bool const before = wasShort;
+            wasShort = isShort;
+            switch (mode)
+            {
+                case MissedSoakMode::EveryPass: return isShort;
+                case MissedSoakMode::OnChange: return isShort && !before;
+                case MissedSoakMode::Never: return false;
+            }
+            return isShort;
         }
 
         // HoldStill: moved farther than the mechanic's tolerance (B5) from the window-start position.

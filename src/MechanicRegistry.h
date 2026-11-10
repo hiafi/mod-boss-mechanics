@@ -19,6 +19,7 @@
 #include "MechanicDescriptor.h"
 #include "MechanicGeometry.h"
 #include "MechanicJudge.h"
+#include "MechanicJump.h"
 #include "MechanicMath.h"
 #include "ObjectGuid.h"
 #include "Position.h"
@@ -406,6 +407,18 @@ namespace BossMechanics
         uint32 count = 0;               // Soak/Stack: eligible players inside; others: hits.size()
         bool fizzled = false;           // mine removed by its cap or lifetime: no damage
         ObjectGuid picked;              // Bait: who took it
+        // Jump (Stratholme X3): the eligible players inside who were in the air (spared); `hits` are the tripped.
+        std::vector<ObjectGuid> cleared;
+    };
+
+    // Jump (Stratholme X3): a hop a bot's brain launched for one Jump (Registry::NoteHop). splineId 0: the launch was
+    // refused (no spline); it counts only under BossMechanics.Bots.Jump.CountPlanned.
+    struct HopNote
+    {
+        uint32 splineId = 0;
+        Milliseconds from{ 0 };         // launch
+        Milliseconds to{ 0 };           // planned landing
+        Jump::HopTrack track;           // F-2b (R-2-FW m-1): what the registry saw of it (Registry::SampleHops)
     };
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -443,6 +456,10 @@ namespace BossMechanics
         uint8 soakCount = 0;            // Soak: bodies needed (at least; extra bodies never fail)
         // Soak, OneClaimPerBot: a player claims at most one live Soak of this tag (the flagged ones only).
         bool oneClaimPerBot = false;
+        // Soak, MissedSoak(mode) (Stratholme F-2b): when a short pass posts the group MissedSoak; soakWasShort is the
+        // previous pass (Judge::PostMissedSoak).
+        MissedSoakMode missedSoak = MissedSoakMode::EveryPass;
+        bool soakWasShort = false;
         uint8 clusterMinOthers = 0;     // Stack Cluster(n): each eligible player needs n others within the radius
         // Frontal/Zone: one player is never hit: the victim of the anchor when the anchor is a creature, else the
         // owner's victim (ExemptVictim).
@@ -481,6 +498,9 @@ namespace BossMechanics
         float drawWidth = 0.f;
         // Decoy() (shape kinds, no mine; Judge::DecoyFits): drawn like a real one, hits nobody, never in the bot view.
         bool decoy = false;
+        // Lethal() (Stratholme X4; Judge::LethalFits): bots never plan a way across it (Solver::Hazard::lethal). Bots
+        // only.
+        bool lethal = false;
 
         // callbacks (owner scripts; dropped when the encounter ends, never called once the owner left the map)
         std::function<void(Unit* hit)> onHit;
@@ -501,6 +521,10 @@ namespace BossMechanics
         ResolveContext ctx;
         std::unordered_map<ObjectGuid, Position> holdStart;     // HoldStill: positions at the window start
         GuidSet failedPlayers;          // HoldStill/Spot, lasting Stack: one failure per player
+        // Jump (Stratholme X3): the bots' hops for it (NoteHop), and who was in the air at its resolve (StepJump sets
+        // it right before the cast; the resolve filter reads it).
+        std::unordered_map<ObjectGuid, HopNote> hops;
+        GuidSet jumpCleared;
 
         bool IsShapeKind() const { return Judge::IsShapeKind(kind); }
         bool IsCluster() const { return kind == Kind::Stack && clusterMinOthers > 0; }
@@ -724,6 +748,10 @@ namespace BossMechanics
         // re-reserve that only moves `until` does not.
         void Reserve(uint32 id, Reservation r);
         void Unreserve(uint32 id, ObjectGuid bot);  // bumps ReservationRevision when the bot had an entry
+        // Jump (Stratholme X3): a bot's brain launched (or tried to launch) a hop for Jump `id`: splineId is the hop's
+        // spline (0: refused), [from, to] its planned air time. Replaces the bot's earlier note on that Jump; never
+        // bumps a revision (bots do not plan on each other's hops).
+        void NoteHop(uint32 id, ObjectGuid bot, HopNote note);
         // Changes whenever another bot's reservations may have changed (Reserve, Unreserve, pruning at `until`, a
         // mechanic holding reservations removed). Separate from Revision() so a reservation never re-plans the bots
         // that only follow hazards. Never 0.
@@ -811,7 +839,7 @@ namespace BossMechanics
         // Shape kinds: inside the hitbox now (false for `who` when the shape is anchored on `who`, decision §7.7).
         // Spread/RunOut: within the radius of a carrier other than `who`. Stack/Soak: inside the shape. Stack
         // Cluster(n): at least n eligible players other than `who` within the radius of the point. Spot: within the
-        // radius of who's own spot (other kinds: false).
+        // radius of who's own spot. Jump: inside the shape, in the air or not (other kinds: false).
         bool ContainsPoint(ActiveMechanic const& m, Position const& p, ObjectGuid who = ObjectGuid::Empty) const;
         bool ContainsUnit(ActiveMechanic const& m, Unit const* who) const;
         // When the point is dangerous (empty when it is outside the shape). Times are absolute.
@@ -829,6 +857,10 @@ namespace BossMechanics
         // The eligible players of the mechanic right now (candidates: alive, in world, not GM, in test scope and
         // range). Stack Cluster(n): the players who each need n others around them.
         std::vector<ObjectGuid> EligiblePlayers(ActiveMechanic const& m) const;
+        // Jump (Stratholme X3): how `who` counts at the Jump's resolve now (Jump::Clear: falling, a noted hop still in
+        // flight, or with countPlanned a noted hop whose planned air time covers now).
+        Jump::ClearBy JumpClearBy(ActiveMechanic const& m, Unit const* who, Milliseconds at, bool countPlanned) const;
+        void SampleHops(ActiveMechanic& m, Milliseconds now);
 
     private:
         Unit* FindUnit(ObjectGuid guid) const;
@@ -850,6 +882,7 @@ namespace BossMechanics
         void StepBait(ActiveMechanic& m, Milliseconds now);
         void StepHoldStill(ActiveMechanic& m, Milliseconds now);
         void StepSpot(ActiveMechanic& m, Milliseconds now);
+        void StepJump(ActiveMechanic& m, Milliseconds now);
         // One Stack/Soak judgement (a single resolve, or one pass of a lasting one).
         void JudgeStackSoak(ActiveMechanic& m, uint32 pass, Milliseconds now);
         // Shape kinds anchored on a player: that player (never hit by its own shape, decision §7.7); else empty.

@@ -108,6 +108,36 @@ namespace
         CHECK(!Judge::SoakShort(4, 0));
     }
 
+    // Stratholme F-2b (R-2-A A-2): a lasting Soak judged every pass. UF4's firelight ring (count 4, one accused) is
+    // short every 1 s pass for 59.5 s; TC4's thaw Soak every 250 ms while nobody touches the frozen player.
+    std::uint32_t PostsOver(MissedSoakMode mode, std::vector<std::uint32_t> const& inside, std::uint32_t count)
+    {
+        bool wasShort = false;
+        std::uint32_t posts = 0;
+        for (std::uint32_t n : inside)
+            posts += Judge::PostMissedSoak(mode, Judge::SoakShort(n, count), wasShort) ? 1 : 0;
+        return posts;
+    }
+
+    void TestMissedSoakMode()
+    {
+        std::vector<std::uint32_t> const ring(60, 1);       // 60 passes, one body of four
+        CHECK(PostsOver(MissedSoakMode::EveryPass, ring, 4) == 60);    // the flood the default keeps
+        CHECK(PostsOver(MissedSoakMode::OnChange, ring, 4) == 1);
+        CHECK(PostsOver(MissedSoakMode::Never, ring, 4) == 0);
+        // Short, full, short again: OnChange posts the loss each time it happens.
+        std::vector<std::uint32_t> const lost{ 0, 0, 1, 1, 0, 0, 0, 1, 0 };
+        CHECK(PostsOver(MissedSoakMode::OnChange, lost, 1) == 3);
+        CHECK(PostsOver(MissedSoakMode::EveryPass, lost, 1) == 6);
+        // Always full: nothing in any mode.
+        std::vector<std::uint32_t> const full(10, 2);
+        CHECK(PostsOver(MissedSoakMode::OnChange, full, 2) == 0);
+        CHECK(PostsOver(MissedSoakMode::EveryPass, full, 2) == 0);
+        // A one-shot Soak (one pass) posts the same in EveryPass and OnChange.
+        CHECK(PostsOver(MissedSoakMode::OnChange, { 0 }, 1) == 1);
+        CHECK(PostsOver(MissedSoakMode::EveryPass, { 0 }, 1) == 1);
+    }
+
     // B5: HoldStill tolerance per mechanic (default 0.3 yd).
     void TestHoldStillTolerance()
     {
@@ -297,6 +327,7 @@ int main()
     TestSelfAnchorSparing();
     TestTankExemptSource();
     TestSoakCount();
+    TestMissedSoakMode();
     TestHoldStillTolerance();
     TestBaitRadius();
     TestCluster();
