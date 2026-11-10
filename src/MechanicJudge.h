@@ -77,6 +77,7 @@ namespace BossMechanics
             bool hitThisPass = false;       // already kept by an earlier cast of the same pass
             bool decoy = false;             // the mechanic is a Decoy() (DecoyFits): it keeps nobody
             bool airborne = false;          // Jump: in the air at the resolve (Jump::Clear, MechanicJump.h)
+            bool playersOnly = false;       // the mechanic's Eligibility::playersOnly: players only, any kind
         };
 
         // Decoy() (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane): a Zone or Frontal drawn exactly
@@ -104,7 +105,7 @@ namespace BossMechanics
                 return false;
             if (!c.alive || !c.playerControlled || c.gameMaster)
                 return false;
-            if (PlayersOnly(k) && !c.player)
+            if ((PlayersOnly(k) || c.playersOnly) && !c.player)
                 return false;
             if (k == Kind::Jump && c.airborne)
                 return false;   // Stratholme X3: the sweep passes under a player in the air

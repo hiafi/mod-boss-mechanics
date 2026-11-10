@@ -710,6 +710,8 @@ namespace BossMechanics
                     return "reduced margin";
                 case 3:
                     return "grace";
+                case 4:
+                    return "pocket";
                 default:
                     return "-";
             }
@@ -889,6 +891,9 @@ namespace BossMechanics
             ++c.outcomes[static_cast<std::size_t>(plan.outcome)];
             if (plan.outcome == Solver::Outcome::Move && plan.stats.pass == 2)
                 ++c.tightMoves;
+            if (plan.outcome == Solver::Outcome::Move && plan.stats.pass == 4)
+                ++c.pocketMoves;
+            c.pocketPathChecks += plan.stats.pocketPathChecks;
             c.solveUsLast = us;
             c.solveUsMax = std::max(c.solveUsMax, us);
             c.solveUsTotal += us;

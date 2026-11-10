@@ -1221,6 +1221,8 @@ namespace BossMechanics
         if (!p || !IsInTestScope(m, p))
             return false;
         Eligibility const& e = m.eligibility;
+        if (e.playersOnly && p != who)
+            return false;       // ... unless the mechanic is players only
         if (e.roles != Role::Any && !HasRole(e.roles, RoleOf(m, p)))
             return false;
         if (!e.carriers.empty() && !e.carriers.count(p->GetGUID()))
@@ -1331,7 +1333,9 @@ namespace BossMechanics
             Player const* pl = u->ToPlayer();
             c.player = pl != nullptr;
             c.gameMaster = pl && pl->IsGameMaster();
-            if (!c.alive || !c.playerControlled || c.gameMaster || (Judge::PlayersOnly(m->kind) && !c.player))
+            c.playersOnly = m->eligibility.playersOnly;
+            if (!c.alive || !c.playerControlled || c.gameMaster
+                || ((Judge::PlayersOnly(m->kind) || c.playersOnly) && !c.player))
                 return true;    // cheap rejections first
             c.inside = InsideCtx(*m, u);
             c.eligible = c.inside && IsEligible(*m, u);

@@ -89,15 +89,16 @@ namespace BossMechanics
             auto outcome = [&c](Solver::Outcome o) { return c.outcomes[static_cast<std::size_t>(o)]; };
             uint64 const mean = c.solves ? c.solveUsTotal / c.solves : 0;
             uint64 const refreshMean = c.solveRefreshes ? c.refreshUsTotal / c.solveRefreshes : 0;
-            handler->PSendSysMessage("  solves {} (safe {}, move {} (reduced margin {}), grace {}, fallback {}, "
-                "no path {}), path checks {}, late {} (fallback {}), stuck {}, released {}, motion stops {} (rerouted "
-                "{}), lock {} (moves {}, casts {}), cast breaks {}, wakes {} (descriptor {}), solve us last {} max {} "
-                "mean {}, refresh before solve us last {} max {} mean {}",
-                c.solves, outcome(Solver::Outcome::Safe), outcome(Solver::Outcome::Move), c.tightMoves,
+            handler->PSendSysMessage("  solves {} (safe {}, move {} (reduced margin {}, pocket {}), grace {}, "
+                "fallback {}, no path {}), path checks {} (pocket {}), late {} (fallback {}), stuck {}, released {}, "
+                "motion stops {} (rerouted {}), lock {} (moves {}, casts {}), cast breaks {}, wakes {} (descriptor "
+                "{}), solve us last {} max {} mean {}, refresh before solve us last {} max {} mean {}",
+                c.solves, outcome(Solver::Outcome::Safe), outcome(Solver::Outcome::Move), c.tightMoves, c.pocketMoves,
                 outcome(Solver::Outcome::GraceMove), outcome(Solver::Outcome::Fallback),
-                outcome(Solver::Outcome::NoPath), c.pathChecks, c.lateArrivals, c.lateFallbacks, c.stuckResolves,
-                c.releases, c.motionStops, c.reroutes, c.lockBlocks, c.lockMoves, c.lockCasts, c.castBreaks, c.wakes,
-                c.descriptorWakes, c.solveUsLast, c.solveUsMax, mean, c.refreshUsLast, c.refreshUsMax, refreshMean);
+                outcome(Solver::Outcome::NoPath), c.pathChecks, c.pocketPathChecks, c.lateArrivals, c.lateFallbacks,
+                c.stuckResolves, c.releases, c.motionStops, c.reroutes, c.lockBlocks, c.lockMoves, c.lockCasts,
+                c.castBreaks, c.wakes, c.descriptorWakes, c.solveUsLast, c.solveUsMax, mean, c.refreshUsLast,
+                c.refreshUsMax, refreshMean);
             // M3: the player kinds, the tank tasks and the route search (STAGE-M3-HANDOFF §3.8 telemetry).
             handler->PSendSysMessage("  m3: carrier solves {}, claim solves {}, pick solves {}, role solves {}, "
                 "violated {}, freezes {}, facings {}, facing blocks {} (in escape {}), facing breaks {}, tank "

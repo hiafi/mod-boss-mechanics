@@ -1,15 +1,18 @@
 // Standalone tests for the Scholomance shapes of src/MechanicDrill.h (Scholomance build §3.9, WP-G): the
 // `scholomance-shapes` drill against the build spec rows it reproduces (Polkelt PK2, Malicia MA6, Illucia IB1,
 // Rattlegore RG4, Jandice JB1 heroic, Gandling GD4), the landing helpers it adds (grid, decoy picks, away=, the
-// Foresight prediction), the decoy grid's geometry (the decoy's circle is the only safe ground) and the sweep's
-// program. Build: tests/run.sh.
+// Foresight prediction), the decoy grid's geometry (the decoy's circle is the only safe ground), the solver finding
+// that ground (the pocket pass, Stratholme SWEEP-2 D6) and the sweep's program. Build: tests/run.sh.
 
 #include "BossMechanicsIds.h"
 #include "check.h"
 #include "MechanicDrill.h"
 #include "MechanicDrillPlan.h"
+#include "MechanicSolver.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -318,6 +321,271 @@ namespace
 
     // Three 4 yd lanes at once, 2 s, each from a point 20 yd off the group through a different non-tank, 40 yd long:
     // a member up to 15 yd from the group's centre is inside its lane with at least 5 yd of lane beyond it.
+    // ---- the solver on the decoy grid (Stratholme SWEEP-2 D6) ----------------------------------------------------
+    // The bots never see the decoy (the view skips it): they must find its ground as uncovered floor. The ground is
+    // a pocket between the real sigils and the edge, which neither the exits (only from the hazards that hold the
+    // bot, radial) nor the rings round the bot aim at; the pocket pass (Params::hazardEdgeArcs) tries the hazards'
+    // free edges when nothing else is clean.
+
+    struct StraightOracle : Solver::PathOracle
+    {
+        bool Find(Vec3 const& from, Vec3 const& to, std::vector<Vec3>& out) override
+        {
+            out = { from, to };
+            return true;
+        }
+    };
+
+    constexpr float kBotMarginYd = 0.75f;          // BossMechanics.Bots.SafetyMarginYd
+    constexpr float kBotSpeed = 7.f;
+    constexpr Solver::Ms kSolveAt{ 100000 };
+    constexpr Solver::Ms kLeft{ 5700 };             // a 6 s warning, the bot's first solve 0.3 s in
+
+    Solver::Hazard Sigil(std::uint32_t id, Vec3 const& c, float r)
+    {
+        Solver::Hazard h;
+        h.id = id;
+        h.shape = BossMechanics::Shape::Circle(r);
+        h.poses = { Geo::Pose{ c.x, c.y, c.z, 0.f } };
+        h.marginYd = kBotMarginYd;
+        h.timing = Solver::MakeInstant(kSolveAt + kLeft, Solver::Ms(500));
+        return h;
+    }
+
+    struct GridTally
+    {
+        std::uint32_t runs = 0, misses = 0, pocketMoves = 0, maxPocketPoints = 0, maxPocketChecks = 0;
+        double worstUs = 0.0, totalUs = 0.0;
+    };
+
+    // Every start on a 2 yd lattice within 14 yd of the group's center, each decoy cell, facings 0 and 0.6: the plan's
+    // target is outside every real sigil (no margin) and inside the edge's hole.
+    GridTally DrillGrid(bool pocket, bool melee)
+    {
+        GridTally t;
+        StraightOracle oracle;
+        Vec3 const center{ 0.f, 0.f, 0.f };
+        for (float facing : { 0.f, 0.6f })
+        {
+            std::vector<Vec3> const cells = Drill::GridPoints(center, facing, Drill::kSigilGrid, Drill::kSigilApart);
+            for (std::size_t decoy = 0; decoy < cells.size(); ++decoy)
+                for (float x = -14.f; x <= 14.f; x += 2.f)
+                    for (float y = -14.f; y <= 14.f; y += 2.f)
+                    {
+                        if (std::sqrt(x * x + y * y) > 14.f)
+                            continue;
+                        Solver::Input in;
+                        in.bot = { x, y, 0.f };
+                        in.now = kSolveAt;
+                        in.speed = kBotSpeed;
+                        in.params.hazardEdgeArcs = pocket;
+                        if (melee)
+                        {
+                            in.role.present = true;
+                            in.role.anchor = { 0.f, 6.f, 0.f };
+                            in.role.maxYd = 5.f;
+                        }
+                        std::uint32_t id = 1;
+                        for (std::size_t i = 0; i < cells.size(); ++i)
+                            if (i != decoy)
+                                in.hazards.push_back(Sigil(id++, cells[i], Drill::kSigilRadius));
+                        Solver::Hazard edge = Sigil(100, center, 0.f);
+                        edge.shape = BossMechanics::Shape::Donut(Drill::kSigilEdgeInner, Drill::kSigilEdgeOuter);
+                        in.hazards.push_back(edge);
+
+                        auto const t0 = std::chrono::steady_clock::now();
+                        Solver::Plan const plan = Solver::Solve(in, oracle);
+                        double const us = std::chrono::duration<double, std::micro>(
+                            std::chrono::steady_clock::now() - t0).count();
+                        t.totalUs += us;
+                        t.worstUs = std::max(t.worstUs, us);
+                        ++t.runs;
+                        bool safe = Geo::Dist2d(plan.target.x, plan.target.y, 0.f, 0.f) < Drill::kSigilEdgeInner;
+                        for (std::size_t i = 0; i < cells.size(); ++i)
+                            if (i != decoy && Geo::Dist2d(plan.target.x, plan.target.y, cells[i].x, cells[i].y)
+                                <= Drill::kSigilRadius)
+                                safe = false;
+                        t.misses += safe ? 0 : 1;
+                        t.pocketMoves += plan.stats.pass == 4 ? 1 : 0;
+                        t.maxPocketPoints = std::max(t.maxPocketPoints, plan.stats.pocketCandidates);
+                        t.maxPocketChecks = std::max(t.maxPocketChecks, plan.stats.pocketPathChecks);
+                    }
+        }
+        return t;
+    }
+
+    // Jandice's real heroic grid (mod-dungeon-bosses ScholomanceRework.h kJandiceSigilGrid, JandiceLogic.h
+    // kGridSigilRadius 9, the aisle kJandiceAisle x 228-283.5, y 84-105): an oracle that refuses paths and probes off
+    // the aisle stands in for the navmesh.
+    constexpr float kJandiceGrid[8][2] = { { 234.9f, 99.8f }, { 248.8f, 99.8f }, { 262.7f, 99.8f },
+        { 276.6f, 99.8f }, { 234.9f, 89.2f }, { 248.8f, 89.2f }, { 262.7f, 89.2f }, { 276.6f, 89.2f } };
+    constexpr float kJandiceSigilRadius = 9.f;
+    constexpr float kJandiceZ = 95.9f;
+
+    bool InAisle(Vec3 const& p)
+    {
+        return p.x >= 228.5f && p.x <= 283.f && p.y >= 84.5f && p.y <= 104.5f;
+    }
+
+    struct AisleOracle : Solver::PathOracle
+    {
+        bool Find(Vec3 const& from, Vec3 const& to, std::vector<Vec3>& out) override
+        {
+            if (!InAisle(to))
+                return false;
+            out = { from, to };
+            return true;
+        }
+
+        bool Walkable(Vec3& p) override
+        {
+            return InAisle(p);
+        }
+    };
+
+    bool JandiceSafe(Vec3 const& p, std::size_t decoy, float margin)
+    {
+        if (!InAisle(p))
+            return false;
+        for (std::size_t k = 0; k < 8; ++k)
+            if (k != decoy && Geo::Dist2d(p.x, p.y, kJandiceGrid[k][0], kJandiceGrid[k][1])
+                <= kJandiceSigilRadius + margin)
+                return false;
+        return true;
+    }
+
+    // Starts with the decoy's ground well within the warning (its nearest point at the solver's margins at most
+    // kWithinYd away: 7 yd/s over 5.7 s less the start delay and the time margin, less 2 yd of slack): `misses`
+    // counts the plans that do not end on safe ground; the starts beyond are left out (`runs` counts only the rest).
+    GridTally JandiceGrid(bool pocket)
+    {
+        constexpr float kWithinYd = 34.f;
+        GridTally t;
+        AisleOracle oracle;
+        for (std::size_t decoy = 0; decoy < 8; ++decoy)
+        {
+            std::vector<Vec3> ground;
+            for (float x = 228.5f; x <= 283.f; x += 0.5f)
+                for (float y = 84.5f; y <= 104.5f; y += 0.5f)
+                    if (JandiceSafe({ x, y, kJandiceZ }, decoy, kBotMarginYd + 0.5f))
+                        ground.push_back({ x, y, kJandiceZ });
+            CHECK(!ground.empty());
+            for (float x = 230.f; x <= 282.f; x += 2.f)
+                for (float y = 86.f; y <= 103.f; y += 2.f)
+                {
+                    Vec3 const bot{ x, y, kJandiceZ };
+                    float nearest = 1e9f;
+                    for (Vec3 const& g : ground)
+                        nearest = std::min(nearest, Geo::Dist2d(bot.x, bot.y, g.x, g.y));
+                    if (nearest > kWithinYd)
+                        continue;
+                    Solver::Input in;
+                    in.bot = bot;
+                    in.now = kSolveAt;
+                    in.speed = kBotSpeed;
+                    in.params.hazardEdgeArcs = pocket;
+                    std::uint32_t id = 1;
+                    for (std::size_t k = 0; k < 8; ++k)
+                        if (k != decoy)
+                            in.hazards.push_back(Sigil(id++, { kJandiceGrid[k][0], kJandiceGrid[k][1], kJandiceZ },
+                                kJandiceSigilRadius));
+                    auto const t0 = std::chrono::steady_clock::now();
+                    Solver::Plan const plan = Solver::Solve(in, oracle);
+                    double const us = std::chrono::duration<double, std::micro>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    t.totalUs += us;
+                    t.worstUs = std::max(t.worstUs, us);
+                    ++t.runs;
+                    t.misses += JandiceSafe(plan.target, decoy, 0.f) ? 0 : 1;
+                    t.pocketMoves += plan.stats.pass == 4 ? 1 : 0;
+                    t.maxPocketPoints = std::max(t.maxPocketPoints, plan.stats.pocketCandidates);
+                    t.maxPocketChecks = std::max(t.maxPocketChecks, plan.stats.pocketPathChecks);
+                }
+        }
+        return t;
+    }
+
+    void PrintTally(char const* name, GridTally const& t)
+    {
+        std::printf("decoy grid solver, %s: %u of %u starts miss the safe ground, %u pocket moves, pocket points max "
+            "%u, pocket path checks max %u, solve mean %.0f us max %.0f us (soft limit 2000 us)%s\n", name, t.misses,
+            t.runs, t.pocketMoves, t.maxPocketPoints, t.maxPocketChecks, t.runs ? t.totalUs / t.runs : 0.0, t.worstUs,
+            t.worstUs > 2000.0 ? "  ** OVER **" : "");
+    }
+
+    void TestDecoyGridSolver()
+    {
+        // The drill's grid: every start finds the decoy's ground, melee or not. Without the pocket pass a quarter of
+        // them miss it (the SWEEP-2 sweep: Zone/9 on 26 of 31 specs).
+        for (bool melee : { false, true })
+        {
+            GridTally const on = DrillGrid(true, melee);
+            GridTally const off = DrillGrid(false, melee);
+            PrintTally(melee ? "drill, melee band, pocket pass" : "drill, pocket pass", on);
+            PrintTally(melee ? "drill, melee band, as before" : "drill, as before", off);
+            CHECK(on.runs == 2682);
+            CHECK(on.misses == 0);
+            CHECK(off.misses * 5 >= off.runs);         // 744 of 2682 as before
+            CHECK(on.pocketMoves >= off.misses);
+            CHECK(on.maxPocketPoints <= Solver::Detail::kMaxPocketCandidates);
+            CHECK(on.maxPocketChecks <= Solver::Params{}.maxPathChecks);
+        }
+        // Jandice's real grid: every start within reach of the decoy's ground finds it.
+        GridTally const on = JandiceGrid(true);
+        GridTally const off = JandiceGrid(false);
+        PrintTally("Jandice, pocket pass", on);
+        PrintTally("Jandice, as before", off);
+        CHECK(on.runs > 1000);
+        CHECK(on.misses == 0);
+        CHECK(off.misses * 5 >= off.runs);
+        CHECK(on.maxPocketPoints <= Solver::Detail::kMaxPocketCandidates);
+        CHECK(on.maxPocketChecks <= Solver::Params{}.maxPathChecks);
+    }
+
+    // The pocket pass's worst case: nothing safe anywhere (a field of overlapping circles round the bot and past its
+    // reach), so it builds, pre-filters and drops every edge point and the Fallback runs as before. The plan is the
+    // same as without the pass; the cost is printed against the same soft limit.
+    void TestPocketPassWorstCase()
+    {
+        Solver::Input in;
+        in.bot = { 0.f, 0.f, 0.f };
+        in.now = kSolveAt;
+        in.speed = kBotSpeed;
+        std::uint32_t id = 1;
+        for (float x = -45.f; x <= 45.f; x += 9.f)
+            for (float y = -45.f; y <= 45.f; y += 9.f)
+                in.hazards.push_back(Sigil(id++, { x, y, 0.f }, 7.f));
+        StraightOracle oracle;
+        Solver::Input off = in;
+        off.params.hazardEdgeArcs = false;
+        Solver::Plan const a = Solver::Solve(in, oracle);
+        Solver::Plan const b = Solver::Solve(off, oracle);
+        CHECK(a.outcome == Solver::Outcome::Fallback);
+        CHECK(a.outcome == b.outcome);
+        CHECK(Geo::Dist2d(a.target.x, a.target.y, b.target.x, b.target.y) < kEps);
+        CHECK(a.pathChecks == b.pathChecks);
+        CHECK(a.stats.pocketCandidates > 0 && a.stats.pocketCandidates <= Solver::Detail::kMaxPocketCandidates);
+        CHECK(b.stats.pocketCandidates == 0);
+        double worst[2] = { 0.0, 0.0 };
+        double total[2] = { 0.0, 0.0 };
+        constexpr int kRuns = 50;
+        for (int r = 0; r < kRuns; ++r)
+            for (int k = 0; k < 2; ++k)
+            {
+                auto const t0 = std::chrono::steady_clock::now();
+                Solver::Plan const p = Solver::Solve(k ? off : in, oracle);
+                double const us = std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - t0).count();
+                CHECK(p.outcome == a.outcome);
+                worst[k] = std::max(worst[k], us);
+                total[k] += us;
+            }
+        std::printf("pocket pass worst case: %zu hazards, %u pocket points, all dropped: mean %.0f us max %.0f us with "
+            "the pass, mean %.0f us max %.0f us without (soft limit 2000 us)%s\n", in.hazards.size(),
+            a.stats.pocketCandidates, total[0] / kRuns, worst[0], total[1] / kRuns, worst[1],
+            total[0] / kRuns > 2000.0 ? "  ** OVER **" : "");
+    }
+
     void TestGandlingPortals()
     {
         std::vector<Timed> const lanes = StepsWithTag(*Shapes(), Drill::kScholoTagPortal);
@@ -478,6 +746,8 @@ int main()
     TestRattlegoreOssuary();
     TestJandiceSteps();
     TestDecoyGridGeometry();
+    TestDecoyGridSolver();
+    TestPocketPassWorstCase();
     TestGandlingPortals();
     TestGridPoints();
     TestPickDistinct();
