@@ -6,6 +6,7 @@
 #include "check.h"
 #include "MechanicDrill.h"
 #include "MechanicDrillPlan.h"
+#include "MechanicJudge.h"
 #include <cmath>
 #include <optional>
 #include <string>
@@ -282,9 +283,52 @@ namespace
     }
 }
 
+namespace
+{
+    // Stratholme SWEEP-2 D5: the hunted player's pet standing in the catch circle (melee pets stand on the boss, where
+    // the chaser starts) is not the catch. The circle is players only, so the resolve filter never keeps the pet,
+    // and a pass is a catch only when its hits hold the hunted player.
+    void TestPetIsNotTheCatch()
+    {
+        using Id = std::uint32_t;
+        Id const hunted = 7;
+        Id const pet = 8;
+        CHECK(!Drill::HuntCaught(std::vector<Id>{}, hunted));
+        CHECK(!Drill::HuntCaught(std::vector<Id>{ pet }, hunted));
+        CHECK(Drill::HuntCaught(std::vector<Id>{ hunted }, hunted));
+        CHECK(Drill::HuntCaught(std::vector<Id>{ pet, hunted }, hunted));
+
+        // One pass as the registry runs it: the pet (eligible with its owner) and, in the second case, the hunted
+        // player inside the circle; the hits are what the filter keeps.
+        for (bool const playerInside : { false, true })
+        {
+            struct Unit
+            {
+                Id id;
+                bool player;
+                bool inside;
+            };
+            std::vector<Unit> const units = { { pet, false, true }, { hunted, true, playerInside } };
+            std::vector<Id> hits;
+            for (Unit const& u : units)
+            {
+                Judge::Candidate c;
+                c.player = u.player;
+                c.inside = u.inside;
+                c.playersOnly = true;   // RegisterHunt and the SFK Hunt set Eligibility::playersOnly
+                if (Judge::KeepResolveTarget(Kind::Zone, c))
+                    hits.push_back(u.id);
+            }
+            CHECK(Drill::HuntCaught(hits, hunted) == playerInside);
+            CHECK(hits.size() == (playerInside ? 1u : 0u));
+        }
+    }
+}
+
 int main()
 {
     TestSfkHuntTable();
+    TestPetIsNotTheCatch();
     TestSweepProgram();
     TestBellPoints();
     TestDamageStep();

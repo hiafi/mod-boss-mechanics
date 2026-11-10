@@ -960,7 +960,8 @@ namespace
     // (pick=); a circle of `size` on it, eligible = that member only, persistent for the chase. The circle's first pass
     // (at the end of the warning, the howl) starts the walk and every pass re-aims it at the member, at `huntRate` x
     // player run speed; a pass that holds the member is a catch (its hit is the ledger entry) and ends the hunt, as
-    // does the member dying or leaving the map. The chaser despawns on its own after the chase (timed summon).
+    // does the member dying or leaving the map. The circle is players only: the member's pet in it is not a catch.
+    // The chaser despawns on its own after the chase (timed summon).
     std::vector<uint32> RegisterHunt(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
     {
         Unit* start = ObjectAccessor::GetUnit(*owner, spec.selected);
@@ -1005,6 +1006,7 @@ namespace
         circle.target = hunted->GetGUID();
         Eligibility elig = spec.eligibility.value_or(Eligibility());
         elig.carriers = { hunted->GetGUID() };
+        elig.playersOnly = true;    // the member's pet is not the catch (Drill::HuntCaught)
         circle.eligibility = elig;
         std::vector<uint32> ids = RegisterTest(owner, circle, err);
         if (ids.empty())
@@ -1021,7 +1023,8 @@ namespace
                 return;
             Creature* chaser = map->GetCreature(h->chaser);
             Player* member = chaser ? ObjectAccessor::GetPlayer(*chaser, h->hunted) : nullptr;
-            if (!r.hits.empty() || !chaser || !member || !member->IsAlive() || member->GetMap() != map)
+            if (Drill::HuntCaught(r.hits, h->hunted) || !chaser || !member || !member->IsAlive()
+                || member->GetMap() != map)
             {
                 EndHunt(map, *h, kChaserLinger);
                 return;

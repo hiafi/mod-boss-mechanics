@@ -44,6 +44,22 @@ namespace
         }
     }
 
+    // Stratholme SWEEP-2 D5: Eligibility::playersOnly makes any kind players only (a hunt's catch circle is a Zone);
+    // without it a Zone still hits pets, as before.
+    void TestEligibilityPlayersOnly()
+    {
+        for (Kind k : kAllKinds)
+        {
+            Judge::Candidate player = Player();
+            player.playersOnly = true;
+            Judge::Candidate pet = Pet();
+            pet.playersOnly = true;
+            CHECK(Judge::KeepResolveTarget(k, player) == Judge::KeepResolveTarget(k, Player()));
+            CHECK(!Judge::KeepResolveTarget(k, pet));
+        }
+        CHECK(Judge::KeepResolveTarget(Kind::Zone, Pet()));
+    }
+
     // The filter's other rules hold for every kind.
     void TestFilterRules()
     {
@@ -323,6 +339,7 @@ namespace
 int main()
 {
     TestPlayersOnly();
+    TestEligibilityPlayersOnly();
     TestFilterRules();
     TestSelfAnchorSparing();
     TestTankExemptSource();

@@ -167,6 +167,10 @@ namespace BossMechanics
         uint32 auraSpell = 0;           // 0 = no stack threshold
         uint8 minStacks = 0;
         uint8 maxStacks = 255;
+        // Players only, on any kind (Judge::Candidate::playersOnly): an eligible player's pets and guardians are not
+        // eligible with their owner. A hunt's catch circle (Odo's Hunt, the `hunt` drill): only the hunted player is
+        // the catch, a pet standing in it is not (Stratholme SWEEP-2 D5).
+        bool playersOnly = false;
     };
 
     struct Ordering
