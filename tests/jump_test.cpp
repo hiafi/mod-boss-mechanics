@@ -127,6 +127,138 @@ namespace
         CHECK(std::string_view(Jump::ClearByName(Jump::ClearBy::Planned)) == "planned");
     }
 
+    // Stratholme F-2b (R-2-FW m-1): the resolve's map update comes 400 ms late (a loaded world). The bot hopped on
+    // time (launch 4,450, landing 5,250 for a resolve at 5,000); the registry sampled the hop every 100 ms up to
+    // 4,950; at the late tick (5,400) the hop has landed and the walk under it launched a new spline. The sweep is
+    // judged at the resolve: the bot is in the air; with the fallback on, the Planned window reads the resolve too.
+    Jump::HopTrack Sampled(Ms from, Ms to, Ms lastLive, Ms lateTick, bool replaced, bool cut)
+    {
+        Jump::HopTrack t;
+        for (Ms at = from + Ms(50); at <= lastLive; at += Ms(100))
+            Jump::SampleHop(t, from, to, true, false, at - from, false, at, Jump::kSampleSlack);
+        if (replaced)
+            Jump::SampleHop(t, from, to, false, false, Ms(0), cut, lateTick, Jump::kSampleSlack);
+        else       // the bot stood still: the hop's spline stays, finalized at its whole length
+            Jump::SampleHop(t, from, to, true, true, to - from, false, lateTick, Jump::kSampleSlack);
+        return t;
+    }
+
+    void TestLateTick()
+    {
+        Jump::HopParams const p;
+        Ms const resolve{ 5000 };
+        Ms const from = Jump::HopAt(resolve, p);
+        Ms const to = Jump::LandAt(resolve, p);
+        Ms const late = resolve + Ms(400);
+        CHECK(late > to);                                   // the case: the hop has landed by the judging tick
+        for (bool replaced : { true, false })
+        {
+            Jump::HopTrack const t = Sampled(from, to, Ms(4950), late, replaced, false);
+            CHECK(t.ended);
+            CHECK(t.airTo == to);
+            Jump::Air a;
+            a.hopNoted = true;
+            a.hopFrom = from;
+            a.hopTo = to;
+            a.hopAirTo = t.airTo;
+            a.hopSplineLive = false;
+            CHECK(Jump::Clear(a, resolve, false) == Jump::ClearBy::Hop);
+            CHECK(Jump::Clear(a, late, false) == Jump::ClearBy::None);     // the as-built judgment at the late tick
+        }
+        // The fallback alone (no track: the launch was refused): the Planned window covers the resolve, not the
+        // late tick.
+        Jump::Air planned;
+        planned.hopNoted = true;
+        planned.hopFrom = from;
+        planned.hopTo = to;
+        CHECK(Jump::Clear(planned, resolve, true) == Jump::ClearBy::Planned);
+        CHECK(Jump::Clear(planned, late, true) == Jump::ClearBy::None);
+        // A cut is not credited: stunned at the late tick, the hop counts only as far as it was seen (4,950).
+        Jump::HopTrack const cut = Sampled(from, to, Ms(4950), late, true, true);
+        CHECK(cut.ended && cut.airTo < resolve);
+        // Replaced well before its landing with nothing seen (a stop spline, a knockback the flags missed): a cut.
+        Jump::HopTrack const early = Sampled(from, to, Ms(4650), Ms(4750), true, false);
+        CHECK(early.ended && early.airTo < Ms(4750));
+        Jump::Air e;
+        e.hopNoted = true;
+        e.hopFrom = from;
+        e.hopTo = to;
+        e.hopAirTo = early.airTo;
+        CHECK(Jump::Clear(e, resolve, false) == Jump::ClearBy::None);
+        // Interrupted on the spot (DisableSpline: same id, done, time passed where it stopped).
+        Jump::HopTrack stop;
+        Jump::SampleHop(stop, from, to, true, true, Ms(200), false, from + Ms(250), Jump::kSampleSlack);
+        CHECK(stop.ended && stop.airTo == from + Ms(200));
+        // Once ended, later samples change nothing (the next spline is not the hop's).
+        Jump::SampleHop(stop, from, to, false, false, Ms(0), false, to + Ms(500), Jump::kSampleSlack);
+        CHECK(stop.airTo == from + Ms(200));
+        // Still in flight at the late tick: the live spline counts, as before.
+        Jump::Air live;
+        live.hopNoted = true;
+        live.hopFrom = from;
+        live.hopTo = to;
+        live.hopSplineLive = true;
+        CHECK(Jump::Clear(live, resolve, false) == Jump::ClearBy::Hop);
+    }
+
+    // Stratholme F-2b (R-2-FW m-2): a walking bot hops along its walk. Three back-to-back 2 s skips (hops 1,450-2,250,
+    // 3,450-4,250, 5,450-6,250) and a RunOut registered at 1,000 that resolves at 5,500: the bot must walk 25 yd by
+    // 5,200 (marginMs 300 before it); the solver timed it at full run speed (no hop in its travel time). Hopping in
+    // place loses 2.4 s of the walk and misses; hopping along keeps the walk's pace.
+    float Walked(Ms start, Ms until, float speed, std::vector<Ms> const& hopsAt, Ms hopLen, float toCornerYd,
+        bool along)
+    {
+        // 10 ms steps: walking adds speed * dt; a hop adds its step spread over its length.
+        float yd = 0.f;
+        for (Ms t = start; t < until; t += Ms(10))
+        {
+            bool inHop = false;
+            for (Ms h : hopsAt)
+                if (t >= h && t < h + hopLen)
+                {
+                    inHop = true;
+                    Jump::Speeds const s = along ? Jump::SpeedsAlong(hopLen, speed, toCornerYd)
+                        : Jump::SpeedsFor(hopLen);
+                    yd += s.stepYd * 10.f / static_cast<float>(hopLen.count());
+                }
+            if (!inHop)
+                yd += speed * 0.01f;
+        }
+        return yd;
+    }
+
+    void TestHopAlong()
+    {
+        Jump::HopParams const p;
+        float const run = 7.f;
+        // The step: run speed x the hop's length, clipped to the next corner; a corner too close hops in place.
+        Jump::Speeds const s = Jump::SpeedsAlong(p.hop, run, 30.f);
+        CHECK_NEAR(s.stepYd, 5.6, 1e-3);
+        CHECK_NEAR(s.xy, run, 1e-3);
+        CHECK_NEAR(s.apexYd, Jump::SpeedsFor(p.hop).apexYd, 1e-4);     // the same jump, moving
+        CHECK_NEAR(Jump::SpeedsAlong(p.hop, run, 3.f).stepYd, 3.0, 1e-4);
+        CHECK(Jump::SpeedsAlong(p.hop, run, 0.3f).stepYd == Jump::SpeedsFor(p.hop).stepYd);
+        CHECK(Jump::SpeedsAlong(p.hop, 0.f, 30.f).stepYd == Jump::SpeedsFor(p.hop).stepYd);
+        CHECK(Jump::HopLostMs(p.hop, 5.6f, run) == Ms(0));
+        CHECK(Jump::HopLostMs(p.hop, 3.5f, run) == Ms(300));
+        CHECK(Jump::HopLostMs(p.hop, 0.15f, 0.f) == p.hop);
+
+        std::vector<Ms> const hops{ Jump::HopAt(Ms(2000), p), Jump::HopAt(Ms(4000), p), Jump::HopAt(Ms(6000), p) };
+        CHECK(hops[0] == Ms(1450) && hops[1] == Ms(3450) && hops[2] == Ms(5450));
+        Ms const start = Ms(1000) + Ms(150);                // the RunOut's registration + startDelay
+        Ms const deadline = Ms(5500) - Ms(300);
+        float const need = 25.f;
+        CHECK(start + Ms(static_cast<std::int64_t>(need / run * 1000.f)) <= deadline);  // the solver's plan fits
+        float const inPlace = Walked(start, deadline, run, hops, p.hop, 100.f, false);
+        float const along = Walked(start, deadline, run, hops, p.hop, 100.f, true);
+        CHECK(inPlace < need);                              // the as-built in-place hop misses the RunOut
+        CHECK(along >= need);
+        // A path of short legs (corners every 4 yd): each hop stops at its corner, the loss stays under 1 s per hop.
+        float const cornered = Walked(start, deadline, run, hops, p.hop, 4.f, true);
+        CHECK(cornered > inPlace);
+        CHECK(Jump::HopLostMs(p.hop, 4.f, run) < Ms(300));
+    }
+
     // A desk model of the brain and the resolve: the brain steps every `tick` ms from a random phase (the waker's
     // fast tick, 100 ms; a loaded realm or a long update, more), launches at its first step at or after HopAt, and the
     // hop's spline flies until it lands. The registry resolves on the first map update at or after the resolve, up to
@@ -241,6 +373,8 @@ int main()
     TestDecide();
     TestSpeeds();
     TestClear();
+    TestLateTick();
+    TestHopAlong();
     TestTimingModel();
     TestDrill();
     return Report("jump_test");

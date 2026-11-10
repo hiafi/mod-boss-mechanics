@@ -427,6 +427,14 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::MissedSoak(MissedSoakMode mode)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("MissedSoak", cur && cur->kind == Kind::Soak))
+            m->missedSoak = mode;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::Count(uint8 n)
     {
         ActiveMechanic const* cur = Get();

@@ -184,6 +184,8 @@ namespace BossMechanics
         uint32 hopsRefused = 0;
         uint32 hopsBlocked = 0;
         uint32 hopsLate = 0;
+        // F-2b (R-2-FW m-2): of `hops`, those launched along the bot's walk (the rest hopped in place).
+        uint32 hopsAlong = 0;
         // BossMechanics.Bots.Debug = 1 only: why candidates and oracle calls failed, summed over the solves.
         Solver::SolveStats debugSolve;
         NavOracleStats debugNav;

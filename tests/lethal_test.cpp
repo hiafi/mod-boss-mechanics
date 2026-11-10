@@ -6,6 +6,7 @@
 
 #include "check.h"
 #include "MechanicJudge.h"
+#include "MechanicLanding.h"
 #include "MechanicSolver.h"
 #include "MechanicViewRules.h"
 #include <chrono>
@@ -82,7 +83,7 @@ namespace
         return h;
     }
 
-    // A 60 yd wall along x, 2 yd wide, its centreline at y = `y` (from x = -30): a street of the Cordon.
+    // A 60 yd wall along x, 2 yd wide, its center line at y = `y` (from x = -30): a street of the Cordon.
     Hazard Wall(std::uint32_t id, float y, bool lethal)
     {
         return MakeHazard(id, Shape::Line(60.f, 2.f), Pose{ -30.f, y, 0.f, 0.f },
@@ -286,6 +287,104 @@ namespace
         CHECK(plan.target.y < 2.f - kMargin);
     }
 
+    // Stratholme F-2b (R-2-FW m-4): a follow pet stands PET_FOLLOW_DIST (2 yd) beside its owner at pi/2. A bot with a
+    // pet keeps a lethal wall the follow distance + 1 yd off, counted as drift so the reduced-margin pass and the
+    // Fallback's lethal screen keep it too. The bot faces along the wall (o = 0): the pet stands 2 yd to its north.
+    void TestPetMargin()
+    {
+        CHECK_NEAR(ViewRules::LethalPetExtraYd(kMargin, true), 2.25, 1e-4);
+        CHECK(ViewRules::LethalPetExtraYd(kMargin, false) == 0.f);
+        CHECK(ViewRules::LethalPetExtraYd(4.f, true) == 0.f);         // a wider margin already holds the pet
+        auto petY = [](Vec3 const& bot) { return bot.y + ViewRules::kPetFollowYd; };
+        for (bool pet : { false, true })
+        {
+            // The view's hazard: the wall's strip is y 2..4; the bot stands 1.5 yd south of it (outside 0.75 yd).
+            Input in = MakeInput({ 0.f, 0.5f, 0.f });
+            Hazard w = Wall(2, 3.f, true);
+            float const extra = ViewRules::LethalPetExtraYd(kMargin, pet);
+            w.driftYd += extra;
+            w.marginYd += extra;
+            in.hazards.push_back(w);
+            StraightOracle oracle;
+            Plan const plan = Solver::Solve(in, oracle);
+            Vec3 const at = plan.outcome == Outcome::Safe ? in.bot : plan.target;
+            if (!pet)
+            {
+                CHECK(plan.outcome == Outcome::Safe);
+                CHECK(petY(at) > 2.f);                  // the as-built bug: a pet would stand in the strip
+                continue;
+            }
+            CHECK(plan.outcome == Outcome::Move);
+            CHECK(at.y <= 2.f - kMargin - extra + 1e-3f);
+            CHECK(petY(at) < 2.f);                      // its pet out of the strip
+            // The reduced-margin pass and the Fallback's lethal screen keep the pet's room.
+            for (Hazard const& h : Solver::ReducedMargins(in).hazards)
+                CHECK(h.marginYd >= extra);
+            Input const lethal = Solver::Detail::LethalOnly(in);
+            CHECK(lethal.hazards.size() == 1 && lethal.hazards[0].marginYd >= ViewRules::kPetFollowYd);
+            CHECK(Solver::Detail::CrossesLethal(lethal, { at, { 0.f, 0.5f, 0.f } }, kNow, kNow + Ms(10000)));
+        }
+    }
+
+    // Stratholme F-2b (R-2-B for X4): the bots' own movement spells. The lock refuses a gap closer whose way to its
+    // landing crosses a lethal wall (a warrior's Charge or Intercept at a boss across the Cordon, Heroic Leap,
+    // Shadowstep), and a mover that lands away (Blink, Disengage) whose way does. The wall's strip is y 2..4.
+    void TestMoverSpells()
+    {
+        Input in = MakeInput({ 0.f, 0.f, 0.f });
+        in.hazards.push_back(Wall(2, 3.f, true));
+        Ms const until = kNow + in.params.horizon;
+        Landing::Dest across;
+        across.center = { 0.f, 15.f, 0.f };    // a boss north of the wall
+        across.combatReachYd = 1.5f;
+        Landing::Dest sameSide;
+        sameSide.center = { 12.f, -6.f, 0.f };
+        sameSide.combatReachYd = 1.5f;
+        for (auto spot : { LockRules::LandingSpot::Reach, LockRules::LandingSpot::Center,
+            LockRules::LandingSpot::Behind, LockRules::LandingSpot::CenterOrReach })
+        {
+            // Its landing is safe (past the wall), its way is not: the as-built landing test lets it through.
+            CHECK(!Landing::LandingUnsafe(in, spot, across, in.bot, kNow, until)
+                || spot == LockRules::LandingSpot::Behind);
+            CHECK(Landing::CloserCrossesLethal(in, spot, across, in.bot, kNow, until));
+            CHECK(!Landing::CloserCrossesLethal(in, spot, sameSide, in.bot, kNow, until));
+        }
+        CHECK(!Landing::CloserCrossesLethal(in, LockRules::LandingSpot::None, across, in.bot, kNow, until));
+        // A plain wall is not policed here (the landing test covers it).
+        Input plain = in;
+        plain.hazards[0].lethal = false;
+        CHECK(!Landing::CloserCrossesLethal(plain, LockRules::LandingSpot::Reach, across, plain.bot, kNow, until));
+
+        // Away movers: the named actions go away from the current target, the spells along or against the facing.
+        CHECK(LockRules::NamedMoverAway("blink back") == LockRules::AwayMove::AwayFromTarget);
+        CHECK(LockRules::NamedMoverAway("disengage") == LockRules::AwayMove::AwayFromTarget);
+        CHECK(LockRules::NamedMoverAway("hunter disengage") == LockRules::AwayMove::AwayFromTarget);
+        CHECK(LockRules::NamedMoverAway("heroic leap") == LockRules::AwayMove::None);
+        CHECK(LockRules::SpellEffectAway(true, false) == LockRules::AwayMove::Forward);
+        CHECK(LockRules::SpellEffectAway(false, true) == LockRules::AwayMove::Back);
+        CHECK(LockRules::SpellEffectAway(false, false) == LockRules::AwayMove::None);
+        Vec3 const southBoss{ 0.f, -5.f, 0.f };     // a hunter's target south of it: Disengage carries it north
+        Vec3 const awayNorth = Landing::AwayPoint(LockRules::AwayMove::AwayFromTarget, in.bot, 0.f, &southBoss);
+        CHECK_NEAR(awayNorth.y, LockRules::kAwayMoverYd, 1e-3);
+        CHECK(Landing::CrossesLethalWall(in, in.bot, awayNorth, kNow, until));
+        Vec3 const northAdd{ 0.f, 1.f, 0.f };       // a target north of it: Blink back carries it south, clear
+        Vec3 const awaySouth = Landing::AwayPoint(LockRules::AwayMove::AwayFromTarget, in.bot, 0.f, &northAdd);
+        CHECK(!Landing::CrossesLethalWall(in, in.bot, awaySouth, kNow, until));
+        // By the spell: facing north (pi/2) Blink crosses, Disengage (back, south) does not; along the wall neither.
+        float const north = 1.5707964f;
+        CHECK(Landing::CrossesLethalWall(in, in.bot, Landing::AwayPoint(LockRules::AwayMove::Forward, in.bot, north,
+            nullptr), kNow, until));
+        CHECK(!Landing::CrossesLethalWall(in, in.bot, Landing::AwayPoint(LockRules::AwayMove::Back, in.bot, north,
+            nullptr), kNow, until));
+        CHECK(!Landing::CrossesLethalWall(in, in.bot, Landing::AwayPoint(LockRules::AwayMove::Forward, in.bot, 0.f,
+            nullptr), kNow, until));
+        // On its target: against the facing.
+        Vec3 const onIt = Landing::AwayPoint(LockRules::AwayMove::AwayFromTarget, in.bot, north, &in.bot);
+        CHECK_NEAR(onIt.y, -LockRules::kAwayMoverYd, 1e-3);
+        // No lethal hazard: never refused.
+        CHECK(!Landing::CrossesLethalWall(plain, plain.bot, awayNorth, kNow, until));
+    }
+
     // Cost: the Fallback's lethal screen walks every candidate's straight line against the lethal walls. Four streets
     // of the Cordon round a bot caught in a burning circle, 26 more circles about: the screen's share of a solve.
     void TestLethalCost()
@@ -346,6 +445,8 @@ int main()
     TestNoPathKeepsOut();
     TestFallbackHoldsRefusesLethal();
     TestLeavingTheBand();
+    TestPetMargin();
+    TestMoverSpells();
     TestLethalCost();
     return Report("lethal_test");
 }

@@ -107,7 +107,8 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `Damage(pct)`, `TankDamage(pct)`, `FlatDamage(n)`, `School(s)`, `Spell(id)`, `Rider(spellId)`, `Weakened()`,
 `WeakenedOncePerPlayer()`, `Persistent(duration, tick)`, `Projectile(speed)`, `ProjectileUnit(unit)`,
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
-`AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`, `Count(n)`,
+`AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`,
+`MissedSoak(mode)`, `Count(n)`,
 `Targets(set)`, `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`,
 `NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `OnHit(fn)`, `OnResolve(fn)`.
 
@@ -123,6 +124,7 @@ M3 options:
 | `DropSpot(rule)` | shape kinds on a player | where its carrier bot takes it before it lands; bots only |
 | `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
 | `Lethal()` | Zone/Frontal, no mine or decoy | bots never plan a way across it ([below](#lethal-stratholme-x4)) |
+| `MissedSoak(mode)` | Soak | when a short pass posts `MissedSoak`: `EveryPass` (default), `OnChange`, `Never` |
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
 
@@ -221,7 +223,11 @@ Rules added in M3 (the pure rules live in `src/MechanicJudge.h`, tested by `test
   first, then the lowest id; a bot's live claim stays on its soak unless it stands inside an earlier one). Soaks
   without it keep the old behavior.
 - **Lasting Stack/Soak** (`Persistent`): `MissedStack` at most once per player per mechanic; `MissedSoak` once per
-  short pass; `onResolve` once per pass. Its bot window is `[resolve, until]`.
+  short pass by default; `onResolve` once per pass. Its bot window is `[resolve, until]`.
+- **`MissedSoak(mode)`** (Soak, Stratholme F-2b; `Judge::PostMissedSoak`): `MissedSoakMode::EveryPass` (default) posts
+  on every short pass; `OnChange` posts on the first short pass and again only after a pass that was full (a lasting
+  telegraph-only Soak: UF4's firelight rings, one line per ring instead of one a second); `Never` posts none (the
+  cost is elsewhere: TC4's thaw Soaks, whose failure is the Shatter). Settable after the commit.
 - **Reservations** (bots, M3 handoff §3.6): `Reserve(id, {bot, point, until, since, facing, slot, claim})` replaces the
   bot's entry; `since` is when its current claim (claim, and a claim's slot) began, kept while that is unchanged;
   `Unreserve(id, bot)`; `ReservationRevision()` changes on a new entry, a changed point (> 0.1 yd), facing, slot or
@@ -1143,13 +1149,23 @@ Mechanic::Zone(me, ZoneSpec{ Anchor(from), Shape::Line(length, 3.f), Anchor(to) 
   `ReducedMargins` (which keeps a lethal one's full margin): a route never crosses it.
 - **Leaving**: a bot inside a lethal hazard's margin band (not the wall) may still step out on its own side (the path
   check's start exemption: never deeper); a path across, or one that ends inside, is refused.
+- **Pets** (F-2b, R-2-FW m-4): the kit strikes pets too, and a follow pet stands 2 yd beside its owner. A bot with a
+  live pet or guardian keeps a lethal hazard `ViewRules::LethalPetExtraYd` farther off (its margin reaches the follow
+  distance + 1 yd, 3 yd), counted as drift so the reduced-margin pass and the Fallback's lethal screen keep it too.
+- **Movement spells** (F-2b, R-2-B for X4): in Idle and Watch the lock refuses a gap closer whose straight way to its
+  landing enters a lethal hazard (`Landing::CloserCrossesLethal`: Charge, Intercept, Heroic Leap, Shadowstep, Death
+  from Above over a wall to a target beyond it), and a mover that lands away whose way does (`Landing::AwayPoint`, 20
+  yd: the named `blink back` / `disengage` away from the current target, a LEAP spell along the facing, a LEAP_BACK
+  one against it). Counted in `landingBlocks`. Escape, Hold and Freeze block every mover anyway. A cast at a position
+  is not judged (its point is the action's own).
 - **Limits**: stock motion (follow, chase) is policed by Watch as before (the re-route, else hold; also while
-  released, as long as the bot's spot is safe); a released bot whose own spot is unsafe is not. The pull grip and
-  pets are the kit's (`LethalWall`).
+  released, as long as the bot's spot is safe); a released bot whose own spot is unsafe is not. The pull grip is the
+  kit's (`LethalWall`).
 
 Tests: `tests/lethal_test.cpp` (LethalFits, LethalTiming, the reduced margin, no grace, the Fallback ranking and its
-paths, NoPath, FallbackHolds, leaving the band, and a cost line: four Cordon streets and 27 circles round a bot,
-about 0.25 ms per Fallback solve on the host, less than the same walls unflagged).
+paths, NoPath, FallbackHolds, leaving the band, a pet's margin, the movement spells, and a cost line: four Cordon
+streets and 27 circles round a bot, about 0.25 ms per Fallback solve on the host, less than the same walls
+unflagged).
 
 ### Jump (Stratholme X3)
 
@@ -1171,43 +1187,56 @@ tick before the cast):
 
 - `Unit::IsFalling()`, the movement flag test: a client's jump sets `MOVEMENTFLAG_FALLING` from take-off to landing
   (never `Player::IsFalling`, a Z test that is false on the way up);
-- a bot's hop still in flight: its brain noted the hop on this Jump (`Registry::NoteHop`) and the bot's spline is still
-  that hop's (same spline id, not finalized). A server-side jump is a parabolic spline, which `Unit::IsFalling` does
-  not see;
+- a bot's hop in flight at the resolve: its brain noted the hop on this Jump (`Registry::NoteHop`) and the bot's
+  spline is still that hop's (same spline id, not finalized), or the registry saw it cover the resolve. A server-side
+  jump is a parabolic spline, which `Unit::IsFalling` does not see;
 - the fallback, `BossMechanics.Bots.Jump.CountPlanned = 1` (off by default): a bot whose brain launched (or tried to
   launch) a hop for this Jump whose planned air time covers the resolve counts as in the air even when the spline was
   cut or refused. A bot that could not hop at all (rooted, stunned, frozen) has no note and is tripped like a player.
+
+**A late resolve tick** (F-2b, R-2-FW m-1): a loaded world can judge the resolve on a map update 300-400 ms late, after
+the hop landed and the walk under it launched a new spline. The sweep is judged at the resolve (`resolveAt`; an early
+detonation at its own moment), not at the late tick, and the registry samples every noted hop on each map update until
+then (`Registry::SampleHops`, pure `Jump::SampleHop`): the air time it saw (same spline id: launch + time passed), or
+its planned landing when a new spline replaced it at or after that landing (less one map update) with no cut seen
+(dead, stunned, rooted, feared, confused, another controlled motion, falling). A hop replaced earlier, or with a cut
+seen, counts only as far as it was seen. The fallback's Planned window reads the resolve too.
 
 **Bots** (`MechanicBotBrain.cpp` StepJump; config `BossMechanics.Bots.Jump.*`):
 
 - The view gives every eligible bot a Jumper task on the resolve: no hazard (the floor is safe for a bot that hops), no
   region, no reservation, no hold (it keeps fighting and moving until the hop).
 - The hop: a parabolic `MotionMaster::MoveJump` in place (a 0.15-0.25 yd step along the bot's facing, which keeps the
-  facing), `HopMs` long (800), timed to land `LandAfterMs` (250) after the resolve, so the bot is in the air when the
-  resolve tick comes (up to a full map update late). A later brain step launches a shorter hop that still lands then
-  (at least 300 ms); at or after the resolve it is too late (`hopsLate`). The apex follows the length like a real jump
-  (about 1.5 yd at 800 ms), capped at 1.6 yd. One hop covers every Jump whose resolve comes before it lands.
-- No hop: outside the swept shape and too far to walk in by the resolve; a HoldStill freezing the bot; rooted,
-  stunned, feared or anything else that makes `CanMove()` false; a vehicle, a transport, a taxi; swimming or flying;
-  already falling (`hopsBlocked`).
-- Before it: the next hop's start (`MechanicBotState::nextHopAt`) caps `leaveBy`, so the waker breaks a cast that would
-  end after it, and the lock refuses a cast-time spell that would (in Idle and Watch too): the hop moves the bot, which
-  stops a cast.
-- During it (under a second): the hop sits in the motion master's controlled slot, over the walk, follow or chase,
-  which resume when it lands. The brain step ends at once, and the lock refuses every action, ours included and
-  released or not, uncounted (`BotBrain::Hopping`): a move or an attack (`MotionMaster::Clear`), a facing spline or a
-  cast's turn would cut it. An Escape's stuck clock and ceiling wait the hop out; the reposition and hold triggers
-  ignore it.
-- `.mech bots` prints `x3 jumps: hops, refused, could not hop, too late`; with `Debug = 1` the registry logs per resolve
-  `Jump <id> (tag <n>): <k> in the air (<a> falling, <b> hop, <c> planned), <g> on the ground, <h> hit`, and the brain
-  each hop and each reason not to.
+  facing), or, for a bot on a live walk (an escape, a follow, a chase), along its walk (F-2b, R-2-FW m-2,
+  `Jump::SpeedsAlong`): toward the walk's next corner as far as its run speed carries it in the hop, clipped to the
+  corner (a corner under 0.5 yd away: in place), never across a lethal hazard (in place then). A player runs and jumps
+  at once; a run of skips costs the bot no ground. `HopMs` long (800), timed to land `LandAfterMs` (250) after the
+  resolve, so the bot is in the air when the resolve tick comes (up to a full map update late). A later brain step
+  launches a shorter hop that still lands then (at least 300 ms); at or after the resolve it is too late (`hopsLate`).
+  The apex follows the length like a real jump (about 1.5 yd at 800 ms), capped at 1.6 yd. One hop covers every Jump
+  whose resolve comes before it lands.
+- No hop: outside the swept shape and too far to walk in by the resolve; a HoldStill freezing the bot; rooted, stunned,
+  feared or anything else that makes `CanMove()` false; a vehicle, a transport, a taxi; swimming or flying; already
+  falling (`hopsBlocked`).
+- Before it: the next hop's start (`MechanicBotState::nextHopAt`; only Jumps whose sweep the bot can be inside by their
+  resolve, F-2b R-2-FW N-3) caps `leaveBy`, so the waker breaks a cast that would end after it, and the lock refuses a
+  cast-time spell that would (in Idle and Watch too): the hop moves the bot, which stops a cast.
+- During it (under a second): the hop sits in the motion master's controlled slot, over the walk, follow or chase, which
+  resume when it lands. The brain step ends at once, and the lock refuses every action, ours included and released or
+  not, uncounted (`BotBrain::Hopping`): a move or an attack (`MotionMaster::Clear`), a facing spline or a cast's turn
+  would cut it. An Escape's stuck clock waits the hop out and its ceiling moves by the ground the hop gave up
+  (`Jump::HopLostMs`: none along the walk, all of it in place); the reposition and hold triggers ignore it.
+- `.mech bots` prints `x3 jumps: hops (along the walk), refused, could not hop, too late`; with `Debug = 1` the registry
+  logs per resolve `Jump <id> (tag <n>): <k> in the air (<a> falling, <b> hop, <c> planned), <g> on the ground, <h>
+  hit`, and the brain each hop and each reason not to.
 
 **Fallback** (ruling 17): if the guided clear shows the hop is not reliable (bots tripped although `.mech bots` shows
 their hops), set `Jump.CountPlanned = 1`: the hop still plays, and a planned one counts.
 
 Drill: `stratholme-jump` (above). Tests: `tests/jump_test.cpp` (the filter, the hop timeline, the MoveJump speeds,
-who counts as in the air, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range,
-and the drill's rows).
+who counts as in the air, a 400 ms late resolve tick, the hop along a walk under three back-to-back skips plus a
+RunOut, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range, and the drill's
+rows).
 
 ### Gate
 

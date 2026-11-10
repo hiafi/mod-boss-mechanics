@@ -1969,18 +1969,35 @@ namespace BossMechanics
             return std::find(st.hopDoneFor.begin(), st.hopDoneFor.end(), id) != st.hopDoneFor.end();
         }
 
+        // Can the bot be inside Jump `id`'s sweep by `resolveAt` (it stands inside, or walks in by then)? A bot that
+        // cannot is never tripped by it, so it does not hop for it.
+        bool HopInReach(Registry const& reg, Player const* bot, uint32 id, Milliseconds resolveAt, Milliseconds now)
+        {
+            ActiveMechanic const* m = reg.Find(id);
+            if (!m)
+                return false;
+            Geo::Pose pose;
+            Shape const shape = reg.EffectiveShape(*m, pose);
+            float const reach = bot->GetSpeed(MOVE_RUN)
+                * static_cast<float>(std::max(Milliseconds(0), resolveAt - now).count()) / 1000.f + 1.f;
+            return Solver::SignedDistance(shape, pose, PosOf(bot)) <= reach;
+        }
+
         // The planned start of the bot's next hop (Solver::kForever: none): its Jumper tasks not hopped for yet whose
-        // resolve is still ahead. The lock keeps cast-time spells that would end after it out, and the waker breaks
-        // a cast that would (leaveBy): a hop moves the bot, which stops a cast.
-        Milliseconds NextHopAt(MechanicBotState const& st, Milliseconds now, BotConfig const& cfg)
+        // resolve is still ahead and whose sweep it can be inside by then (HopInReach, StepJump's own test: F-2b,
+        // R-2-FW N-3). The lock keeps cast-time spells that would end after it out, and the waker breaks a cast that
+        // would (leaveBy): a hop moves the bot, which stops a cast.
+        Milliseconds NextHopAt(Registry const& reg, Player const* bot, MechanicBotState const& st, Milliseconds now,
+            BotConfig const& cfg)
         {
             Milliseconds best = Solver::kForever;
             if (!cfg.jumpEnable)
                 return best;
             Jump::HopParams const p = HopParamsOf(cfg);
             for (BotTask const& t : st.viewInfo.tasks)
-                if (t.role == BotTaskRole::Jumper && t.from > now && !HopDone(st, t.mechanicId))
-                    best = std::min(best, Jump::HopAt(t.from, p));
+                if (t.role == BotTaskRole::Jumper && t.from > now && !HopDone(st, t.mechanicId)
+                    && Jump::HopAt(t.from, p) < best && HopInReach(reg, bot, t.mechanicId, t.from, now))
+                    best = Jump::HopAt(t.from, p);
             return best;
         }
 
@@ -2000,6 +2017,54 @@ namespace BossMechanics
             if (bot->Unit::IsFalling())
                 return "it is falling";
             return nullptr;
+        }
+
+        struct HopAim
+        {
+            Jump::Speeds speeds;
+            float x = 0.f, y = 0.f, z = 0.f;
+            bool along = false;
+        };
+
+        // F-2b (R-2-FW m-2): where the hop goes. A bot on a live walk spline hops along it toward the walk's next
+        // corner (Jump::SpeedsAlong), unless that line enters a lethal hazard (X4: the walk may be a stock follow
+        // that Watch has not re-routed yet); otherwise in place, a step along its facing (Jump::SpeedsFor).
+        HopAim AimHop(Player const* bot, Solver::Input const& in, Jump::Decision const& d, float speed,
+            Milliseconds now)
+        {
+            HopAim a;
+            a.speeds = Jump::SpeedsFor(d.duration);
+            float const o = bot->GetOrientation();
+            a.z = bot->GetPositionZ();
+            Movement::MoveSpline const* ms = bot->movespline;
+            if (ms && ms->Initialized() && !ms->Finalized())
+            {
+                G3D::Vector3 const c = ms->CurrentDestination();
+                float const dx = c.x - bot->GetPositionX();
+                float const dy = c.y - bot->GetPositionY();
+                float const dist = std::sqrt(dx * dx + dy * dy);
+                Jump::Speeds const along = Jump::SpeedsAlong(d.duration, speed, dist);
+                if (along.stepYd > a.speeds.stepYd && dist > 0.f)
+                {
+                    float const z = a.z + (c.z - a.z) * along.stepYd / dist;
+                    Geo::Vec3 const to{ bot->GetPositionX() + dx / dist * along.stepYd,
+                        bot->GetPositionY() + dy / dist * along.stepYd, z };
+                    bool const lethal = Solver::Detail::AnyLethal(in) && Solver::Detail::CrossesLethal(
+                        Solver::Detail::LethalOnly(in), { PosOf(bot), to }, now, d.landAt);
+                    if (!lethal)
+                    {
+                        a.speeds = along;
+                        a.x = to.x;
+                        a.y = to.y;
+                        a.z = to.z;
+                        a.along = true;
+                        return a;
+                    }
+                }
+            }
+            a.x = bot->GetPositionX() + std::cos(o) * a.speeds.stepYd;
+            a.y = bot->GetPositionY() + std::sin(o) * a.speeds.stepYd;
+            return a;
         }
 
         // Stratholme X3 (handoff §7 #6, ST ruling 17): the bot hops in place for its earliest Jump not hopped for
@@ -2024,13 +2089,13 @@ namespace BossMechanics
             {
                 if (BotBrain::Hopping(bot, st, now))
                 {
-                    st.nextHopAt = NextHopAt(st, now, cfg);
+                    st.nextHopAt = NextHopAt(reg, bot, st, now, cfg);
                     return true;
                 }
                 st.hopFor = 0;
                 st.hopSplineId = 0;
             }
-            st.nextHopAt = NextHopAt(st, now, cfg);
+            st.nextHopAt = NextHopAt(reg, bot, st, now, cfg);
             if (!cfg.jumpEnable)
                 return false;
             BotTask const* due = nullptr;
@@ -2046,7 +2111,7 @@ namespace BossMechanics
             uint32 const id = due->mechanicId;
             Milliseconds const resolveAt = due->from;
             st.hopDoneFor.push_back(id);
-            st.nextHopAt = NextHopAt(st, now, cfg);
+            st.nextHopAt = NextHopAt(reg, bot, st, now, cfg);
             if (d.step == Jump::Step::Late)
             {
                 ++st.counters.hopsLate;
@@ -2055,14 +2120,8 @@ namespace BossMechanics
                         (now - Jump::HopAt(resolveAt, p)).count());
                 return false;
             }
-            ActiveMechanic const* m = reg.Find(id);
-            if (!m)
-                return false;
-            Geo::Pose pose;
-            Shape const shape = reg.EffectiveShape(*m, pose);
-            float const reach = bot->GetSpeed(MOVE_RUN) * static_cast<float>((resolveAt - now).count()) / 1000.f + 1.f;
-            if (Solver::SignedDistance(shape, pose, PosOf(bot)) > reach)
-                return false;   // outside the sweep, and it cannot be inside by then
+            if (!HopInReach(reg, bot, id, resolveAt, now))
+                return false;   // gone, or outside the sweep and it cannot be inside by then
             if (char const* why = HopBlocker(botAI, bot, st, now))
             {
                 ++st.counters.hopsBlocked;
@@ -2071,13 +2130,14 @@ namespace BossMechanics
                 return false;
             }
 
-            Jump::Speeds const s = Jump::SpeedsFor(d.duration);
-            float const o = bot->GetOrientation();
-            float const x = bot->GetPositionX() + std::cos(o) * s.stepYd;
-            float const y = bot->GetPositionY() + std::sin(o) * s.stepYd;
             Movement::MoveSpline const* ms = bot->movespline;
+            float const speed = bot->GetSpeed(bot->IsWalking() ? MOVE_WALK : MOVE_RUN);
+            HopAim const aim = AimHop(bot, st.input, d, speed, now);
+            Jump::Speeds const& s = aim.speeds;
+            float const x = aim.x;
+            float const y = aim.y;
             uint32 const before = ms && ms->Initialized() ? ms->GetId() : 0;
-            bot->GetMotionMaster()->MoveJump(x, y, bot->GetPositionZ(), s.xy, s.z);
+            bot->GetMotionMaster()->MoveJump(x, y, aim.z, s.xy, s.z);
             bool const launched = ms && ms->Initialized() && !ms->Finalized() && ms->GetId() != before
                 && bot->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED) == EFFECT_MOTION_TYPE;
             HopNote note;
@@ -2097,7 +2157,7 @@ namespace BossMechanics
                 if (!HopDone(st, c))
                     st.hopDoneFor.push_back(c);
             }
-            st.nextHopAt = NextHopAt(st, now, cfg);
+            st.nextHopAt = NextHopAt(reg, bot, st, now, cfg);
             if (!launched)
             {
                 ++st.counters.hopsRefused;
@@ -2112,16 +2172,20 @@ namespace BossMechanics
             Leaks::OwnSpline(st.leak, note.splineId, x, y);
             // An escape waits the hop out: its stuck clock and its ceiling move past the landing (the walk resumes
             // under the hop when it lands, or the move action sends it again).
+            // F-2b (R-2-FW m-2): a hop along the walk gives up only the ground the corner clips off it.
             if (st.mode == MechanicBotMode::Escape)
             {
                 st.stuckRef = PosOf(bot);
                 st.stuckSince = std::max(st.stuckSince, d.landAt);
                 if (st.escapeCeilingAt < Solver::kForever)
-                    st.escapeCeilingAt += d.duration;
+                    st.escapeCeilingAt += Jump::HopLostMs(d.duration, s.stepYd, speed);
             }
+            if (aim.along)
+                ++st.counters.hopsAlong;
             if (cfg.debug)
-                LOG_INFO(kLog, "Bot {}: hop for Jump {} ({}): {} ms, apex {:.1f} yd, lands {} ms after the resolve",
-                    bot->GetName(), id, IdList(covered), d.duration.count(), s.apexYd, (d.landAt - resolveAt).count());
+                LOG_INFO(kLog, "Bot {}: hop for Jump {} ({}): {} ms, {:.1f} yd {}, apex {:.1f} yd, lands {} ms after "
+                    "the resolve", bot->GetName(), id, IdList(covered), d.duration.count(), s.stepYd,
+                    aim.along ? "along its walk" : "in place", s.apexYd, (d.landAt - resolveAt).count());
             return true;
         }
 
@@ -2421,7 +2485,7 @@ namespace BossMechanics
         bool const frozen = st.mode == MechanicBotMode::Freeze
             || (in.freeze.present && now >= in.freeze.from - in.freeze.settle && now <= in.freeze.to);
         // X3: a cast must end before the next hop starts (the hop would stop it; a frozen bot does not hop).
-        st.leaveBy = frozen ? Solver::kForever : std::min(LeaveByAll(st.input), NextHopAt(st, now, cfg));
+        st.leaveBy = frozen ? Solver::kForever : std::min(LeaveByAll(st.input), NextHopAt(reg, bot, st, now, cfg));
         // Something matters now: keep the waker's fast tick going once the cast ends.
         if (st.mode == MechanicBotMode::Idle)
             st.mode = MechanicBotMode::Watch;

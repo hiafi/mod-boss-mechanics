@@ -418,6 +418,7 @@ namespace BossMechanics
         uint32 splineId = 0;
         Milliseconds from{ 0 };         // launch
         Milliseconds to{ 0 };           // planned landing
+        Jump::HopTrack track;           // F-2b (R-2-FW m-1): what the registry saw of it (Registry::SampleHops)
     };
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -455,6 +456,10 @@ namespace BossMechanics
         uint8 soakCount = 0;            // Soak: bodies needed (at least; extra bodies never fail)
         // Soak, OneClaimPerBot: a player claims at most one live Soak of this tag (the flagged ones only).
         bool oneClaimPerBot = false;
+        // Soak, MissedSoak(mode) (Stratholme F-2b): when a short pass posts the group MissedSoak; soakWasShort is the
+        // previous pass (Judge::PostMissedSoak).
+        MissedSoakMode missedSoak = MissedSoakMode::EveryPass;
+        bool soakWasShort = false;
         uint8 clusterMinOthers = 0;     // Stack Cluster(n): each eligible player needs n others within the radius
         // Frontal/Zone: one player is never hit: the victim of the anchor when the anchor is a creature, else the
         // owner's victim (ExemptVictim).
@@ -854,7 +859,8 @@ namespace BossMechanics
         std::vector<ObjectGuid> EligiblePlayers(ActiveMechanic const& m) const;
         // Jump (Stratholme X3): how `who` counts at the Jump's resolve now (Jump::Clear: falling, a noted hop still in
         // flight, or with countPlanned a noted hop whose planned air time covers now).
-        Jump::ClearBy JumpClearBy(ActiveMechanic const& m, Unit const* who, Milliseconds now, bool countPlanned) const;
+        Jump::ClearBy JumpClearBy(ActiveMechanic const& m, Unit const* who, Milliseconds at, bool countPlanned) const;
+        void SampleHops(ActiveMechanic& m, Milliseconds now);
 
     private:
         Unit* FindUnit(ObjectGuid guid) const;

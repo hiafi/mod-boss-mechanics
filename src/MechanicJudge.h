@@ -31,6 +31,16 @@ namespace BossMechanics
         Jump        // Stratholme X3: a sweep at its resolve that spares whoever is in the air (MechanicJump.h)
     };
 
+    // Stratholme F-2b (R-2-A A-2): when a Soak with fewer bodies inside than its count posts its group MissedSoak
+    // (MechanicRef::MissedSoak). A lasting Soak judges every pass (UF4's firelight rings each second, TC4's thaw
+    // Soaks every 250 ms), so the default floods the ledger with one failure per pass.
+    enum class MissedSoakMode : std::uint8_t
+    {
+        EveryPass,  // the default: every short pass (a one-shot Soak has one pass)
+        OnChange,   // the first short pass, then again only after a pass that was full (a lost soak re-posts)
+        Never       // no MissedSoak at all (a telegraph-only Soak whose cost is elsewhere: TC4's Shatter)
+    };
+
     namespace Judge
     {
         using Ms = std::chrono::milliseconds;
@@ -120,6 +130,21 @@ namespace BossMechanics
         constexpr bool SoakShort(std::uint32_t inside, std::uint32_t count)
         {
             return inside < count;
+        }
+
+        // Stratholme F-2b (R-2-A A-2): does this pass post a MissedSoak? `wasShort` is the mechanic's memory of the
+        // previous pass (false before the first); it is updated here.
+        constexpr bool PostMissedSoak(MissedSoakMode mode, bool isShort, bool& wasShort)
+        {
+            bool const before = wasShort;
+            wasShort = isShort;
+            switch (mode)
+            {
+                case MissedSoakMode::EveryPass: return isShort;
+                case MissedSoakMode::OnChange: return isShort && !before;
+                case MissedSoakMode::Never: return false;
+            }
+            return isShort;
         }
 
         // HoldStill: moved farther than the mechanic's tolerance (B5) from the window-start position.

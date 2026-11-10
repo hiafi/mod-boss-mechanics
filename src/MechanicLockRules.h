@@ -281,6 +281,36 @@ namespace BossMechanics::LockRules
         return MoverLanding::None;     // "blink back", "disengage", "hunter disengage", and every non-mover
     }
 
+    // Stratholme F-2b (R-2-B for X4): a mover that lands away from where it starts, not next to a unit. Bots never
+    // cross a lethal wall (MechanicRef::Lethal), so the lock refuses one whose straight way enters it (Landing::
+    // AwayPoint, Landing::CrossesLethalWall). The playerbots actions face the current target first: "blink back" turns
+    // away from it and Blinks forward, "disengage" turns to it and leaps back; both carry the bot away from the target.
+    // By its spell alone: LEAP goes along the facing (Blink), LEAP_BACK against it (Disengage).
+    enum class AwayMove : uint8_t
+    {
+        None,
+        AwayFromTarget,     // away from the bot's current target (the named actions)
+        Forward,            // along the bot's facing (SPELL_EFFECT_LEAP)
+        Back                // against it (SPELL_EFFECT_LEAP_BACK)
+    };
+
+    // How far an away mover is judged: Blink's 20 yd (Disengage leaps about 15-20).
+    inline constexpr float kAwayMoverYd = 20.f;
+
+    inline AwayMove NamedMoverAway(std::string_view name)
+    {
+        if (name == "blink back" || name == "disengage" || name == "hunter disengage")
+            return AwayMove::AwayFromTarget;
+        return AwayMove::None;
+    }
+
+    inline AwayMove SpellEffectAway(bool leap, bool leapBack)
+    {
+        if (leapBack)
+            return AwayMove::Back;
+        return leap ? AwayMove::Forward : AwayMove::None;
+    }
+
     // WP-F2 (m-5): where a named mover that closes in stops. Heroic Leap and Grappling Hook jump onto the target's
     // position; Blade Rush (203980) and Intervene (3411) are charges; Shadowstep (36554) teleports behind the target;
     // Death from Above picks its own spot near it.

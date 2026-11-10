@@ -1224,6 +1224,19 @@ namespace BossMechanics
         return o;
     }
 
+    // F-2b (R-2-FW m-4): a live pet or guardian of the bot's in the world (a hunter's or warlock's pet, a Feral
+    // Spirit, a summoned guardian); totems and charmed units do not follow it.
+    namespace
+    {
+        bool HasFollowPet(Player const* bot)
+        {
+            for (Unit const* u : bot->m_Controlled)
+                if (u && u->IsInWorld() && u->IsAlive() && (u->IsPet() || u->IsGuardian()) && !u->IsTotem())
+                    return true;
+            return false;
+        }
+    }
+
     BotViewInfo BuildInput(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
         Solver::Input& out, PerceptionFilter const* perceive, BotViewHooks const* hooks)
     {
@@ -1246,6 +1259,9 @@ namespace BossMechanics
         float const slackRad = Geo::DegToRad(opt.facingSlackDeg);
 
         std::unordered_set<uint32> kept;     // hazard ids in the view (lane rects are filtered by them)
+        // F-2b (R-2-FW m-4): a bot with a pet or guardian beside it keeps lethal walls farther off (the kit strikes
+        // pets too).
+        bool const hasPet = HasFollowPet(bot);
         reg.ForEachActive(now - opt.postResolveHold, [&](ActiveMechanic const& m)
         {
             if (!m.IsShapeKind() || m.decoy)    // a decoy is empty floor to the bots (Judge::DecoyFits)
@@ -1276,6 +1292,8 @@ namespace BossMechanics
                     std::max(kMaxDriftLead, opt.movingAnchorRecheck));
                 drift = driftSpeed * std::chrono::duration<float>(lead).count();
             }
+            if (m.lethal)
+                drift += ViewRules::LethalPetExtraYd(opt.safetyMarginYd, hasPet);
             float const margin = opt.safetyMarginYd + drift;
 
             if (Geo::Dist2d(pose.x, pose.y, out.bot.x, out.bot.y) > Geo::Bounds(shape) + margin + reachYd)

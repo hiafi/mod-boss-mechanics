@@ -185,6 +185,19 @@ namespace BossMechanics::ViewRules
         return out;
     }
 
+    // Stratholme F-2b (R-2-FW m-4): the kit's lethal walls strike pets too, and a follow pet stands PET_FOLLOW_DIST
+    // (PetDefines.h, 2 yd) beside its owner at PET_FOLLOW_ANGLE (pi/2): a bot facing along a wall at the 0.75 yd
+    // margin keeps its Imp up to 1.25 yd inside the strip. A bot with a pet or guardian keeps a lethal hazard this
+    // much farther off: its margin reaches the follow distance + 1 yd. The extra counts as drift, so the reduced-margin
+    // pass and the Fallback's lethal screen (Detail::LethalOnly: drift + tightMarginYd) keep it too.
+    constexpr float kPetFollowYd = 2.f;         // PET_FOLLOW_DIST
+    constexpr float kPetLethalSlackYd = 1.f;
+
+    inline float LethalPetExtraYd(float safetyMarginYd, bool hasPet)
+    {
+        return hasPet ? std::max(0.f, kPetFollowYd + kPetLethalSlackYd - safetyMarginYd) : 0.f;
+    }
+
     // Stratholme F-1b (R-1-KIT F2): a Spread/RunOut registered with no warning (resolveAt <= createdAt) and no
     // persistence cannot be dodged: it resolves on the registry's next tick (a script's hit routed through the
     // registry, DungeonKit's RegistryHit: a RunOut measured from the boss, reach + 10 yd, on the tank too). It stays

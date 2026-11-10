@@ -111,16 +111,81 @@ namespace BossMechanics::Jump
         return s;
     }
 
+    // Stratholme F-2b (R-2-FW m-2): a bot walking when its hop launches (a live walk spline: an escape, a follow, a
+    // chase) hops along its way instead of in place, so a run of skips costs it no ground: a player runs and jumps at
+    // once. The hop goes toward the walk's next corner, `toCornerYd` away, as far as `runSpeed` carries it in
+    // `duration`, clipped to the corner (MoveJump is a straight line; past the corner may be a wall). A corner closer
+    // than kMinAlongYd hops in place (SpeedsFor). The apex is SpeedsFor's.
+    constexpr float kMinAlongYd = 0.5f;
+
+    inline Speeds SpeedsAlong(Ms duration, float runSpeed, float toCornerYd)
+    {
+        Speeds s = SpeedsFor(duration);
+        float const t = std::max(0.05f, static_cast<float>(duration.count()) / 1000.f);
+        float const step = std::min(std::max(0.f, runSpeed) * t, toCornerYd);
+        if (!(step >= kMinAlongYd) || step <= s.stepYd)
+            return s;
+        s.stepYd = step;
+        s.xy = step / t;
+        return s;
+    }
+
+    // The ground a hop of `duration` with step `stepYd` gives up against walking it at `runSpeed` (ms): the time the
+    // escape's clock and ceiling wait for it.
+    inline Ms HopLostMs(Ms duration, float stepYd, float runSpeed)
+    {
+        if (runSpeed <= 0.f)
+            return duration;
+        Ms const walked{ static_cast<std::int64_t>(stepYd / runSpeed * 1000.f) };
+        return std::max(Ms(0), duration - walked);
+    }
+
     // How a player inside a Jump counts at its resolve.
     enum class ClearBy : std::uint8_t
     {
         None,       // on the ground: hit
         Falling,    // Unit::IsFalling: a client's jump or fall, a falling spline
-        Hop,        // a bot's hop (Registry::NoteHop) still in flight
+        Hop,        // a bot's hop (Registry::NoteHop) in flight at the resolve
         Planned     // Jump.CountPlanned: the brain launched a hop for this jump whose air time covers the resolve
     };
 
     constexpr std::uint8_t kClearByCount = 4;
+
+    // Stratholme F-2b (R-2-FW m-1): what the registry has seen of one noted hop, sampled on every map update until the
+    // Jump resolves (Registry::SampleHops). The resolve tick can come late (a loaded world: a 300-400 ms map diff):
+    // by then a hop that flew over the resolve has landed and the walk under it launched a new spline, so the bot's
+    // spline alone no longer tells. The track keeps the air time the hop was seen (or known) to cover.
+    // One map update: a hop replaced this close to its planned landing is taken as landed (SampleHop).
+    constexpr Ms kSampleSlack{ 100 };
+
+    struct HopTrack
+    {
+        bool ended = false;     // the hop's spline is no longer the unit's, or it is finalized
+        Ms airTo{ 0 };          // the hop flew from its launch to here (seen, or its planned landing)
+    };
+
+    // One sample of a noted hop (`from` the launch, `to` the planned landing). `same`: the unit's spline is still the
+    // hop's (same id); `finalized` / `passed`: that spline's state and time passed (MoveSpline::_Finalize sets it to
+    // the whole length on landing; an interrupt, a death or a teleport, leaves it where it stopped). Not `same`: a
+    // new spline replaced it since the last sample. It either landed (the walk under it resumed) or was cut (a stun,
+    // a root, a knockback, death); `cut` is what the registry sees now (the unit dead, stunned, rooted, feared,
+    // confused, in another controlled motion, falling). A replacement with no cut seen at or after the planned
+    // landing (less `slack`, one map update) is taken as the landing; before it, as a cut where it was last seen.
+    inline void SampleHop(HopTrack& t, Ms from, Ms to, bool same, bool finalized, Ms passed, bool cut, Ms now,
+        Ms slack)
+    {
+        if (t.ended)
+            return;
+        if (same)
+        {
+            t.airTo = std::max(t.airTo, from + passed);
+            t.ended = finalized;
+            return;
+        }
+        t.ended = true;
+        if (!cut && now + slack >= to)
+            t.airTo = std::max(t.airTo, to);
+    }
 
     struct Air
     {
@@ -128,15 +193,19 @@ namespace BossMechanics::Jump
         bool hopNoted = false;          // the bot's brain noted a hop for this mechanic
         bool hopSplineLive = false;     // ...and the unit's spline is still that hop's (same id, not finalized)
         Ms hopFrom{ 0 }, hopTo{ 0 };    // ...its planned air time (launch, landing)
+        Ms hopAirTo{ 0 };               // ...the air time the registry saw it cover (HopTrack::airTo; 0: none)
     };
 
-    inline ClearBy Clear(Air const& a, Ms now, bool countPlanned)
+    // `at` is the moment the sweep passes: the Jump's resolveAt (a late map update judges the resolve, not the late
+    // tick), or the early detonation's now. A hop counts when its spline is still in flight, or when the air time
+    // the registry saw (HopTrack) covers `at`. The fallback counts a planned air time covering `at`.
+    inline ClearBy Clear(Air const& a, Ms at, bool countPlanned)
     {
         if (a.falling)
             return ClearBy::Falling;
-        if (a.hopNoted && a.hopSplineLive)
+        if (a.hopNoted && (a.hopSplineLive || (at >= a.hopFrom && at <= a.hopAirTo)))
             return ClearBy::Hop;
-        if (countPlanned && a.hopNoted && now >= a.hopFrom && now <= a.hopTo)
+        if (countPlanned && a.hopNoted && at >= a.hopFrom && at <= a.hopTo)
             return ClearBy::Planned;
         return ClearBy::None;
     }

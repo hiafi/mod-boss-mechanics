@@ -124,6 +124,10 @@ namespace BossMechanics
         // Soak: among the live Soaks of this tag that set it too, a bot claims at most one (many small pickups at once,
         // Malicia's souls); without it each Soak ranks its claimers alone and one bot can claim them all.
         MechanicRef& OneClaimPerBot();
+        // Soak (Stratholme F-2b): when a pass with fewer bodies inside than the count posts the group MissedSoak.
+        // Default EveryPass; a lasting Soak judged every pass wants OnChange (the first short pass, then again only
+        // after a full one) or Never (the cost is elsewhere). Judge::PostMissedSoak.
+        MechanicRef& MissedSoak(BossMechanics::MissedSoakMode mode);
         MechanicRef& Count(uint8 n);                    // Spread, RunOut: n random eligible targets
         MechanicRef& Targets(GuidSet const& players);   // Spread, RunOut, HoldStill
         MechanicRef& SelfTrigger(uint32 auraSpell, uint8 minStacks);    // Spread, RunOut

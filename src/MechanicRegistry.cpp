@@ -458,7 +458,31 @@ namespace BossMechanics
             m->hops[bot] = note;
     }
 
-    Jump::ClearBy Registry::JumpClearBy(ActiveMechanic const& m, Unit const* who, Milliseconds now,
+    // F-2b (R-2-FW m-1): every map update until the Jump resolves, what each noted hop's spline shows
+    // (Jump::SampleHop): a late resolve tick then still knows the hop flew over the resolve although it has landed
+    // since and the walk under it launched a new spline.
+    void Registry::SampleHops(ActiveMechanic& m, Milliseconds now)
+    {
+        if (m.hops.empty())
+            return;
+        for (Player* p : CandidatePlayers(m))
+        {
+            auto it = m.hops.find(p->GetGUID());
+            if (it == m.hops.end() || !it->second.splineId)
+                continue;
+            HopNote& h = it->second;
+            Movement::MoveSpline const* ms = p->movespline;
+            bool const same = ms && ms->Initialized() && ms->GetId() == h.splineId;
+            bool const cut = !p->IsAlive()
+                || p->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_ROOT | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING)
+                || p->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED) != NULL_MOTION_TYPE
+                || p->Unit::IsFalling();
+            Jump::SampleHop(h.track, h.from, h.to, same, same && ms->Finalized(),
+                Milliseconds(same ? std::max(0, ms->timePassed()) : 0), cut, now, Jump::kSampleSlack);
+        }
+    }
+
+    Jump::ClearBy Registry::JumpClearBy(ActiveMechanic const& m, Unit const* who, Milliseconds at,
         bool countPlanned) const
     {
         if (!who)
@@ -474,11 +498,12 @@ namespace BossMechanics
             a.hopNoted = true;
             a.hopFrom = h.from;
             a.hopTo = h.to;
+            a.hopAirTo = h.track.airTo;
             Movement::MoveSpline const* ms = who->movespline;
             a.hopSplineLive = h.splineId != 0 && ms && ms->Initialized() && !ms->Finalized()
                 && ms->GetId() == h.splineId;
         }
-        return Jump::Clear(a, now, countPlanned);
+        return Jump::Clear(a, at, countPlanned);
     }
 
     void Registry::EndEncounter(ObjectGuid owner)
@@ -1837,7 +1862,8 @@ namespace BossMechanics
         for (ObjectGuid const& g : missed)
             if (m.failedPlayers.insert(g).second)
                 PlayerFailure(m, g, FailureEvent::Type::MissedStack);
-        if (m.kind == Kind::Soak && Judge::SoakShort(r.count, m.soakCount))
+        if (m.kind == Kind::Soak
+            && Judge::PostMissedSoak(m.missedSoak, Judge::SoakShort(r.count, m.soakCount), m.soakWasShort))
         {
             FailureEvent e;
             e.encounter = m.owner;
@@ -1973,8 +1999,12 @@ namespace BossMechanics
     // the filter, the result and the log agree.
     void Registry::StepJump(ActiveMechanic& m, Milliseconds now)
     {
+        SampleHops(m, now);
         if (now < m.resolveAt && !m.detonateRequested)
             return;
+        // F-2b (R-2-FW m-1): the sweep passes at the resolve, not at the (possibly late) map update that judges it;
+        // an early detonation passes now.
+        Milliseconds const at = std::min(now, m.resolveAt);
         m.detonateRequested = false;
         Geo::Pose pose;
         Shape const shape = EffectiveShape(m, pose);
@@ -1985,7 +2015,7 @@ namespace BossMechanics
         {
             if (!IsEligible(m, p) || !Geo::Contains(shape, pose, ToVec(p->GetPosition())))
                 continue;
-            Jump::ClearBy const c = JumpClearBy(m, p, now, countPlanned);
+            Jump::ClearBy const c = JumpClearBy(m, p, at, countPlanned);
             ++by[static_cast<uint8>(c)];
             if (c != Jump::ClearBy::None)
                 m.jumpCleared.insert(p->GetGUID());
