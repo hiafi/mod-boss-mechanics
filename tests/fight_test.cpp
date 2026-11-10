@@ -288,9 +288,16 @@ namespace
         StraightOracle oracle;
         Solver::Input off = in;
         off.params.regionEdgeArcs = false;
+        off.params.hazardEdgeArcs = false;      // the solver as M4 built it: no pocket pass either
         Solver::Plan const a = Solver::Solve(off, oracle);
         CHECK(a.outcome == Solver::Outcome::Fallback);
         CHECK(a.violated == 1);
+        // Stratholme SWEEP-2 D6: the pocket pass alone (points round the carrier circle's edge) finds a way in too.
+        off.params.hazardEdgeArcs = true;
+        Solver::Plan const pocket = Solver::Solve(off, oracle);
+        CHECK(pocket.outcome == Solver::Outcome::Move);
+        CHECK(pocket.stats.pass == 4);
+        CHECK(Solver::TargetOk(in, pocket.target, pocket.arriveAt, kStart + in.params.horizon));
         Solver::Plan const b = Solver::Solve(in, oracle);
         CHECK(b.outcome == Solver::Outcome::Move);
         CHECK(Dist(b.target, {}) <= 10.f - kMargin + 1e-3f);
@@ -316,10 +323,12 @@ namespace
     // `runout 8 6000 self=205009:3` (3 stacks: nobody else within 8 yd of you); t 2 s: `marker 3` on p2. Judged at
     // 6 s: MissedStack for a stacker beyond 8 yd of the boss, a RunOut hit for anyone within 8 yd of a carrier.
     // `holdViolating`: the WP-Q build's Escape re-check (before STAGE-M4-R-REPORT m-4).
-    std::uint32_t RunRas(bool rangedActor, std::size_t p1, std::size_t p2, bool placeRule, bool holdViolating)
+    std::uint32_t RunRas(bool rangedActor, std::size_t p1, std::size_t p2, bool placeRule, bool holdViolating,
+        bool pocketPass = true)
     {
         Fight f(rangedActor, 9.f);
         f.w.cfg.holdViolating = holdViolating;
+        f.w.cfg.params.hazardEdgeArcs = pocketPass;
         std::array<int, 5> stacks{};
         std::array<bool, 5> published{};
         bool active = false;
@@ -416,6 +425,7 @@ namespace
         std::uint32_t before = 0;
         std::uint32_t after = 0;
         std::uint32_t recheckOnly = 0;
+        std::uint32_t pocketOnly = 0;
         std::uint32_t cases = 0;
         for (bool ranged : { true, false })
             for (std::size_t p1 = 1; p1 < 5; ++p1)
@@ -424,15 +434,17 @@ namespace
                     if (p1 == p2)
                         continue;
                     ++cases;
-                    before += RunRas(ranged, p1, p2, false, true);
+                    before += RunRas(ranged, p1, p2, false, true, false);    // as built: no pocket pass
                     after += RunRas(ranged, p1, p2, true, false);
                     recheckOnly += RunRas(ranged, p1, p2, false, false);
+                    pocketOnly += RunRas(ranged, p1, p2, false, true);
                 }
         std::printf("ras, %u pick pairs: %u failures as built, %u with the placement rule, %u with the m-4 re-check "
-            "alone\n", cases, before, after, recheckOnly);
+            "alone, %u with the pocket pass alone\n", cases, before, after, recheckOnly, pocketOnly);
         CHECK(before > 0);
         CHECK(after == 0);
         CHECK(recheckOnly <= before);
+        CHECK(pocketOnly <= before);    // Stratholme SWEEP-2 D6: the pocket pass finds the stackers a spot as well
     }
 
     // ---- G2: Alexei, Out of bounds with Assembly ----------------------------------------------------------------

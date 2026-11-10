@@ -35,6 +35,7 @@
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace BossMechanics::Solver
@@ -187,6 +188,12 @@ namespace BossMechanics::Solver
         // Entry points round a circle region's edge (M4 WP-Q, Detail::kRegionEdgeArcDeg). Only a test switches them
         // off (to prove they are needed).
         bool regionEdgeArcs = true;
+        // The pocket pass (Stratholme SWEEP-2 D6): when the clean, reduced-margin and grace passes find nothing,
+        // points round the free edge of every circle and donut hazard within reach (Detail::HazardEdgeCandidates)
+        // get one more clean pass before the Fallback, on what the clean pass left of maxPathChecks. It finds the
+        // small safe pocket between overlapping hazards (Jandice's decoy sigil) that the rings around the bot hit
+        // only by chance. A test switches it off to reproduce the solver as it was.
+        bool hazardEdgeArcs = true;
         // M5 CD (C3 B): the spacing term's radius. The barrage's largest circle and Spread are 6 yd, and a donut's
         // ring reaches its hole from 3-8 yd: two ranged bots inside this of each other are both caught by one shot.
         float spacingYd = 6.f;
@@ -280,7 +287,12 @@ namespace BossMechanics::Solver
         // M4 cost (D9): lane-frame candidates in the candidate list, and the oracle path calls spent on them.
         std::uint32_t laneCandidates = 0;
         std::uint32_t lanePathChecks = 0;
-        std::uint8_t pass = 0;              // what found the plan: 1 clean, 2 clean at the reduced margin, 3 grace
+        // Stratholme SWEEP-2 D6: the pocket pass's hazard-edge candidates (after the dedup and the cap) and the
+        // oracle path calls it spent (part of Plan::pathChecks).
+        std::uint32_t pocketCandidates = 0;
+        std::uint32_t pocketPathChecks = 0;
+        std::uint8_t pass = 0;              // what found the plan: 1 clean, 2 clean at the reduced margin, 3 grace,
+                                            // 4 the pocket pass (clean, on the hazards' edges)
 
         void Add(SolveStats const& o)       // sums the counters (not `pass`)
         {
@@ -297,6 +309,8 @@ namespace BossMechanics::Solver
             lethalSkipped += o.lethalSkipped;
             laneCandidates += o.laneCandidates;
             lanePathChecks += o.lanePathChecks;
+            pocketCandidates += o.pocketCandidates;
+            pocketPathChecks += o.pocketPathChecks;
         }
     };
 
@@ -404,6 +418,11 @@ namespace BossMechanics::Solver
         constexpr std::array<float, 6> kRingRadii{ 3.f, 6.f, 9.f, 12.f, 16.f, 20.f };
         constexpr std::uint32_t kRingBearings = 16;
         constexpr std::uint32_t kFallbackScans = 32;     // fallback: straight-line time-inside scans per solve
+        // The pocket pass (Params::hazardEdgeArcs): bearings round each hazard edge (15 deg: 2.6 yd apart on a 10 yd
+        // edge, inside a 2.3 yd pocket's width plus its margins), and at most this many points per solve, nearest
+        // first.
+        constexpr std::uint32_t kPocketBearings = 24;
+        constexpr std::uint32_t kMaxPocketCandidates = 240;
 
         inline float Speed(Input const& in)
         {
@@ -2007,6 +2026,93 @@ namespace BossMechanics::Solver
             if (in.park.present)
                 ParkCandidates(in, out);
         }
+
+        // The pocket pass's candidates (Params::hazardEdgeArcs, Stratholme SWEEP-2 D6): kPocketBearings points round
+        // the free edge of every circle and donut hazard (each pose), marginYd + kExitPushYd outside it (a donut's
+        // hole: inside the hole), within reach of the bot. Exits only leave the hazards that hold the bot, radially,
+        // and the rings around it are blanket; neither aims at a pocket between hazards that do not hold it. Points
+        // within kStepYd of `existing` (the candidates already tried) or of each other are left out; nearest first,
+        // at most kMaxPocketCandidates. Points inside another hazard drop out in the pre-filter, as usual.
+        inline std::vector<Geo::Vec3> HazardEdgeCandidates(Input const& in, float reach,
+            std::vector<Geo::Vec3> const& existing)
+        {
+            Geo::Vec3 const& bot = in.bot;
+            float const r = std::max(reach, kMinReachYd);
+            std::vector<std::pair<float, Geo::Vec3>> pts;
+            auto edge = [&](Geo::Pose const& pose, float radius)
+            {
+                if (radius <= 0.f)
+                    return;
+                Geo::Vec3 const c{ pose.x, pose.y, bot.z };
+                if (Dist2(bot, c) > r + radius)
+                    return;     // no point of this edge is within reach
+                for (std::uint32_t i = 0; i < kPocketBearings; ++i)
+                {
+                    float const b = Geo::kTwoPi * static_cast<float>(i) / static_cast<float>(kPocketBearings);
+                    Geo::Vec3 const p{ c.x + std::cos(b) * radius, c.y + std::sin(b) * radius, bot.z };
+                    float const d = Dist2(bot, p);
+                    if (d <= r)
+                        pts.push_back({ d, p });
+                }
+            };
+            for (Hazard const& h : in.hazards)
+            {
+                if (h.shape.type != ShapeType::Circle && h.shape.type != ShapeType::Donut)
+                    continue;
+                float const push = h.marginYd + kExitPushYd;
+                for (Geo::Pose const& pose : h.poses)
+                {
+                    edge(pose, h.shape.radius + push);
+                    if (h.shape.type == ShapeType::Donut)
+                        edge(pose, h.shape.inner - push);
+                }
+            }
+            std::sort(pts.begin(), pts.end(), [](auto const& a, auto const& b)
+            {
+                if (a.first != b.first)
+                    return a.first < b.first;
+                if (a.second.x != b.second.x)
+                    return a.second.x < b.second.x;
+                return a.second.y < b.second.y;
+            });
+            std::vector<Geo::Vec3> out;
+            if (pts.empty())
+                return out;
+            out.reserve(std::min<std::size_t>(pts.size(), kMaxPocketCandidates));
+            // Dedup on a kStepYd hash grid (3x3 neighborhood), as Candidates does.
+            std::unordered_map<std::int64_t, std::vector<Geo::Vec3>> cells;
+            cells.reserve((existing.size() + kMaxPocketCandidates) * 2);
+            auto key = [](std::int64_t cx, std::int64_t cy) { return (cx << 32) ^ (cy & 0xffffffffll); };
+            auto cellOf = [](float v) { return static_cast<std::int64_t>(std::floor(v / kStepYd)); };
+            auto near = [&](Geo::Vec3 const& p)
+            {
+                std::int64_t const cx = cellOf(p.x);
+                std::int64_t const cy = cellOf(p.y);
+                for (std::int64_t ix = cx - 1; ix <= cx + 1; ++ix)
+                    for (std::int64_t iy = cy - 1; iy <= cy + 1; ++iy)
+                    {
+                        auto it = cells.find(key(ix, iy));
+                        if (it == cells.end())
+                            continue;
+                        for (Geo::Vec3 const& q : it->second)
+                            if (Dist2(q, p) < kStepYd)
+                                return true;
+                    }
+                return false;
+            };
+            for (Geo::Vec3 const& q : existing)
+                cells[key(cellOf(q.x), cellOf(q.y))].push_back(q);
+            for (auto const& [d, p] : pts)
+            {
+                if (out.size() >= kMaxPocketCandidates)
+                    break;
+                if (near(p))
+                    continue;
+                out.push_back(p);
+                cells[key(cellOf(p.x), cellOf(p.y))].push_back(p);
+            }
+            return out;
+        }
     }
 
     // Stratholme X2: the Zones of the drop's enterable preferred spots (`ids`: their mechanic ids) stop being hot at
@@ -2621,7 +2727,8 @@ namespace BossMechanics::Solver
 
         // M4 cost (D9): which candidates the lane frames made (only asked when there is a lane frame).
         std::vector<std::uint8_t> fromLanes;
-        std::vector<Geo::Vec3> const cands = Candidates(in, in.lanes.empty() ? nullptr : &fromLanes);
+        // Not const: the pocket pass appends its points (and takes them off again when it finds nothing).
+        std::vector<Geo::Vec3> cands = Candidates(in, in.lanes.empty() ? nullptr : &fromLanes);
         plan.candidates = static_cast<std::uint32_t>(cands.size());
         for (std::uint8_t f : fromLanes)
             plan.stats.laneCandidates += f;
@@ -2637,28 +2744,30 @@ namespace BossMechanics::Solver
         std::vector<std::int8_t> hazardFree(cands.size(), 0);
         float const rerouteMax = in.reroute && in.role.present
             ? Detail::Dist2(in.bot, in.role.anchor) - in.params.rerouteGainYd : Detail::kInf;
-        for (std::uint32_t i = 0; i < cands.size(); ++i)
+        auto prefilter = [&](std::uint32_t i, std::vector<Detail::Scored>& out, SolveStats& stats)
         {
             if (i == 0 && in.reroute)
-                continue;
+                return;
             Geo::Vec3 const& c = cands[i];
             if (in.reroute && Detail::Dist2(c, in.role.anchor) > rerouteMax)
-                continue;
+                return;
             float const dist = Detail::Dist3(in.bot, c);
             Ms const arrival = moveStart + Detail::TravelMs(dist, speed);
             if (!Detail::HazardsOk(in, c, arrival, horizonEnd))
-                continue;
+                return;
             hazardFree[i] = 1;
             if (!Detail::PlayerKindsOk(in, c, arrival, nullptr))
-                continue;
+                return;
             // F-1b: a moved-to target keeps the hard bounds (the bot's own spot never fails them).
             if (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c))
             {
-                ++plan.stats.outOfBounds;
-                continue;
+                ++stats.outOfBounds;
+                return;
             }
-            kept.push_back({ i, dist, Detail::Score(in, c, dist, arrival, deadline, i == 0), c });
-        }
+            out.push_back({ i, dist, Detail::Score(in, c, dist, arrival, deadline, i == 0), c });
+        };
+        for (std::uint32_t i = 0; i < cands.size(); ++i)
+            prefilter(i, kept, plan.stats);
 
         // Sight (M3, soft; STAGE-M3-R-REPORT M-3): at most Sight::maxChecks rays per solve, the primary point (the
         // heaviest weight: the tank) first. One ray per candidate, best score first, skipping a candidate in the
@@ -2687,8 +2796,10 @@ namespace BossMechanics::Solver
         // around the hazard its straight line crosses, which is not worth up to maxPathChecks more oracle calls.
         // Straight lines that passed the clean full-margin check pass the reduced-margin one too (a smaller region).
         std::vector<std::int8_t> cleanStraight(cands.size(), -1);
-        // pin: the input the paths are checked against (the reduced margins in pass 2); targets use `in`.
-        auto validate = [&](Input const& pin, bool allowGrace, int pass, Plan& out) -> bool
+        // pin: the input the paths are checked against (the reduced margins in pass 2); targets use `in`. `order`:
+        // the pre-filtered candidates in score order; at most `budget` new oracle calls, `used` gets how many ran.
+        auto validate = [&](Input const& pin, bool allowGrace, int pass, Plan& out,
+            std::vector<Detail::Scored> const& order, std::uint32_t budget, std::uint32_t& used) -> bool
         {
             bool found = false;
             float bestScore = 0.f;
@@ -2713,7 +2824,7 @@ namespace BossMechanics::Solver
             };
             for (int tier = 0; tier < 2 && !found; ++tier)
             {
-                for (Detail::Scored const& s : kept)
+                for (Detail::Scored const& s : order)
                 {
                     std::uint32_t const i = s.index;
                     if (found && bestScore <= s.score)
@@ -2721,7 +2832,7 @@ namespace BossMechanics::Solver
                     if (unreachable.count(i))
                         continue;
                     auto it = paths.find(i);
-                    if (it == paths.end() && checks >= in.params.maxPathChecks)
+                    if (it == paths.end() && checks >= budget)
                     {
                         ++out.stats.budgetStops;
                         break;
@@ -2822,29 +2933,86 @@ namespace BossMechanics::Solver
             }
             if (pass == 1)
                 cleanStraight = straight;
+            used = checks;
             return found;
         };
 
         Plan work = plan;
         Input tightIn;
         bool found = false;
-        if (validate(in, false, 1, work))
+        std::uint32_t const budget = in.params.maxPathChecks;
+        std::uint32_t cleanChecks = 0;
+        std::uint32_t otherChecks = 0;
+        if (validate(in, false, 1, work, kept, budget, cleanChecks))
         {
             work.outcome = Outcome::Move;
             work.stats.pass = 1;
             found = true;
         }
-        else if (Detail::ReducedMargins(in, tightIn) && validate(tightIn, false, 2, work))
+        else if (Detail::ReducedMargins(in, tightIn) && validate(tightIn, false, 2, work, kept, budget, otherChecks))
         {
             work.outcome = Outcome::Move;
             work.stats.pass = 2;
             found = true;
         }
-        else if (Detail::AnyGrace(in) && validate(in, true, 3, work))
+        else if (Detail::AnyGrace(in) && validate(in, true, 3, work, kept, budget, otherChecks))
         {
             work.outcome = Outcome::GraceMove;
             work.stats.pass = 3;
             found = true;
+        }
+        // 3b. The pocket pass (Params::hazardEdgeArcs, Stratholme SWEEP-2 D6): nothing clean among the candidates, so
+        // the free edges of the circle and donut hazards within reach (Detail::HazardEdgeCandidates) get one clean
+        // full-margin pass, on what the clean pass left of maxPathChecks (the two share one budget: the oracle calls
+        // of a solve stay within the passes' old bound) and its own maxProbes. A pocket found is a Move (stats.pass
+        // 4). Found nothing, its points are taken off again, so the Fallback ranks exactly what it ranked before (its
+        // probes too). Not for a re-route (no fallback there) or a role solve that holds a safe spot. Its cost per
+        // solve: at most kMaxPocketCandidates pre-filtered points, maxProbes probes and no new oracle call past the
+        // clean pass's budget (stats.pocketCandidates, stats.pocketPathChecks; tests/scholo_shapes_test.cpp times it).
+        if (!found && in.params.hazardEdgeArcs && !in.reroute && !(in.roleSolve && spotOk) && cleanChecks < budget)
+        {
+            std::size_t const before = cands.size();
+            std::vector<Geo::Vec3> const pocket = Detail::HazardEdgeCandidates(in, Detail::ReachRadius(in), cands);
+            if (!pocket.empty())
+            {
+                cands.insert(cands.end(), pocket.begin(), pocket.end());
+                hazardFree.resize(cands.size(), 0);
+                probed.resize(cands.size(), 0);
+                point.insert(point.end(), pocket.begin(), pocket.end());
+                cleanStraight.resize(cands.size(), -1);
+                if (!sightPenalty.empty())
+                    sightPenalty.resize(cands.size(), 0.f);
+                std::vector<Detail::Scored> pocketKept;
+                for (std::uint32_t i = static_cast<std::uint32_t>(before); i < cands.size(); ++i)
+                    prefilter(i, pocketKept, work.stats);
+                std::sort(pocketKept.begin(), pocketKept.end(), Detail::ScoredLess);
+                work.stats.pocketCandidates += static_cast<std::uint32_t>(pocket.size());
+                // The pocket's own maxProbes walkability probes: the pass's points sit on the hazards' far edges, often
+                // off the walkable ground (a wall past the aisle), and a probe drops one for free where an oracle call
+                // would spend the shared budget on it.
+                std::uint32_t const probesBefore = probes;
+                probes = 0;
+                std::uint32_t pocketChecks = 0;
+                if (!pocketKept.empty()
+                    && validate(in, false, 4, work, pocketKept, budget - cleanChecks, pocketChecks))
+                {
+                    work.outcome = Outcome::Move;
+                    work.stats.pass = 4;
+                    found = true;
+                }
+                work.stats.pocketPathChecks += pocketChecks;
+                if (!found)
+                {
+                    cands.resize(before);
+                    hazardFree.resize(before);
+                    probed.resize(before);
+                    point.resize(before);
+                    cleanStraight.resize(before);
+                    if (!sightPenalty.empty())
+                        sightPenalty.resize(before);
+                    probes = probesBefore;
+                }
+            }
         }
         if (in.roleSolve && spotOk && (!found || Detail::Dist3(work.target, in.bot) <= Detail::kMovedYd))
         {
