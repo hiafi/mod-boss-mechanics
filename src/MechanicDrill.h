@@ -352,6 +352,89 @@ namespace BossMechanics::Drill
     constexpr float kSigilEdgeInner = 17.f;
     constexpr float kSigilEdgeOuter = 68.f;
 
+    // ---- Stratholme follow-ups (Stratholme build §3.9, drill `stratholme-followups`) -------------------------------
+    // The chained follow-ups and the hidden lines of the Stratholme build that need a drill before their heroic
+    // sign-off. `.mech test` keys this adds (the runtime is MechanicCommand.cpp):
+    //   cone to=member|target|me       the cone turns to aim at that unit live from its anchor (BZ1: a cone from the
+    //                  boss that tracks a moving player); no follow=1 with it;
+    //   exempt=target  (cone, line, projectile with to=) the unit the shape aims at is not eligible: every other scope
+    //                  member is (Eligibility carriers, AllBut; BZ1: the target leads the cone, nobody else may stand
+    //                  in it).
+    // ST's "hidden flag" (WY9) is the existing `tele=0` (NoTelegraph): the line resolves from a hidden marker and bots
+    // read it like any other.
+
+    // exempt=target: the members that stay eligible (every member but `exempt`, in order).
+    template <class Id>
+    std::vector<Id> AllBut(std::vector<Id> const& members, Id const& exempt)
+    {
+        std::vector<Id> out;
+        out.reserve(members.size());
+        for (Id const& m : members)
+            if (!(m == exempt))
+                out.push_back(m);
+        return out;
+    }
+
+    // Ledger tags of `stratholme-followups` (sweep keys `Zone/<tag>`). The first shapes (1, 3, 5, 7) are reported;
+    // the follow-ups (2, 4, 6, 8) and the hidden Barrage lines (9) are under the sweep's bar (StratBarTag).
+    constexpr std::uint32_t kStratTagRank = 1;          // UF1: the first rank, a 30 x 10 lane on the frame's X axis
+    constexpr std::uint32_t kStratTagCrossing = 2;      // UF1 heroic: the crossing rank, 1.5 s after the first passes
+    constexpr std::uint32_t kStratTagSmash = 3;         // MZ7: circle 8 on the owner, tank included, 2 s
+    constexpr std::uint32_t kStratTagAftershock = 4;    // MZ8 heroic: donut 8 / 14, 1.5 s after the smash
+    constexpr std::uint32_t kStratTagWail = 5;          // BA4: circle 12 on the owner, 3 s
+    constexpr std::uint32_t kStratTagEcho = 6;          // BA5 heroic: donut from 8 yd, 2 s after the wail
+    constexpr std::uint32_t kStratTagSwarm = 7;         // BZ1: a 60 / 30 cone tracking a non-tank, 2.5 s
+    constexpr std::uint32_t kStratTagSecondSwarm = 8;   // BZ1 heroic: a second cone at another non-tank, 1.5 s later
+    constexpr std::uint32_t kStratTagBarrage = 9;       // WY9 heroic: five hidden half-hall lines, 1.5 s apart
+    constexpr std::uint32_t kStratBarTags[] = { 2, 4, 6, 8, 9 };
+
+    inline bool StratBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kStratBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // UF1: the rank and the crossing rank, each a 30 x 10 lane through the center of a fixed frame (frame=30x10 on X,
+    // 10x30 on Y: one lane fills the frame's width, so it is centered, never placed at random).
+    constexpr float kRankLength = 30.f;
+    constexpr float kRankWidth = 10.f;
+    // BA5: the echo is "beyond 8 yd from her". The drill draws it 8 to 32 yd (ratio 0.25, the ladder's smallest step,
+    // so the drawn hole is the real one; the leash is 30 yd). 8 to 60 (ratio 0.13) draws a full disc, no hole shown.
+    constexpr float kEchoInner = 8.f;
+    constexpr float kEchoOuter = 32.f;
+    // WY9: Willey's hall frame is 58 x 20 yd (NAVMESH-REPORT §5 (b)), halves 10 yd wide on either side of its axis.
+    // The drill centers the hall on the owner: each half is a 58 x 10 line from 29 yd behind it, 5 yd off the axis.
+    constexpr float kHallLength = 58.f;
+    constexpr float kHalfWidth = 10.f;
+    constexpr std::uint32_t kBarrageBlasts = 5;
+    constexpr std::uint32_t kBarrageGapMs = 1500;
+    constexpr std::uint32_t kBarrageCallMs = 3000;      // the called order lands 3 s before the first blast
+
+    // ---- Stratholme drop spots (Stratholme build X2, drill `stratholme-drops`) --------------------------------------
+    // The drop spot rule (MechanicDropSpot.h, MechanicRef::DropSpot): a shape a member carries lands where the member's
+    // bot takes it. `.mech test` keys this adds (the runtime is MechanicCommand.cpp):
+    // `drop=<edge,away,behind,prefer,avoid>` on a circle anchor=member or a line to=member, `room=<yd>` (a circle room
+    // around the selected unit, default 30), `dwell=<ms>` (an enterable spot opens this long before the landing,
+    // default 800); `prefer` makes every live persistent circle of the test owner an enterable preferred spot, `avoid`
+    // an avoid point. Ledger tags: the old webs (1, reported: a carrier that steps in for the drop takes a tick), and
+    // the carried shapes' hits on the others (2-5, under the bar).
+    constexpr std::uint32_t kDropTagWeb = 1;            // NE3: two old webs, 5 yd, near the group
+    constexpr std::uint32_t kDropTagGlob = 2;           // NE1: a 5 yd glob onto an old web, else the edge
+    constexpr std::uint32_t kDropTagRot = 3;            // BR3: a 6 yd Death and Decay to the edge, away from the group
+    constexpr std::uint32_t kDropTagLane = 4;           // HM3: a 6 yd lane from the creature to a member
+    constexpr std::uint32_t kDropTagHolyFire = 5;       // GF1: a 4 yd fire behind the group (your facing = its travel)
+    constexpr std::uint32_t kDropBarTags[] = { 2, 3, 4, 5 };
+
+    inline bool DropBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kDropBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -527,6 +610,69 @@ namespace BossMechanics::Drill
                     { 0, "line 40 2000 width=4 at=group away=20 to=member pick=other fix=1 after=with "
                         "school=arcane pct=40 weak=1 tag=10" },
                 } },        // three cycles a run (120 s): the sweep runs scholomance-shapes:3
+            // Stratholme build §3.9: the chained follow-ups and the hidden Barrage, heroic numbers (pct= in the
+            // percent mode). 0 s, The Unforgiven UF1 heroic: a 30 x 10 rank across the frame through the owner (3 s),
+            // then the crossing rank on the other axis through the same center, 1.5 s after the first passes. 7 s,
+            // Malor MZ7 + MZ8 heroic: circle 8 on the owner, tank included (2 s), then a donut 8 / 14 (1.5 s): out,
+            // then back in. 13 s, Baroness BA4 + BA5 heroic: circle 12 on her (3 s), then the echo beyond 8 yd (2 s;
+            // kEchoOuter). 20 s, Balnazzar BZ1 heroic: a 60 degree / 30 yd cone from him aimed at a non-tank and
+            // tracking it (2.5 s), that player exempt, and a second at another non-tank 1.5 s after the first starts.
+            // 25 s, Willey WY9 heroic: five half-hall lines with no marker, all registered at the call, resolving 3 s
+            // later and then 1.5 s apart, 3 on one half and 2 on the other (even cycles L R L L R, odd R L R R L).
+            // MZ7's 1 s stun and BA4/BA5's Terrified are left out (the bar counts hits; no drill rider stuns).
+            { "stratholme-followups", "crossing ranks, smash then aftershock, wail then echo, two tracking cones, the "
+                "hidden Barrage", 40000, false, {
+                    { 0, "lanes 10 3000 count=1 axis=x frame=30x10 school=shadow pct=45 weak=1 tag=1" },
+                    { 0, "lanes 10 1500 count=1 axis=y frame=10x30 after=resolve school=shadow pct=45 weak=1 tag=2" },
+                    { 7000, "circle 8 2000 anchor=target pct=30 weak=1 tag=3" },
+                    { 0, "donut 14 1500 inner=8 anchor=target after=resolve pct=30 weak=1 tag=4" },
+                    { 13000, "circle 12 3000 anchor=target school=shadow pct=50 tag=5" },
+                    { 0, "donut 32 2000 inner=8 anchor=target after=resolve school=shadow pct=40 tag=6" },
+                    { 20000, "cone 30 2500 angle=60 anchor=target to=member pick=nontank exempt=target school=shadow "
+                        "pct=40 tag=7" },
+                    { 1500, "cone 30 2500 angle=60 anchor=target to=member pick=other exempt=target after=with "
+                        "school=shadow pct=40 tag=8" },
+                    { 25000, "line 58 3000 width=10 shift=-29:5 tele=0 cycle=even school=fire pct=30 weak=1 tag=9" },
+                    { 0, "line 58 4500 width=10 shift=-29:-5 tele=0 after=with cycle=even school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 0, "line 58 6000 width=10 shift=-29:5 tele=0 after=with cycle=even school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 0, "line 58 7500 width=10 shift=-29:5 tele=0 after=with cycle=even school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 0, "line 58 9000 width=10 shift=-29:-5 tele=0 after=with cycle=even school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 25000, "line 58 3000 width=10 shift=-29:-5 tele=0 cycle=odd school=fire pct=30 weak=1 tag=9" },
+                    { 0, "line 58 4500 width=10 shift=-29:5 tele=0 after=with cycle=odd school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 0, "line 58 6000 width=10 shift=-29:-5 tele=0 after=with cycle=odd school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 0, "line 58 7500 width=10 shift=-29:-5 tele=0 after=with cycle=odd school=fire pct=30 weak=1 "
+                        "tag=9" },
+                    { 0, "line 58 9000 width=10 shift=-29:5 tele=0 after=with cycle=odd school=fire pct=30 weak=1 "
+                        "tag=9" },
+                } },        // three cycles a run (120 s): the sweep runs stratholme-followups:3
+            // Stratholme build X2: the drop spot rule (heroic numbers, pct= in the percent mode). 0 s: two old webs
+            // (Nerub'enkan NE3), 5 yd persistent circles 10 yd off the group. 2 s, NE1: a 5 yd glob on a non-tank
+            // (3 s), carried onto an old web (it may step in 0.8 s before the landing), else to the room's edge away
+            // from the group. 10 s, the Baron BR3: a 6 yd Death and Decay on a non-tank (3 s) to the edge, away from
+            // the group. 16 s, the Ultimatum HM3 (S15's rule: Edge + Away + avoid the bone piles, the old webs
+            // standing in for them): a 6 yd lane from the creature to a non-tank (3 s), the target exempt, missing
+            // everyone else. 22 s, Galford GF1: a 4 yd Holy Fire on a non-tank (6 s), behind the group (your
+            // facing is its travel) and at the edge. The room is a 25 yd circle around the creature.
+            { "stratholme-drops", "drop spots: a glob onto an old web, rot to the edge, a lane missing the group, "
+                "holy fire behind it", 30000, false, {
+                    { 0, "circle 5 1000 at=group away=10 persist=24000 tick=1000 school=nature pct=2 tag=1" },
+                    { 0, "circle 5 1000 at=group away=10 persist=24000 tick=1000 after=with school=nature pct=2 "
+                        "tag=1" },
+                    { 2000, "circle 5 3000 anchor=member pick=nontank drop=prefer,edge,away room=25 dwell=800 "
+                        "school=nature pct=30 weak=1 tag=2" },
+                    { 10000, "circle 6 3000 anchor=member pick=nontank drop=edge,away room=25 school=shadow pct=25 "
+                        "weak=1 tag=3" },
+                    { 16000, "line 30 3000 width=6 anchor=target to=member pick=nontank exempt=target "
+                        "drop=edge,away,avoid room=25 pct=50 weak=1 tag=4" },
+                    { 22000, "circle 4 6000 anchor=member pick=nontank drop=behind,edge room=25 school=holy pct=30 "
+                        "weak=1 tag=5" },
+                }, 4 },     // four cycles a run (120 s): the sweep runs stratholme-drops:4
         };
         return drills;
     }

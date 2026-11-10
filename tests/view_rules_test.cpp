@@ -401,8 +401,23 @@ namespace
     }
 }
 
+namespace
+{
+    // F-1b (R-1-KIT F2): a Spread/RunOut with no warning and no persistence is a script's hit (the kit's RegistryHit),
+    // not a job: left out of the view. A warned one, or a persistent one (a continuous threat), stays.
+    void TestUndodgeable()
+    {
+        CHECK(ViewRules::Undodgeable(kNow, kNow, false));
+        CHECK(ViewRules::Undodgeable(kNow, kNow - Ms(1), false));
+        CHECK(!ViewRules::Undodgeable(kNow, kNow + Ms(1), false));
+        CHECK(!ViewRules::Undodgeable(kNow, kNow + Ms(4000), false));   // Barthilas's Contagion RunOut
+        CHECK(!ViewRules::Undodgeable(kNow, kNow, true));
+    }
+}
+
 int main()
 {
+    TestUndodgeable();
     TestTankFacingShapes();
     TestLookAwayBothSides();
     TestInRadiusAndMargins();

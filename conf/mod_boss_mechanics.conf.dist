@@ -50,13 +50,14 @@ BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
 #                     the open world and the sim use the owner's level. Empty: no pins.
 #        Example:     "36:20 36h:60 289:60"
 #        Default:     "36:20 36h:60" - Deadmines normal is level 20, heroic level 60 (the code's fallback for a
-#                     missing or malformed value). This file ships "36:20 36h:60 33:20 33h:60 289:60 289h:60":
+#                     missing or malformed value). This file ships
+#                     "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60":
 #                     Shadowfang Keep normal is level 20 too (its level 21 bosses read the level 20 row), heroic
-#                     level 60; Scholomance is level 60 on both difficulties (its bosses span levels 58 to 62, so
-#                     the pin keeps them all on the level 60 rows).
+#                     level 60; Scholomance and Stratholme are level 60 on both difficulties (their bosses span
+#                     levels 57 to 62, so the pin keeps them all on the level 60 rows).
 #
 
-BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60"
+BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60"
 
 #
 #    BossMechanics.Telegraph.FollowMode

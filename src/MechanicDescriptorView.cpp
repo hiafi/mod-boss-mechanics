@@ -192,6 +192,19 @@ namespace BossMechanics
             if (nearest >= 0.f)
                 f.near.emplace_back(entry, nearest);
         }
+        // Stratholme X1 (NearPlayer): the nearest other live player on the unit's map within the largest range asked.
+        if (view.refs.playerRange > 0.f && unit->IsInWorld())
+            if (Map* map = unit->GetMap())
+                for (MapReference const& ref : map->GetPlayers())
+                {
+                    Player const* p = ref.GetSource();
+                    if (!p || p == unit || !p->IsAlive() || !p->IsInWorld())
+                        continue;
+                    float const d = Desc::NearPlayerDistance(p->GetPositionX() - unit->GetPositionX(),
+                        p->GetPositionY() - unit->GetPositionY(), p->GetPositionZ() - unit->GetPositionZ());
+                    if (d >= 0.f && d <= view.refs.playerRange && (f.nearestPlayerYd < 0.f || d < f.nearestPlayerYd))
+                        f.nearestPlayerYd = d;
+                }
         for (uint32 id : view.refs.zones)
             if (ActiveMechanic const* m = reg.Find(id))
                 if (!m->cancelled && !m->finished && reg.ContainsUnit(*m, unit))

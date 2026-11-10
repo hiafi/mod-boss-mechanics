@@ -160,6 +160,27 @@ namespace BossMechanics::ViewRules
         return s.source == SpotSource::Reservation || s.source == SpotSource::HumanNow;
     }
 
+    // Stratholme F-1b (R-1-BM M-1): the window of another carrier's soft blocker (Input::softHazards, its live spot).
+    // A carrier keyed on an aura (SelfTrigger: Barthilas's Contagion, re-registered every 2 s with a 4 s warning) is a
+    // threat for as long as it carries the aura, not only in the RunOut's resolve window, which is always 2-4 s
+    // ahead: the blocker is hot from now to the end of that window. Any other carrier keeps its own window (Ras's
+    // rolling RunOut, Maleki's curse: the danger is the landing).
+    inline Solver::Timing SoftCarrierTiming(Solver::Timing const& window, Ms now, bool continuous)
+    {
+        if (!continuous)
+            return window;
+        return Solver::MakeInterval(now, std::max(now, std::max(window.from, window.to)));
+    }
+
+    // Stratholme F-1b (R-1-KIT F2): a Spread/RunOut registered with no warning (resolveAt <= createdAt) and no
+    // persistence cannot be dodged: it resolves on the registry's next tick (a script's hit routed through the
+    // registry, DungeonKit's RegistryHit: a RunOut measured from the boss, reach + 10 yd, on the tank too). It stays
+    // out of the bot view: a bot told to leave a 20-40 yd circle round the boss would walk the tank off it.
+    inline bool Undodgeable(Ms createdAt, Ms resolveAt, bool persistent)
+    {
+        return !persistent && resolveAt <= createdAt;
+    }
+
     // Spread/RunOut separation, the avoider's side (§3.2): the carrier's circle at its planned spot, as a hazard.
     // The spot's slack widens the margin and counts as drift (the reduced-margin pass keeps it).
     inline Solver::Hazard CarrierHazard(std::uint32_t id, float radius, float zTolerance, Spot const& carrier,

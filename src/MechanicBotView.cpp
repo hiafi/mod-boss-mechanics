@@ -51,6 +51,8 @@ namespace BossMechanics
         constexpr Milliseconds kMaxDriftLead{ 1000 };
         // Hazards whose shape lies farther than (run speed x horizon) + this from the bot are left out.
         constexpr float kReachSlackYd = 5.f;
+        // Stratholme X1: a walking carrier's soft circle (Input::softHazards) is widened by this (its next steps).
+        constexpr float kLiveCarrierSlackYd = 0.5f;
         // Self-check: windows may differ by this much (rounding).
         constexpr Milliseconds kSelfCheckToleranceMs{ 1 };
 
@@ -316,6 +318,8 @@ namespace BossMechanics
                 {
                     if (m.decoy)
                         return;     // a decoy is empty floor to the bots (Judge::DecoyFits)
+                    if (m.bounds)
+                        BoundsOf(m, *m.bounds);
                     if (m.IsShapeKind())
                     {
                         ShapeTasks(m);
@@ -354,6 +358,8 @@ namespace BossMechanics
                 });
                 for (Solver::Hazard& h : extra)
                     _in.hazards.push_back(std::move(h));
+                // X2: the drop's enterable spots open for the carrier (Solver::LiftEnterable).
+                Solver::LiftEnterable(_in, _dropEnterable);
             }
 
         private:
@@ -579,6 +585,98 @@ namespace BossMechanics
                 c.allies = AllyIndices(m, Eligible(m), exempt);
                 _in.carried.push_back(std::move(c));
                 AddTask(m, BotTaskRole::Carrier, firstAt, std::max(firstAt, TimingEndOf(_in.carried.back().timing)));
+                if (m.dropSpot)
+                    DropOf(m, _in.carried.back());
+            }
+
+            // Stratholme X2: the drop spot rule of a shape the bot carries (the earliest landing when it carries
+            // several), as solver input (MechanicDropSpot.h).
+            void DropOf(ActiveMechanic const& m, Solver::Carried const& c)
+            {
+                DropSpotRule const& rule = *m.dropSpot;
+                Milliseconds const landAt = c.timing.from;
+                if (_in.drop.present && _in.drop.landAt <= landAt)
+                    return;
+                Solver::Drop d;
+                d.present = true;
+                d.id = m.id;
+                d.landAt = landAt;
+                d.enterAt = landAt - rule.maxDwell;
+                if (rule.roomPolygon.size() >= 3)
+                    for (Position const& p : rule.roomPolygon)
+                        d.room.push_back(ToVec(p));
+                d.roomCenter = ToVec(rule.roomCenter);
+                d.roomRadius = rule.roomRadius;
+                // F-1b: the hard bounds; a single area doubles as the room when the rule names none.
+                if (rule.bounds)
+                {
+                    AddBounds(*rule.bounds);
+                    if (d.room.empty() && d.roomRadius <= 0.f && rule.bounds->areas.size() == 1)
+                    {
+                        SpotBounds::Area const& a = rule.bounds->areas.front();
+                        for (Position const& p : a.polygon)
+                            d.room.push_back(ToVec(p));
+                        if (d.room.size() < 3)
+                        {
+                            d.room.clear();
+                            d.roomCenter = ToVec(a.center);
+                            d.roomRadius = a.radius;
+                        }
+                    }
+                }
+                d.edge = rule.edge;
+                d.away = rule.away;
+                d.behind = rule.behind;
+                d.travelFacing = rule.travelFacing;
+                if (Unit const* owner = ObjectAccessor::GetUnit(*_bot, m.owner); owner && rule.maxRangeYd > 0.f)
+                {
+                    d.maxRangeYd = rule.maxRangeYd;
+                    d.rangeFrom = ToVec(owner->GetPosition());
+                }
+                _dropEnterable.clear();
+                for (DropSpotRule::Circle const& pc : rule.prefer)
+                {
+                    d.prefer.push_back({ ToVec(pc.center), pc.radius, pc.enterable != 0 });
+                    if (pc.enterable)
+                        _dropEnterable.push_back(pc.enterable);
+                }
+                for (DropSpotRule::Circle const& ac : rule.avoid)
+                    d.avoid.push_back({ ToVec(ac.center), ac.radius, false });
+                _in.drop = std::move(d);
+            }
+
+            // Stratholme F-1b: a mechanic's hard bounds (MechanicRef::Within) hold for this bot while the mechanic's
+            // owner fights it (another fight's room on the same map never binds it).
+            void BoundsOf(ActiveMechanic const& m, SpotBounds const& b)
+            {
+                Unit const* owner = ObjectAccessor::GetUnit(*_bot, m.owner);
+                if (!owner || !owner->IsAlive() || !_bot->IsInCombatWith(owner))
+                    return;
+                AddBounds(b);
+            }
+
+            void AddBounds(SpotBounds const& b)
+            {
+                Solver::Bounds out;
+                for (SpotBounds::Area const& a : b.areas)
+                {
+                    Solver::BoundsArea area;
+                    if (a.polygon.size() >= 3)
+                        for (Position const& p : a.polygon)
+                            area.polygon.push_back(ToVec(p));
+                    area.center = ToVec(a.center);
+                    area.radius = a.radius;
+                    area.zMin = a.zMin;
+                    area.zMax = a.zMax;
+                    out.areas.push_back(std::move(area));
+                }
+                for (SpotBounds::KeepOutCircle const& k : b.keepOut)
+                    out.keepOut.push_back({ ToVec(k.center), k.radius, false });
+                out.pathInside = b.pathInside;
+                for (Solver::Bounds const& have : _in.bounds)
+                    if (DropSpot::SameBounds(have, out))
+                        return;
+                _in.bounds.push_back(std::move(out));
             }
 
             static Milliseconds TimingEndOf(Solver::Timing const& t)
@@ -656,6 +754,9 @@ namespace BossMechanics
 
             void Carriers(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
             {
+                // F-1b (R-1-KIT F2): a hit with no warning (DungeonKit's RegistryHit) is no job for anyone.
+                if (ViewRules::Undodgeable(m.createdAt, m.resolveAt, m.persist.has_value()))
+                    return;
                 std::vector<ObjectGuid> const& eligible = Eligible(m);
                 bool const meEligible = Has(eligible, _self);
                 if (m.selfTrigger.auraSpell && meEligible
@@ -722,6 +823,18 @@ namespace BossMechanics
                         if (_opt.debug && !spot->Planned())
                             _info.selfCheckMismatches += RegionSelfCheck(_reg, m, Shape::Circle(r),
                                 { cu->GetPositionX(), cu->GetPositionY(), cu->GetPositionZ(), 0.f }, _self, false);
+                    }
+                    // Stratholme X1: a bot carrier also at its live spot, as a soft blocker for the route search (it
+                    // may still walk to its planned spot, through the others' way; a human's live spot is the hard
+                    // circle above). F-1b (R-1-BM M-1): an aura-keyed carrier's blocker is hot from now on.
+                    if (!spot || spot->source != ViewRules::SpotSource::HumanNow)
+                    {
+                        ViewRules::Spot live;
+                        live.p = { cu->GetPositionX(), cu->GetPositionY(), cu->GetPositionZ() };
+                        live.slackYd = kLiveCarrierSlackYd;
+                        live.source = ViewRules::SpotSource::BotNow;
+                        _in.softHazards.push_back(ViewRules::CarrierHazard(m.id, r, zTol, live, _opt.safetyMarginYd,
+                            ViewRules::SoftCarrierTiming(timing, _now, m.selfTrigger.auraSpell != 0)));
                     }
                 }
                 if (!meCarrier)
@@ -1043,6 +1156,7 @@ namespace BossMechanics
             uint32 _eligibleFor = 0;
             std::vector<ObjectGuid> _eligible;
             std::unordered_map<uint32, std::vector<uint64>> _groupClaims;   // OneClaimPerBot: mechanic id -> claimers
+            std::vector<uint32> _dropEnterable;     // X2: the drop's enterable spots (their Zones' mechanic ids)
         };
 
         void RunPlayerPass(Registry const& reg, Player const* bot, Milliseconds now, BotViewOptions const& opt,
@@ -1050,11 +1164,14 @@ namespace BossMechanics
             bool countHidden)
         {
             std::erase_if(in.hazards, [](Solver::Hazard const& h) { return h.synthetic; });
+            in.softHazards.clear();
             in.regions.clear();
             in.allies.clear();
             in.carried.clear();
             in.far = Solver::FarFrom();
             in.freeze = Solver::Freeze();
+            in.drop = Solver::Drop();
+            in.bounds.clear();
             in.slot = 0;
             in.slotCount = 0;
             info.tasks.clear();
@@ -1465,7 +1582,7 @@ namespace BossMechanics
     std::string FormatSolveStats(Solver::SolveStats const& s)
     {
         return Acore::StringFormat("kept {}, probes {} (off {}, snapped {}), no path {}, end unsafe {}, crosses start "
-            "{} / other {}, budget stops {}", s.kept, s.probes, s.offMesh, s.snapped, s.noPath, s.endUnsafe,
-            s.crossStart, s.crossOther, s.budgetStops);
+            "{} / other {}, budget stops {}, out of bounds {}", s.kept, s.probes, s.offMesh, s.snapped, s.noPath,
+            s.endUnsafe, s.crossStart, s.crossOther, s.budgetStops, s.outOfBounds);
     }
 }

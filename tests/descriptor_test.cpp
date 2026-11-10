@@ -2,7 +2,8 @@
 // §5, WP-D): conditions, interrupt ordering and the do-not-kick rule, cast notes and due times, the overload hold
 // timeline, kicker alternation, kick claims and their expiry, the dispel pick with urgent and deadline entries,
 // purges, the target pick (priority, who, conditions, kill together, GUID follow, break-out order), the ignore
-// filter and turned players (SFK F1: hostilePlayerAuras, TargetEntry::HostilePlayers). Build: tests/run.sh.
+// filter and turned players (SFK F1: hostilePlayerAuras, TargetEntry::HostilePlayers); Stratholme X1: NearPlayer,
+// AllOf and Not conditions and DispelEntry::when (held auras, Maleki's spacing rule). Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicDescriptor.h"
@@ -786,6 +787,114 @@ namespace
         CHECK(PickedGuid(moon, c, BOSS, kMelee, 0, moonCtx) == 20);
     }
 
+    // ---- Stratholme X1: NearPlayer, AllOf, Not, DispelEntry::when -----------------------------------------------
+
+    void TestCombinedConditions()
+    {
+        Context ctx;
+        ctx.phase = 3;
+        UnitFacts u = Facts(10, 0);
+        u.player = true;
+        u.auras = { 7001 };
+
+        // NearPlayer reads the nearest other live player the view found within the asked range (-1: none).
+        CHECK(!Holds(Condition::NearPlayer(8.f), u, ctx));
+        u.nearestPlayerYd = 7.5f;
+        CHECK(Holds(Condition::NearPlayer(8.f), u, ctx));
+        CHECK(Holds(Condition::NearPlayer(7.5f), u, ctx));
+        CHECK(!Holds(Condition::NearPlayer(7.f), u, ctx));
+        CHECK(!Holds(Condition::Not(Condition::NearPlayer(8.f)), u, ctx));
+        CHECK(Holds(Condition::Not(Condition::NearPlayer(5.f)), u, ctx));
+
+        // F-1b (R-1-BM m-1): the view measures on the plane within 6 yd of height, like Maleki's 8 yd Shatter circle.
+        // An ally 7 yd away and 4.5 yd lower (the walkway beside his plaza) is near; one on another floor is not.
+        CHECK_NEAR(Desc::NearPlayerDistance(7.f, 0.f, -4.5f), 7.f, 1e-4);
+        CHECK(Desc::NearPlayerDistance(7.f, 0.f, -4.5f) <= 8.f);
+        CHECK(std::sqrt(7.f * 7.f + 4.5f * 4.5f) > 8.f);         // the old 3D distance read "not near"
+        CHECK_NEAR(Desc::NearPlayerDistance(3.f, 4.f, 6.f), 5.f, 1e-4);
+        CHECK(Desc::NearPlayerDistance(3.f, 4.f, 6.5f) < 0.f);
+        CHECK(Desc::NearPlayerDistance(3.f, 4.f, -6.5f) < 0.f);
+
+        // AllOf: every one; none holds vacuously. Not of nothing holds.
+        CHECK(Holds(Condition::AllOf({}), u, ctx));
+        CHECK(Holds(Condition::AllOf({ Condition::HasAura(7001), Condition::Phase(3) }), u, ctx));
+        CHECK(!Holds(Condition::AllOf({ Condition::HasAura(7001), Condition::Phase(2) }), u, ctx));
+        CHECK(Holds(Condition::Not(Condition::AllOf({ Condition::HasAura(7002), Condition::Phase(3) })), u, ctx));
+        Condition empty = Condition::Not(Condition::Always());
+        CHECK(!Holds(empty, u, ctx));
+        empty.all.clear();
+        CHECK(Holds(empty, u, ctx));
+
+        // A nested Custom result is keyed by the nested condition's own address.
+        Condition nested = Condition::AllOf({ Condition::Not(Condition::Custom([](Unit const*) { return false; })) });
+        Condition const* inner = &nested.all.front().all.front();
+        CHECK(Holds(nested, u, ctx));       // a Custom not evaluated does not hold, so Not(it) holds
+        u.custom.emplace_back(inner, true);
+        CHECK(!Holds(nested, u, ctx));
+
+        // References walk the dispel entries and the nested conditions.
+        Descriptor d;
+        d.dispels.push_back(DispelEntry(500, 2, false, Ms(0), Condition::AllOf({
+            Condition::Not(Condition::NearPlayer(8.f)), Condition::LacksAura(7003), nested })));
+        d.interrupts.emplace_back(1, 2, 1, Ms(0), Condition::NearPlayer(12.f));
+        References const r = Referenced(d);
+        CHECK(r.playerRange == 12.f);
+        CHECK(Contains(r.auras, 7003u));
+        CHECK(r.custom.size() == 1u);
+        CHECK(r.custom.size() == 1u && r.custom.front() == &d.dispels[0].when.all[2].all.front().all.front());
+        Descriptor plain;
+        plain.dispels.emplace_back(500, 1);
+        CHECK(Referenced(plain).playerRange == 0.f);
+        CHECK(Referenced(plain).custom.empty());
+    }
+
+    void TestDispelWhen()
+    {
+        constexpr std::uint32_t ICY = 900;
+        constexpr std::uint32_t EYE_PHASE = 5;
+        // Maleki: dispel Icy Death only when no ally is within 8 yd and not during the Eye.
+        Descriptor d;
+        d.dispels.push_back(DispelEntry(ICY, 2, false, Ms(0), Condition::AllOf({
+            Condition::Not(Condition::NearPlayer(8.f)), Condition::Not(Condition::Phase(EYE_PHASE)) })));
+        d.dispels.push_back(DispelEntry(901, 1));   // an unconditional entry
+        DispelEntry const& icy = d.dispels[0];
+
+        Context ctx;
+        UnitFacts carrier = Facts(20, 0);
+        carrier.player = true;
+        CHECK(!DispelHeld(icy, carrier, ctx));      // alone, no Eye
+        carrier.nearestPlayerYd = 6.f;
+        CHECK(DispelHeld(icy, carrier, ctx));       // an ally within 8 yd
+        carrier.nearestPlayerYd = -1.f;
+        ctx.phase = EYE_PHASE;
+        CHECK(DispelHeld(icy, carrier, ctx));       // during the Eye
+        ctx.phase = 0;
+        CHECK(!DispelHeld(d.dispels[1], carrier, ctx));
+
+        // OrderDispels leaves a held affliction out (urgent or not); the rest keep their order.
+        std::vector<Affliction> afflictions = {
+            { 20, ICY, ms(9000), 3, true },
+            { 21, ICY, ms(9000), 3, false },
+            { 22, 901, ms(2000), 1, false },
+        };
+        std::vector<DispelPick> picks = OrderDispels(d, afflictions);
+        CHECK(picks.size() == 2u);
+        CHECK(picks.size() == 2u && picks[0].affliction == 1u && picks[1].affliction == 2u);
+        d.dispels[0].urgent = true;
+        picks = OrderDispels(d, afflictions, true);
+        CHECK(picks.size() == 1u && picks[0].affliction == 1u);
+        afflictions[1].held = true;
+        CHECK(OrderDispels(d, afflictions, true).empty());
+        CHECK(OrderDispels(d, afflictions).size() == 1u);
+
+        // Unconditioned entries keep the M5 behavior: Always never holds an aura back.
+        DispelEntry plain(ICY, 1);
+        CHECK(plain.when.kind == CondKind::Always);
+        UnitFacts crowded = Facts(23, 0);
+        crowded.nearestPlayerYd = 1.f;
+        CHECK(!DispelHeld(plain, crowded, Context()));
+    }
+
     void TestPresets()
     {
         Preset const* none = FindPreset("none");
@@ -823,6 +932,8 @@ int main()
     TestKillTogether();
     TestIgnore();
     TestHostilePlayers();
+    TestCombinedConditions();
+    TestDispelWhen();
     TestPresets();
     return Report("descriptor_test");
 }

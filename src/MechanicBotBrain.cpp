@@ -88,6 +88,8 @@ namespace BossMechanics
         constexpr Milliseconds kTankCheckEvery{ 500 };
         // Healer line of sight to the tank: one ray this often (Watch, in combat); out of sight -> a role solve.
         constexpr Milliseconds kSightCheckEvery{ 1000 };
+        // Stratholme X2: an enterable drop spot is re-tried this often from its opening until the bot stands in it.
+        constexpr Milliseconds kDropRecheck{ 250 };
         // ...and after a role solve that stayed (nothing in sight worth the walk), no new one for this long.
         constexpr Milliseconds kSightBackoff{ 5000 };
         // Parking / drag-out hold: renewed every step while the park input holds.
@@ -898,6 +900,11 @@ namespace BossMechanics
             }
             st.lastSolveAt = now;
             st.solveBypass = false;
+            if (in.drop.present && !in.reroute)
+            {
+                st.dropSolvedFor = in.drop.id;
+                st.lastDropSolveAt = now;
+            }
             // M4 WP-Q (G2): a Fallback that breaks a hard region asks for a route round the hazards into it
             // (StepRegionRoute, on a later brain step).
             if (!in.reroute && !roleSolve && cfg.routeEnable && plan.violated > 0
@@ -906,6 +913,20 @@ namespace BossMechanics
                 st.regionRoutePending = true;
                 st.regionRouteAskedAt = now;
                 st.regionRouteGoal = 0;
+                st.softDetour = false;
+            }
+            // Stratholme X1: a Move into a hard region whose path crosses a walking carrier's circle (a soft blocker:
+            // Barthilas's healthy bot crossing to the Well Ward past the sick) asks for the same region route, which
+            // goes round the carriers; it is taken only when it crosses none (RunRegionRoute).
+            else if (!in.reroute && !roleSolve && cfg.routeEnable && !in.softHazards.empty() && !in.regions.empty()
+                && plan.violated == 0
+                && (plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove)
+                && Solver::SoftCrossed(in, plan.path, in.now))
+            {
+                st.regionRoutePending = true;
+                st.regionRouteAskedAt = now;
+                st.regionRouteGoal = 0;
+                st.softDetour = true;
             }
 
             Geo::Vec3 const from = in.bot;
@@ -1159,7 +1180,13 @@ namespace BossMechanics
                     "calls, {} us", bot->GetName(), rs.found ? "found" : "none", rs.cells, rs.cellYd,
                     rs.grown ? ", box grown" : "", rs.expansions, rs.legs, rs.oracleCalls, us);
             }
-            if (plan.outcome != Solver::Outcome::Move)
+            // Stratholme X1: a soft detour keeps the straight Move unless the route crosses no walking carrier.
+            bool const softRejected = st.softDetour && plan.outcome == Solver::Outcome::Move
+                && Solver::SoftCrossed(in, plan.path, in.now);
+            if (cfg.debug && st.softDetour && plan.outcome == Solver::Outcome::Move)
+                LOG_INFO(kLog, "Bot {}: soft detour {} ({} soft cells, {} entered)", bot->GetName(),
+                    softRejected ? "kept the straight move" : "taken", rs.softCells, rs.softCrossed);
+            if (plan.outcome != Solver::Outcome::Move || softRejected)
             {
                 // STAGE-M4-R-REPORT m-10: one goal per budget unit; the next goal goes on the next step (no retry
                 // wait: it continues this search).
@@ -1672,6 +1699,22 @@ namespace BossMechanics
             return false;
         }
 
+        // Stratholme X2: a carrier with a drop rule solves with its spot competing (the rule's score picks where it
+        // takes the shape: a carrier whose spot is clear would otherwise only hold), once per carried shape, and
+        // again every kDropRecheck from the opening of an enterable preferred spot until it stands in one. Never in
+        // the last marginMs before the landing.
+        bool NeedsDropSolve(MechanicBotState const& st, Milliseconds now)
+        {
+            Solver::Input const& in = st.input;
+            Solver::Drop const& d = in.drop;
+            if (!d.present || now + in.params.marginMs >= d.landAt || !Solver::Detail::DropCarried(in))
+                return false;
+            if (st.dropSolvedFor != d.id)
+                return true;
+            return DropSpot::HasEnterable(d) && now >= d.enterAt && !DropSpot::InsidePrefer(d, in.bot)
+                && now - st.lastDropSolveAt >= kDropRecheck;
+        }
+
         // M4 WP-Q (G5): the out-of-band clock, sampled once per brain step with the mode the bot is in now (the
         // waker's mode clocks' rule; a gap over 2 s is not counted). M5 CD (C5): `stranded` (StrandedNow) feeds
         // msChaseStranded, and a hold on a blocked band counts as refused, as the lock refuses the chase then.
@@ -1791,6 +1834,16 @@ namespace BossMechanics
             if (NeedsTracking(st, now, cfg) && TakeBudget(bot, now))
             {
                 st.lastTrackAt = now;
+                Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true);
+                if (plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove)
+                {
+                    plan.holdUntil = std::max(plan.holdUntil, st.plan.holdUntil);
+                    BeginEscape(st, std::move(plan), now);
+                    return;
+                }
+            }
+            if (NeedsDropSolve(st, now) && TakeBudget(bot, now))
+            {
                 Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true);
                 if (plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove)
                 {
@@ -2095,7 +2148,10 @@ namespace BossMechanics
         {
             bool const fallback = st.plan.outcome == Solver::Outcome::Fallback
                 || st.plan.outcome == Solver::Outcome::NoPath;
-            bool const wanted = cfg.routeEnable && fallback && st.plan.violated > 0
+            // Stratholme X1: a soft detour while the bot still walks the Move that crossed (not a region route yet).
+            bool const softMove = st.softDetour && !st.regionRoute && st.mode == MechanicBotMode::Escape
+                && (st.plan.outcome == Solver::Outcome::Move || st.plan.outcome == Solver::Outcome::GraceMove);
+            bool const wanted = cfg.routeEnable && ((fallback && st.plan.violated > 0) || softMove)
                 && (st.mode == MechanicBotMode::Escape || st.mode == MechanicBotMode::Hold)
                 && !BotBrain::Released(botAI, st, now);
             // A continuation (the next goal of the last search) waits for no retry clock.

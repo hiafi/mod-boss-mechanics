@@ -11,6 +11,11 @@
  * the time the bot is there (CheckPath), at the full margin and else at the reduced one; never a grace crossing. That
  * per-leg rule is adapted from mod-dungeon-clear (Jared Wright, AGPL-3.0-or-later), Util/DcHazard.h, commit 7f67cb5.
  *
+ * Stratholme X1: Input::softHazards (other players' carried shapes at their live spots, Barthilas's Infection
+ * carriers walking to the Sick Ward) are soft blockers: a cell they cover at the time the bot gets there costs
+ * RouteParams::softCost more to enter, never blocks, and the string-pull never shortcuts through more of them than the
+ * grid path it replaces. Without soft hazards every answer is the M4 one.
+ *
  * Times are absolute GameTime milliseconds. Distances are yards.
  */
 
@@ -34,6 +39,9 @@ namespace BossMechanics::Solver
         // M4 §3.7 (the U minefield): when the box finds no route and hazards cross its edge, it grows once to hold
         // the whole obstacle they belong to, at most this far past the first box on each side (0 = never).
         float growYd = 32.f;
+        // Stratholme X1: the extra cost of entering a cell a soft blocker covers then, in thousandths of a cell's walk
+        // (4000: a detour of up to four cells per covered cell is preferred to crossing it). 0 = soft blockers off.
+        std::uint32_t softCost = 4000;
     };
 
     struct RouteStats
@@ -48,6 +56,9 @@ namespace BossMechanics::Solver
         bool found = false;
         float cellYd = 0.f;                 // the cell size used (grows past RouteParams::cellYd for a large box)
         std::uint32_t grown = 0;            // 1: the first box found no route and grew round the obstacle it clipped
+        std::uint32_t softCells = 0;        // cells some soft blocker covers at some time (the last search's box)
+        std::uint32_t softCrossed = 0;      // soft cells the found route's grid path enters while they are hot
+        std::uint32_t softPullDropped = 0;  // the soft pull needed > maxLegs: 1 relaxed (kSoftPullSlack), 2 dropped
         // RegionRoute only: no route worked and another goal is left (try it with firstGoal = nextGoal).
         bool moreGoals = false;
         std::uint32_t nextGoal = 0;
@@ -61,6 +72,7 @@ namespace BossMechanics::Solver
         constexpr std::uint32_t kPullLookahead = 8;     // string-pull: grid points scanned past the last clear one
         constexpr std::uint32_t kPullConfirms = 8;      // string-pull: CheckPath confirmations per leg
         constexpr float kMinCellYd = 0.25f;
+        constexpr std::uint32_t kSoftPullSlack = 2;     // X1: soft core cells a relaxed shortcut may cut
         constexpr float kGrowCell = 1.02f;
         constexpr float kMaxRouteYd = 500.f;            // bot-goal distance and padding beyond this: no route
         constexpr std::int64_t kNever = std::numeric_limits<std::int64_t>::max();
@@ -78,6 +90,12 @@ namespace BossMechanics::Solver
             std::int64_t moveStart = 0;                     // ms: the bot starts walking (now + startDelay)
             std::int64_t widen = 0;                         // ms: hot hulls widened by marginMs + a cell's travel
             float msPerYd = 0.f;
+            // Stratholme X1: per cell, the hull of the soft blockers' hot windows (empty: none in the input), and what
+            // entering one then costs (RouteParams::softCost).
+            std::vector<std::int64_t> softFrom, softTo;
+            // ...and the cells their shapes themselves touch (no margin): what the string-pull may not cut into.
+            std::vector<std::int64_t> softCoreFrom, softCoreTo;
+            std::uint32_t softCost = 0;
 
             std::uint32_t Size() const
             {
@@ -338,11 +356,14 @@ namespace BossMechanics::Solver
         // outline are tested, row by row, each with the exact signed distance in the pose's prepared frame (cost
         // scales with the hazard's area, not its bounding square). Non-finite poses are skipped. Returns the cells
         // marked.
-        inline std::uint32_t Rasterize(Input const& tight, Ms horizonEnd, Grid& g)
+        // Rasterize's walk over one list of hazards (the hard ones or, Stratholme X1, the soft ones), into the hulls
+        // `hotFrom` / `hotTo` (one per cell).
+        inline void RasterizeInto(Input const& tight, std::vector<Hazard> const& list, Ms horizonEnd, Grid const& g,
+            std::vector<std::int64_t>& hotFrom, std::vector<std::int64_t>& hotTo)
         {
             float const halfDiag = g.cell * 0.70710678f;
             constexpr float kSpanSlackYd = 1e-3f;
-            for (Hazard const& src : tight.hazards)
+            for (Hazard const& src : list)
             {
                 if (!InRouteTime(tight, src, horizonEnd))
                     continue;
@@ -408,8 +429,8 @@ namespace BossMechanics::Solver
                                 continue;
                             if (!projectile)
                             {
-                                g.hotFrom[idx] = std::min(g.hotFrom[idx], fixedFrom);
-                                g.hotTo[idx] = std::max(g.hotTo[idx], fixedTo);
+                                hotFrom[idx] = std::min(hotFrom[idx], fixedFrom);
+                                hotTo[idx] = std::max(hotTo[idx], fixedTo);
                                 continue;
                             }
                             float const s = dx * r.frame.ux + dy * r.frame.uy;
@@ -417,18 +438,93 @@ namespace BossMechanics::Solver
                             {
                                 std::int64_t const from = (w.from + h.timing.from).count();
                                 std::int64_t const to = (w.to + h.timing.from).count();
-                                g.hotFrom[idx] = std::min(g.hotFrom[idx], from);
-                                g.hotTo[idx] = std::max(g.hotTo[idx], to);
+                                hotFrom[idx] = std::min(hotFrom[idx], from);
+                                hotTo[idx] = std::max(hotTo[idx], to);
                             }
                         }
                     }
                 }
+            }
+        }
+
+        inline std::uint32_t Rasterize(Input const& tight, Ms horizonEnd, Grid& g)
+        {
+            RasterizeInto(tight, tight.hazards, horizonEnd, g, g.hotFrom, g.hotTo);
+            // Stratholme F-1b: a pathInside bounds set the bot stands in walls off every cell outside it for the
+            // whole walk (Solve's PathInBounds; a bot starting outside is not walled in).
+            for (Bounds const& b : tight.bounds)
+            {
+                if (!b.pathInside || !BossMechanics::DropSpot::InBounds(b, g.a))
+                    continue;
+                for (std::uint32_t i = 0; i < g.Size(); ++i)
+                    if (!BossMechanics::DropSpot::InBounds(b, g.Center(i)))
+                    {
+                        g.hotFrom[i] = -kNever / 4;
+                        g.hotTo[i] = kNever / 4;
+                    }
             }
             std::uint32_t blocked = 0;
             for (std::uint32_t i = 0; i < g.Size(); ++i)
                 if (g.hotFrom[i] <= g.hotTo[i])
                     ++blocked;
             return blocked;
+        }
+
+        // Stratholme X1: the soft blockers (in.softHazards) into g.softFrom / g.softTo at their own margins, and into
+        // g.softCoreFrom / g.softCoreTo at none (the cells the shapes touch), widened like Seal widens the hard hulls
+        // (call it after g.widen is set); the start and goal cells are never soft. Returns the soft cells; 0 (and no
+        // soft grid) without soft hazards or with `cost` 0.
+        inline std::uint32_t RasterizeSoft(Input const& in, Ms horizonEnd, Grid& g, std::uint32_t cost)
+        {
+            g.softFrom.clear();
+            g.softTo.clear();
+            g.softCoreFrom.clear();
+            g.softCoreTo.clear();
+            g.softCost = 0;
+            if (in.softHazards.empty() || cost == 0)
+                return 0;
+            auto layer = [&](std::vector<Hazard> const& list, std::vector<std::int64_t>& from,
+                std::vector<std::int64_t>& to)
+            {
+                from.assign(g.Size(), kNever);
+                to.assign(g.Size(), -kNever);
+                RasterizeInto(in, list, horizonEnd, g, from, to);
+                std::uint32_t marked = 0;
+                for (std::uint32_t i = 0; i < g.Size(); ++i)
+                    if (from[i] <= to[i])
+                    {
+                        from[i] -= g.widen;
+                        to[i] += g.widen;
+                        ++marked;
+                    }
+                for (std::uint32_t i : { g.start, g.goal })
+                {
+                    from[i] = kNever;
+                    to[i] = -kNever;
+                }
+                return marked;
+            };
+            std::uint32_t const soft = layer(in.softHazards, g.softFrom, g.softTo);
+            if (!soft)
+            {
+                g.softFrom.clear();
+                g.softTo.clear();
+                return 0;
+            }
+            std::vector<Hazard> core = in.softHazards;
+            for (Hazard& h : core)
+                h.marginYd = 0.f;
+            layer(core, g.softCoreFrom, g.softCoreTo);
+            g.softCost = cost;
+            return soft;
+        }
+
+        // Is the cell under a soft blocker at time t (ms)? `core`: under its shape itself (no margin).
+        inline bool SoftAt(Grid const& g, std::uint32_t idx, std::int64_t t, bool core = false)
+        {
+            std::vector<std::int64_t> const& from = core ? g.softCoreFrom : g.softFrom;
+            std::vector<std::int64_t> const& to = core ? g.softCoreTo : g.softTo;
+            return !from.empty() && t >= from[idx] && t <= to[idx];
         }
 
         struct Node
@@ -489,9 +585,11 @@ namespace BossMechanics::Solver
         }
 
         // 8-connected A*, no corner cutting, no route longer than MaxRouteCost. A cell must be free at the time the
-        // bot reaches it (moveStart + g / speed). Returns the cells from start to goal; empty = none within
-        // maxExpansions. `edge` (M4 §3.7) is set when an empty answer ran out of cells after reaching the box's edge
-        // (the way may lie outside the box); never after maxExpansions.
+        // bot reaches it (moveStart + walk / speed). Stratholme X1: entering a cell a soft blocker covers then adds
+        // g.softCost to the cost A* ranks by (the walk, which times the cells and caps the length, does not grow).
+        // Returns the cells from start to goal; empty = none within maxExpansions. `edge` (M4 §3.7) is set when an
+        // empty answer ran out of cells after reaching the box's edge (the way may lie outside the box); never after
+        // maxExpansions.
         inline std::vector<std::uint32_t> Search(Grid const& g, std::uint32_t maxExpansions, std::uint32_t& expansions,
             bool* edge = nullptr)
         {
@@ -511,7 +609,9 @@ namespace BossMechanics::Solver
             };
 
             std::vector<std::uint32_t> best(n, std::numeric_limits<std::uint32_t>::max());
+            std::vector<std::uint32_t> walk(n, 0);      // the walk part of best (best itself without soft blockers)
             std::vector<std::uint32_t> parent(n, kNoParent);
+            bool const soft = !g.softFrom.empty();
             std::vector<Node> heap;
             heap.reserve(512);
             HeapAfter const after;
@@ -546,13 +646,17 @@ namespace BossMechanics::Solver
                             continue;
                         std::uint32_t const idx = static_cast<std::uint32_t>(y * nx + x);
                         bool const diag = dx && dy;
-                        std::uint32_t const cost = cur.g + (diag ? kDiagCost : kOrthoCost);
-                        if (cost > maxCost || cost >= best[idx] || !freeAt(idx, cost))
+                        std::uint32_t const step = diag ? kDiagCost : kOrthoCost;
+                        std::uint32_t const walked = walk[cur.idx] + step;
+                        std::uint32_t const cost = cur.g + step + (soft && SoftAt(g, idx, g.moveStart
+                            + static_cast<std::int64_t>(walked * msPerUnit + 0.5f)) ? g.softCost : 0);
+                        if (walked > maxCost || cost >= best[idx] || !freeAt(idx, walked))
                             continue;
-                        if (diag && (!freeAt(static_cast<std::uint32_t>(cy * nx + x), cost)
-                            || !freeAt(static_cast<std::uint32_t>(y * nx + cx), cost)))
+                        if (diag && (!freeAt(static_cast<std::uint32_t>(cy * nx + x), walked)
+                            || !freeAt(static_cast<std::uint32_t>(y * nx + cx), walked)))
                             continue;
                         best[idx] = cost;
+                        walk[idx] = walked;
                         parent[idx] = cur.idx;
                         heap.push_back({ cost + Octile(x, y, gx, gy), cost, idx });
                         std::push_heap(heap.begin(), heap.end(), after);
@@ -614,8 +718,10 @@ namespace BossMechanics::Solver
 
         // Grid line of sight: the cells the segment a -> b passes through (grid traversal, each cell once) when the
         // bot crosses them, leaving a at `at` (ms; a cell is timed where the segment enters it). Cheap; CheckPath
-        // confirms what it does not rule out.
-        inline Sight LineSight(Grid const& g, Geo::Vec3 const& a, Geo::Vec3 const& b, std::int64_t at)
+        // confirms what it does not rule out. `soft` (Stratholme X1): counts the cells entered under a soft blocker's
+        // shape (its core: no margin; the start cell is not entered; a wall ends the count).
+        inline Sight LineSight(Grid const& g, Geo::Vec3 const& a, Geo::Vec3 const& b, std::int64_t at,
+            std::uint32_t* soft = nullptr)
         {
             float const ax = (a.x - g.x0) / g.cell;
             float const ay = (a.y - g.y0) / g.cell;
@@ -650,7 +756,10 @@ namespace BossMechanics::Solver
                     + std::clamp<std::int64_t>(cx, 0, nx - 1));
                 if (IsWall(g, idx))
                     return false;
-                hot = hot || !FreeAt(g, idx, at + static_cast<std::int64_t>(u * msPerU + 0.5f));
+                std::int64_t const t = at + static_cast<std::int64_t>(u * msPerU + 0.5f);
+                hot = hot || !FreeAt(g, idx, t);
+                if (soft && SoftAt(g, idx, t, true))
+                    ++*soft;
                 return true;
             };
             std::uint32_t const maxSteps = static_cast<std::uint32_t>(nx + ny + 2);
@@ -695,9 +804,15 @@ namespace BossMechanics::Solver
         // clear one (it is a little stricter than CheckPath: a cell is blocked by its center plus half a diagonal);
         // CheckPath then confirms the farthest clear point and extends past it through the hot ones, never to a point
         // behind a marked cell, at most kPullConfirms calls per leg. Returns the indices of the leg ends; empty = more
-        // than maxLegs or a point with no leg.
+        // than maxLegs or a point with no leg. `softPrefix` (Stratholme X1; one per point, the soft core cells the grid
+        // path entered up to it): a shortcut i -> j that enters more soft core cells than the grid path between them is
+        // treated like one behind a marked cell (the next point, i + 1, is always kept); `softSlack` more are let
+        // through per shortcut. The core (the shapes without
+        // their margins) lets a leg cut across the margin band round a carrier's circle, never into the circle the
+        // grid path kept out of, so an arc round it takes a few legs, not one per cell.
         inline std::vector<std::size_t> Pull(Input const& pin, Grid const& g, std::vector<Geo::Vec3> const& pts,
-            std::uint32_t maxLegs, std::uint32_t& confirms)
+            std::uint32_t maxLegs, std::uint32_t& confirms, std::vector<std::uint32_t> const* softPrefix = nullptr,
+            std::uint32_t softSlack = 0)
         {
             std::vector<std::size_t> ends;
             float const speed = Detail::Speed(pin);
@@ -715,7 +830,11 @@ namespace BossMechanics::Solver
                 std::uint32_t misses = 0;
                 for (std::size_t j = i + 2; j <= last; ++j)
                 {
-                    Sight const sight = LineSight(g, pts[i], pts[j], at.count());
+                    std::uint32_t segSoft = 0;
+                    Sight sight = LineSight(g, pts[i], pts[j], at.count(), softPrefix ? &segSoft : nullptr);
+                    if (softPrefix && sight != Sight::Wall
+                        && segSoft > (*softPrefix)[j] - (*softPrefix)[i] + softSlack)
+                        sight = Sight::Wall;
                     if (sight != Sight::Wall)
                         scan.push_back(j);
                     if (sight == Sight::Clear)
@@ -868,9 +987,11 @@ namespace BossMechanics::Solver
     // Grid: the box around bot and goal padded by padYd, cells of cellYd (grown to fit maxCells). Blocked: a cell
     // whose center lies within a hazard's reduced margin (drift + tightMarginYd) plus half a cell diagonal while the
     // hazard is hot at the time the bot gets there; only hazards whose windows meet [now, now + T], T = startDelay +
-    // 2 x |goal - bot| / speed + marginMs. Regions and carried shapes do not count (routes are for following). The
-    // start and goal cells are never blocked. Search: 8-connected A*, no corner cutting, octile heuristic, at most
-    // maxExpansions per search.
+    // 2 x |goal - bot| / speed + marginMs. Regions and the bot's own carried shapes do not count (routes are for
+    // following); other players' carried shapes at their live spots (Input::softHazards, Stratholme X1) are soft
+    // blockers: a cost per covered cell (RouteParams::softCost), never a block; stats.softCrossed counts the covered
+    // cells the route still enters. The start and goal cells are never blocked. Search: 8-connected A*, no corner
+    // cutting, octile heuristic, at most maxExpansions per search.
     // Legs: string-pulled at the full margin when the route fits maxLegs at it, else at the reduced one; each goes
     // through oracle.Find and CheckPath on the real path (full margin, else reduced; never grace). A leg the oracle
     // rejects (no path, or a path that fails the check) marks the cells around its straight segment and the search runs
@@ -952,6 +1073,7 @@ namespace BossMechanics::Solver
             grid.msPerYd = 1000.f / speed;
             RouteDetail::Seal(grid);
             RouteDetail::FreeAroundStart(grid, tight, in.bot);
+            st.softCells = RouteDetail::RasterizeSoft(in, horizonFor(detourYd), grid, rp.softCost);
             // A goal walled in by lasting hazards: no A* exhaustion (STAGE-M3-R-REPORT m-12). Walled in up to the box's
             // edge: the walls may open outside the box.
             bool edge = false;
@@ -985,11 +1107,48 @@ namespace BossMechanics::Solver
                     pts.push_back(grid.Center(cells[k]));
                 pts.push_back(goal);
 
+                // Stratholme X1: the soft cells the grid path enters up to each point, so the string-pull never
+                // shortcuts through more of them.
+                std::vector<std::uint32_t> softPrefix;
+                st.softCrossed = 0;
+                if (!grid.softFrom.empty() && cells.size() == pts.size())
+                {
+                    softPrefix.assign(pts.size(), 0);
+                    float walkYd = 0.f;
+                    for (std::size_t k = 1; k < pts.size(); ++k)
+                    {
+                        walkYd += Detail::Dist2(pts[k - 1], pts[k]);
+                        std::int64_t const t = grid.moveStart + static_cast<std::int64_t>(walkYd * grid.msPerYd);
+                        softPrefix[k] = softPrefix[k - 1] + (RouteDetail::SoftAt(grid, cells[k], t, true) ? 1 : 0);
+                        st.softCrossed += RouteDetail::SoftAt(grid, cells[k], t) ? 1 : 0;
+                    }
+                }
+                std::vector<std::uint32_t> const* soft = softPrefix.empty() ? nullptr : &softPrefix;
+
                 // Legs at the full margin when the route fits maxLegs at it, else at the reduced one (the grid is
                 // blocked at the reduced margin, so a narrow gap may need it).
-                std::vector<std::size_t> ends = RouteDetail::Pull(in, grid, pts, rp.maxLegs, st.pullChecks);
+                std::vector<std::size_t> ends = RouteDetail::Pull(in, grid, pts, rp.maxLegs, st.pullChecks, soft);
                 if (ends.empty())
-                    ends = RouteDetail::Pull(tight, grid, pts, rp.maxLegs, st.pullChecks);
+                    ends = RouteDetail::Pull(tight, grid, pts, rp.maxLegs, st.pullChecks, soft);
+                // Stratholme X1: a path that bends round several soft blockers may need more than maxLegs to keep
+                // off them. Soft never blocks: pulled again letting each leg cut kSoftPullSlack core cells, and at
+                // last without the soft rule (the legs may then cross them).
+                if (ends.empty() && soft)
+                {
+                    st.softPullDropped = 1;
+                    ends = RouteDetail::Pull(in, grid, pts, rp.maxLegs, st.pullChecks, soft,
+                        RouteDetail::kSoftPullSlack);
+                    if (ends.empty())
+                        ends = RouteDetail::Pull(tight, grid, pts, rp.maxLegs, st.pullChecks, soft,
+                            RouteDetail::kSoftPullSlack);
+                }
+                if (ends.empty() && soft)
+                {
+                    st.softPullDropped = 2;
+                    ends = RouteDetail::Pull(in, grid, pts, rp.maxLegs, st.pullChecks);
+                    if (ends.empty())
+                        ends = RouteDetail::Pull(tight, grid, pts, rp.maxLegs, st.pullChecks);
+                }
                 st.legs = static_cast<std::uint32_t>(ends.size());
                 if (ends.empty())
                     return plan;
@@ -1062,6 +1221,22 @@ namespace BossMechanics::Solver
                 return plan;
         }
         return plan;
+    }
+
+    // Stratholme X1: does `path`, walked from `start` as CheckPath times it, enter a soft blocker (Input::softHazards)
+    // while it is hot? Leaving one the path starts in does not count (CheckPath's start exemption). The brain asks it
+    // of a solve's Move (a straight crossing past a walking carrier) before it asks for a route round the carriers.
+    inline bool SoftCrossed(Input const& in, std::vector<Geo::Vec3> const& path, Ms start)
+    {
+        if (in.softHazards.empty() || path.size() < 2)
+            return false;
+        Input probe;
+        probe.bot = path.front();
+        probe.speed = in.speed;
+        probe.now = in.now;
+        probe.params = in.params;
+        probe.hazards = in.softHazards;
+        return !CheckPath(probe, path, start, false).ok;
     }
 
     // Goals RegionRoute tries per call (each one Route search): one, so one call (one budget unit) never costs more

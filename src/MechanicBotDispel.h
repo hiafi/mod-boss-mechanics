@@ -12,7 +12,10 @@
  *   the module's value context registers the same name after playerbots' own (the first world tick, MechanicBotGate),
  *   so the last Add wins for every class. With an active descriptor that lists dispels, a member carrying a listed
  *   aura of that type is returned first (Desc::OrderDispels: urgent, priority, time left, stock rank); otherwise, and
- *   always without a descriptor, the stock PartyMemberToDispel::Calculate answers unchanged.
+ *   always without a descriptor, the stock PartyMemberToDispel::Calculate answers unchanged. Stratholme X1: a listed
+ *   aura whose entry's `when` does not hold for its member is held: never the listed pick, and while the descriptor
+ *   has such an entry the stock answer passes over a member whose every aura of the type is held. A bot's own
+ *   self-cure rows (NeedCureTrigger on "self target") read PlayerbotAI::HasAuraToDispel and are not covered.
  * - `boss dispel urgent`: an urgent (loss of control) entry, or a deadline entry inside its deadline, on a group
  *   member, cured with the bot's own spell of the right type from the class table (MechanicDispelRules.h), any class.
  *   Its name matches none of the healer cure gates (Priest/Shaman/Druid STOCK_CURE_NAMES, Paladin's "cleanse" /
@@ -69,6 +72,8 @@ protected:
     Unit* Calculate() override;
 
 private:
+    bool HeldNow(Unit const* unit);     // the pick's entry is held on it now (DispelEntry::when, Stratholme X1)
+
     ObjectGuid _pick;       // the listed pick of the last Calculate (empty: none, or the stock answer)
     uint32 _pickAura = 0;
 };

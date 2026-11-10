@@ -59,6 +59,15 @@ namespace BossMechanics
             return "?";
         }
 
+        std::string When(Condition const& c);
+
+        // A nested condition's text without its " when" (" always" for Always).
+        std::string Inner(Condition const& c)
+        {
+            std::string const s = When(c);
+            return s.empty() ? std::string(" always") : s.substr(5);
+        }
+
         // "" for Always; otherwise " when <condition>".
         std::string When(Condition const& c)
         {
@@ -78,6 +87,17 @@ namespace BossMechanics
                     return Acore::StringFormat(" when phase {}", c.id);
                 case CondKind::OwnerBelowPct:
                     return Acore::StringFormat(" when the owner is below {:.0f}%", c.value);
+                case CondKind::NearPlayer:
+                    return Acore::StringFormat(" when a player is within {:.0f} yd", c.value);
+                case CondKind::All:
+                {
+                    std::string out;
+                    for (Condition const& sub : c.all)
+                        out += (out.empty() ? "" : " and") + Inner(sub);
+                    return out.empty() ? std::string() : " when" + out;
+                }
+                case CondKind::Not:
+                    return c.all.empty() ? std::string() : " when not (" + Inner(c.all.front()) + " )";
                 case CondKind::Custom:
                     return " when (script condition)";
             }
@@ -115,9 +135,9 @@ namespace BossMechanics
                     : std::string("DO NOT KICK"), i.every.count() ? Acore::StringFormat(", every {} ms",
                     i.every.count()) : std::string(), When(i.when));
             for (DispelEntry const& x : d.dispels)
-                handler->PSendSysMessage("  dispel {}: priority {}{}{}", SpellLabel(x.auraId), int32(x.priority),
+                handler->PSendSysMessage("  dispel {}: priority {}{}{}{}", SpellLabel(x.auraId), int32(x.priority),
                     x.urgent ? ", urgent" : "", x.deadline.count() ? Acore::StringFormat(", deadline {} ms",
-                    x.deadline.count()) : std::string());
+                    x.deadline.count()) : std::string(), When(x.when));
             for (PurgeEntry const& x : d.purges)
                 handler->PSendSysMessage("  purge {} on {}: priority {}", SpellLabel(x.auraId), UnitOrEntry(map,
                     x.unitEntry, 0), int32(x.priority));

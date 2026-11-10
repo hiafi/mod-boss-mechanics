@@ -135,6 +135,9 @@ namespace BossMechanics
         Milliseconds lastTrackAt{ 0 };                      // region tracking re-solves (MovingAnchorRecheckMs)
         Milliseconds lastSightAt{ 0 };                      // healer line-of-sight checks
         Milliseconds nextSightAt{ 0 };                      // ...none before this (a role solve that stayed backs off)
+        // Stratholme X2: the drop rule's solves (the carried shape's id solved for, and the last one's time).
+        uint32 dropSolvedFor = 0;
+        Milliseconds lastDropSolveAt{ 0 };
 
         // ---- M4 (STAGE-M4-HANDOFF §3.5-§3.7, WP-C) ----
         Leaks::Tracker leak;                                // leak detectors: references and our own tokens
@@ -149,6 +152,9 @@ namespace BossMechanics
         Milliseconds lastRegionRouteAt{ 0 };
         uint32 regionRouteGoal = 0;                         // the RegionRoute goal to try next (m-10: one per step)
         bool regionRoute = false;                           // the escape walks a RegionRoute (its end: TargetOk)
+        // Stratholme X1: the pending region route was asked by a Move that crosses a soft blocker (a walking carrier),
+        // not by a Fallback: it is taken only when it crosses none.
+        bool softDetour = false;
         // STAGE-M4-R-REPORT M-3: the brain left Idle and checked for a pending pull (BotBrain::EndPullOnWake); cleared
         // when it goes back to Idle.
         bool pullEndChecked = false;

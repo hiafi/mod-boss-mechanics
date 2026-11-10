@@ -118,6 +118,8 @@ M3 options:
 | `Radius(yd)` | Bait | the landing circle (Fenrus 6 yd); default: only the picked player |
 | `Tolerance(yd)` | HoldStill | movement allowed in the window (default 0.3 yd; Alexei 1 yd) |
 | `Park(unit)` | shape kinds | the tank holds `unit` (default the owner) inside this shape; bots only |
+| `DropSpot(rule)` | shape kinds on a player | where its carrier bot takes it before it lands; bots only |
+| `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
 
@@ -414,8 +416,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech barrage [secs=30] [every=900] [warn=2000] [shapes=circle,donut,cone,line,projectile] [dmg=1] [self=0] [seed=]
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
-.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes>
-            [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+.mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
+            |stratholme-followups|stratholme-drops> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -527,6 +529,18 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   - `at=predict [lead=1500]`: where a member (`pick=`) will stand `lead` ms from now at its heading and speed, read
     from its movement keys (forward, back, strafe; walk and back speeds) and snapped to the floor; on it while it
     stands. A bot's spline move sets forward and faces along its path.
+- Stratholme build (WP-G §3.9, drill `stratholme-followups`):
+  - `cone ... to=member|target|me`: the cone turns to aim at that unit live from its anchor (Balnazzar's BZ1, a cone
+    from the boss that tracks a moving player; `ZoneSpec::to`). Not with `follow=1`.
+  - `exempt=target` (cone, line, projectile with `to=`): the unit the shape aims at is spared; every other scope
+    member (you included) is an eligible carrier, picked when the repeat registers. With nobody left, nobody is hit.
+  - ST's "hidden flag" (Willey's WY9 Barrage) is the existing `tele=0` (`NoTelegraph()`): no marker, bots read it.
+- Stratholme build X2 (the drop spot rule, drill `stratholme-drops`): `drop=<edge,away,behind,prefer,avoid>` on a
+  circle `anchor=member` or a line `to=member` gives the member's bot a `DropSpotRule`, built at registration:
+  `room=<yd>` (default 30; 0 = no room) is a circle room around the selected unit, `behind` takes your facing as the
+  group's travel direction, `prefer` makes every live persistent circle of the test owner on a point an enterable
+  preferred spot, `avoid` makes each one an avoid point, and `dwell=<ms>` (default 800) is how long before the
+  landing such a spot opens.
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -623,6 +637,30 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     fuses, 3 barrage, 4 first Foresight marker, 5 predicted markers, 6 first ring, 7 rings out, 8 rings in, 9 sigils and
     the edge, 10 portal lanes; 1 and 6 are 2 s lead-ins (reported), the rest are under the sweep's bar
     (`Drill::kScholoBarTags`). The sweep runs `scholomance-shapes:3`.
+  - `stratholme-followups` (Stratholme build §3.9: the chained follow-ups and the hidden Barrage before the heroic
+    sign-off; 40 s, three cycles by default = 120 s, heroic numbers in `pct=`): 0 s, The Unforgiven UF1, a 30 x 10 yd
+    rank through the creature on a fixed frame (3 s, `lanes count=1 frame=30x10`), then the crossing rank on the other
+    axis through the same center, 1.5 s after the first passes. 7 s, Malor MZ7 + MZ8, circle 8 on the creature, tank
+    included (2 s), then a donut 8-14 (1.5 s). 13 s, the Baroness BA4 + BA5, circle 12 on her (3 s), then the echo,
+    a donut 8-32 (2 s; ratio 0.25 so the drawn hole is the real one, the 30 yd leash inside it). 20 s, Balnazzar BZ1,
+    a 60 degree / 30 yd cone from the creature aimed at a non-tank and tracking it (2.5 s, `to=member
+    exempt=target`), and a second at another non-tank 1.5 s after the first starts. 25 s, Willey WY9, five 58 x 10 yd
+    half-hall lines with no marker (`tele=0`), all registered at the call, resolving 3 s later and then 1.5 s apart,
+    3 on one half and 2 on the other (even cycles L R L L R, odd R L R R L). Weakened on UF1, MZ7, MZ8 and WY9. Tags
+    (`Zone/<tag>`): 1 rank, 2 crossing rank, 3 smash, 4 aftershock, 5 wail, 6 echo, 7 first cone, 8 second cone,
+    9 Barrage; 1, 3, 5 and 7 are reported, 2, 4, 6, 8 and 9 are under the sweep's bar (`Drill::kStratBarTags`). The
+    sweep runs `stratholme-followups:3`.
+  - `stratholme-drops` (Stratholme build X2: the drop spot rule; 30 s, four cycles by default = 120 s, heroic numbers
+    in `pct=`, the room a 25 yd circle round the creature): 0 s, two old webs (Nerub'enkan NE3), 5 yd persistent
+    circles 10 yd off the group (1 s warning, 24 s). 2 s, NE1, a 5 yd glob on a non-tank (3 s) with `drop=prefer,edge,
+    away`: onto an old web (it opens 0.8 s before the landing), else the edge away from the group. 10 s, the Baron
+    BR3, a 6 yd Death and Decay on a non-tank (3 s) to the edge, away from the group. 16 s, the Ultimatum HM3, a 6 x
+    30 yd lane from the creature to a non-tank (3 s, `exempt=target`, `drop=edge,away,avoid`: S15's rule, the old
+    webs standing in for the bone piles). 22 s, Galford GF1, a 4 yd Holy
+    Fire on a non-tank (6 s) behind the group (your facing) at the edge. Tags (`Zone/<tag>`): 1 the webs (reported:
+    a carrier that steps in for its drop takes a tick), 2 glob, 3 rot, 4 lane, 5 Holy Fire, all four under the
+    sweep's bar (`Drill::kDropBarTags`: what the carried shapes hit besides their carrier). The sweep runs
+    `stratholme-drops:4`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -744,6 +782,23 @@ owns those) or an unlisted one while a listed cast is due before the kick is bac
 used as one) is also dropped on an encounter unit that is casting or channeling nothing interruptible (Corvane's leash
 in the Ravenian fight): it would stop nothing and sit on cooldown when the listed cast starts.
 
+**Dispel conditions** (Stratholme X1, `MechanicDescriptor.h`): a `DispelEntry` takes a `when` condition (fifth
+constructor argument), judged on the afflicted member. While it does not hold the aura is held: it is never the listed
+pick (`Desc::OrderDispels` leaves out `Affliction::held`), not even when urgent, and while the descriptor has such an
+entry the overridden `party member to dispel` passes over a member whose every aura of the type is held, so the stock
+cure rows leave it alone too. A bot curing itself through its own self-cure rows (`NeedCureTrigger` on `self target`,
+which reads `PlayerbotAI::HasAuraToDispel`) is not covered. Conditions gained three kinds for it: `NearPlayer(yd)`
+(another live player within `yd` of the unit on the plane, and within 6 yd of its height like the registry's
+circles; the view finds the nearest one within the largest range asked),
+`AllOf({...})` and `Not(c)`. Maleki's Icy Death, dispelled only with no ally within 8 yd and not during the Eye:
+
+```cpp
+d.dispels.emplace_back(SPELL_ICY_DEATH, 2, false, 0ms, Condition::AllOf({
+    Condition::Not(Condition::NearPlayer(8.f)), Condition::Not(Condition::Phase(PHASE_EYE)) }));
+```
+
+`.mech desc` prints the condition after each dispel entry.
+
 ### Tasks (M3)
 
 The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The brain:
@@ -795,6 +850,9 @@ The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The
   the next waypoint passes the path check at the route's margin (`RouteAdvanceOk`; else it walks on to the waypoint).
   It ends at `RouteHandoff`'s waypoint, where stock follow takes over. A leg that needed the reduced margin is
   re-checked at the reduced margins. No route: hold, as before.
+- **Soft detour** (Stratholme X1): a solve's Move into a hard region whose path crosses a soft blocker (another
+  carrier's circle at its live spot, `Solver::SoftCrossed`) asks for the region route below, under its rules; the route
+  is taken only when it crosses no soft blocker, else the bot keeps walking the straight Move.
 - **Region route** (M4): a solve whose Fallback breaks a hard region (a Stack, Cluster, Bait range or Spot the bot
   cannot reach straight, because its way in crosses a Zone that is hot by then: the Alexei Assembly member behind the
   Out of bounds circle) asks for `Solver::RegionRoute` on the next brain step, under the route search's rules
@@ -857,7 +915,8 @@ the greedy one-hop re-route makes no progress, e.g. behind a U-shaped wall of ov
   0.25 yd) plus half a cell diagonal at the time the bot would get there (a zone over by then does not block), for the
   hazards hot before the bot could walk twice the way, or the way plus twice `Route.PadYd`. Each hazard pose tests only
   the cells of its own outline, row by row (a circle, and half-planes for a line or a cone of at most 180 degrees), with
-  the exact distance. Regions and carried shapes do not count. The bot's and the goal's cells are never blocked, and
+  the exact distance. Regions and the bot's own carried shapes do not count. The bot's and the goal's cells are never
+  blocked, and
   a blocked cell within two cells of the bot is freed when the bot can walk straight to it (the grid's half diagonal
   boxed in a bot standing within a cell of a margin, M4).
 - **Grown box (M4):** no route in the box although the search (or the sealed-off goal's cells) reached its edge,
@@ -866,6 +925,18 @@ the greedy one-hop re-route makes no progress, e.g. behind a U-shaped wall of ov
   per side, and the search runs again. A bot deep in a U of mines has its way out behind it, out of the mouth and
   round an arm, which the bot-goal box does not hold (the M3 playtest's bot left behind). A true enclosure never
   reaches the edge and never grows.
+- **Soft blockers (Stratholme X1):** other players' Spread/RunOut circles at their live spots
+  (`Input::softHazards`: the view adds every other live carrier that is not a human at its current spot, 0.5 yd of
+  slack, besides the hard circle at its planned spot) cost `RouteParams::softCost` (4 cells' walk) more per covered
+  cell entered while hot, and never block. A string-pulled leg may cut the margin band but never enters more cells of
+  the circles themselves than the grid path it replaces; when that takes more than `Route.MaxLegs` legs the pull lets
+  each leg cut 2 such cells, then drops the rule (`RouteStats::softPullDropped`). Solve and every other check ignore
+  them. Barthilas's healthy bot crossing to the Well Ward walks round the Infected ones still on their way to the Sick
+  Ward, and still crosses when the carriers wall the way. A carrier keyed on an aura (`SelfTrigger`: the Contagion
+  RunOut, re-registered every 2 s with a 4 s warning) is a blocker from now to the end of its window, not only in
+  its resolve window (`ViewRules::SoftCarrierTiming`, F-1b); other carriers keep their own window. Cost (host,
+  2,304 cells, 30 mines): no carriers about 0.1 ms; 5 overlapping carriers 0.1 ms (3 legs); 10 in a zigzag over
+  the goal 0.77 ms (relaxed pull, 8 legs).
 - **Search:** a goal walled in by lasting hazards is found by a small flood fill first (no route, no A*); else
   8-connected A*, no corner cutting, octile heuristic, no route longer than the box's perimeter, at most
   `Route.MaxExpansions` expansions. Non-finite input or a goal over 500 yd away: no route.
@@ -894,6 +965,11 @@ solving one after another on the map thread never pick colliding spots (decision
 - **Judge window:** `[resolveAt, resolveAt + PostResolveHoldMs]` (a pending Detonate pulls it to now); lasting
   Stack/Soak `[resolveAt, until]`; HoldStill `[resolveAt, expireAt]`. Every eligibility test is
   `Registry::EligiblePlayers` (the registry's own candidates), never a playerbots role.
+- **No warning, no job** (F-1b, R-1-KIT F2): a Spread or RunOut registered with no warning and no persistence
+  (`resolveAt <= createdAt`, `ViewRules::Undodgeable`) is left out of the view. That is a script's hit routed through
+  the registry (the kit's `RegistryHit`: a RunOut from the boss of reach + 10 yd on its targets, the tank among them);
+  it resolves on the next tick, and shown to the bots it told a targeted tank to leave a 20-40 yd circle round the
+  boss.
 
 | Kind | The bot is | Solver input |
 | --- | --- | --- |
@@ -930,6 +1006,92 @@ A region's margin is `SafetyMarginYd`, at most half its inner radius; a moving a
 same way) shrinks it further. Reservations: `until` = the task's window end, `claim` for claimers, pickers and leaders;
 a bot no longer tasked on a mechanic is unreserved. With `Debug = 1` the self-check also compares the solver's
 containment of Stack, Soak and Spot regions and of unplanned carrier circles with `Registry::ContainsPoint`.
+
+### Drop spot rule (Stratholme X2)
+
+A circle that follows a player and lands where they stand is a Zone anchored on that player (`AnchorOn`; the kit's
+`FollowThenLand`), and a lane from the boss to a player is a Line whose `to` end is that player. The player carries
+it: the view keeps the allies out of it (above). `DropSpot(rule)` adds where the carrier's bot takes it before it
+lands (`DropSpotRule`, `MechanicRegistry.h`; pure parts in `src/MechanicDropSpot.h`, solver terms in
+`MechanicSolver.h` "Drop spot"; tests `tests/drop_spot_test.cpp`). Bots only: the hitbox, the marker and the resolve
+are unchanged.
+
+```cpp
+// Nerub'enkan's Web Spray: onto an old web (it may step in 0.8 s before the landing), else the plaza's edge, away.
+DropSpotRule rule;
+rule.Room(plazaCenter, 30.f).Edge().Away();
+for (Web const& w : webs)
+    rule.Prefer(w.pos, w.radius, w.handle.id);
+Mechanic::Circle(me, target, 5.f, 3000ms).AnchorOn(target).Damage(25.f).Weakened().DropSpot(rule);
+// The Baron's Death and Decay: off the bone piles. The Deathcharger lane: a lane that misses the group and the piles.
+Mechanic::Circle(me, target, 6.f, 3000ms).AnchorOn(target).DropSpot(DropSpotRule().Room(center, 30.f).Edge().Away()
+    .Avoid(pile1, 1.f).Avoid(pile2, 1.f));
+Mechanic::Zone(me, ZoneSpec{ Anchor(me), Shape::Line(30.f, 6.f), Anchor(target) }, 3000ms)
+    .DropSpot(DropSpotRule().Avoid(pile1, 1.f));
+// Galford's Holy Fire: behind the group (it moves along the hall), against a wall or onto old fire's rim.
+Mechanic::Circle(me, target, 4.f, 6000ms).AnchorOn(target)
+    .DropSpot(DropSpotRule().Room(hallOrigin, hallAngle, 58.f, 20.f).Edge().Behind(hallAngle)
+        .Prefer(oldFire, 4.f + 2.f));
+```
+
+| Rule part | What the carrier's solve does |
+| --- | --- |
+| `Room(...)` | a circle, a polygon (3+ points) or a frame's box; a spot outside it costs more than anything else |
+| `Edge()` | 2 points per yard farther than 2 yd from the room's edge; candidates 1 yd inside it, every 3 yd |
+| `Away()` | a reward of 0.6 per yard from the counted allies' centroid (up to 25 yd); candidates on 8 bearings away |
+| `Behind(facing)` | 4 per yard the landing (its radius included) reaches ahead of that centroid along `facing` |
+| `Prefer(c, r, id)` | the landing center 0.5 yd inside: a 40 bonus, and edge and away stop counting there |
+| enterable (`id`) | its Zone stops being hot for the carrier `MaxDwell` before the landing; staging before: 25 to 0 |
+| `Avoid(c, r)` | the carried shape covering the circle (0.5 yd pad) costs 20 + 10 per yard |
+| `MaxRange(yd)` | 5 per yard beyond `yd` from the owner |
+| `MaxDwell(ms)` | how long before the landing an enterable spot opens (default 800) |
+| `Within(bounds)` | hard bounds for the carrier's spot (Spot bounds, below); one area is also the room without `Room` |
+
+`Away` is a tie-breaker: its reward is below a yard of walking, so alone it never moves a carrier whose spot is
+clear; pair it with `Edge` or `Prefer`. A script that punishes standing in an enterable spot checks its `MaxDwell`
+with `DropSpot::DwellFits(maxDwell, stuckAfter)` (`kEnterableExitMs`, 1 s, is the way out after the landing).
+
+A yard of walking costs 1, so the rule reads as the build specs write it: onto a preferred spot, else next to an
+enterable one until it opens, else the edge away from the group; behind, off the avoid points and inside the room
+always. The carried shape's hard rule (no counted ally inside it at the landing) and its arrival deadline stay: a
+spot the carrier cannot reach before the landing is never offered. While the rule's shape lives the carrier's role
+band does not count (a melee carrier leaves the boss for the drop; stock movement brings it back after).
+
+Bots: a carrier whose spot is clear only holds, so the brain runs one role solve per carried shape with a rule (its
+spot competes; `NeedsDropSolve`), and with an enterable spot one every 250 ms from its opening until the bot stands in
+it (never in the last `SafetyMarginMs`). The view lifts the enterable Zones (`Solver::LiftEnterable`) for the carrier
+only; once the drop's mechanic is pruned, the view is rebuilt from the registry and the old web is whole again, so
+the bot steps out (inside its grace on Nerub'enkan's webs: the dwell is about `MaxDwell` plus the way out). With
+several drops at once the earliest landing's rule counts. Tank parking and the drop rule do not combine: a script
+gives a tank carrier one or the other.
+
+### Spot bounds (Stratholme F-1b)
+
+`Room` is soft: the drop rule scores a spot outside it, and other terms can outweigh that. A room with a door needs a
+hard limit (the Baron's oval: a spot past the east wall is the corridor behind his door, and his stock leash evades
+him there). `SpotBounds` (`MechanicRegistry.h`; pure parts `Solver::Bounds` and `DropSpot::InBounds` /
+`PathInBounds` in `src/MechanicDropSpot.h`; tests in `tests/drop_spot_test.cpp`) is the union of areas (`Polygon`,
+`Circle`, `Box` in a room frame, `Rect`; each with a z band, like the kit's arena regions) minus `KeepOut(c, r)`
+circles; `PathInside()` also holds the walked path to it once inside (the navmesh walks through a closed door).
+
+```cpp
+SpotBounds const room = SpotBounds()
+    .Polygon({ /* the oval's walls, the east wall at its real line */ }, floorZ - 3.f, floorZ + 5.f)
+    .KeepOut(baronDoor, 6.f).KeepOut(ramsteinDoor, 6.f).PathInside();
+Mechanic::Circle(me, spot, 4.f, 6000ms).Park(me).NoTelegraph().Eligible(tankOnly).Within(room);
+Mechanic::Circle(me, target, 6.f, 3000ms).AnchorOn(target).DropSpot(DropSpotRule().Edge().Away().Within(room));
+```
+
+- `MechanicRef::Within(bounds)` (any kind but a decoy): while the mechanic is in a bot's view and its owner is in
+  combat with the bot, every solve of that bot keeps them (`Solver::Input::bounds`; equal sets are added once, all
+  sets hold). `DropSpotRule::Within(bounds)` binds the carrier the same way.
+- Solve: a moved-to candidate outside the bounds is dropped before scoring, a path whose real end is outside (or, with
+  `PathInside`, that leaves them after entering) is refused (`SolveStats::outOfBounds`); the Fallback ranks one
+  outside after every one inside. The bot's own spot is never refused: a bot standing outside may stay, and walks in
+  when it moves. A parked boss's stop (`ParkOk`) keeps the bounds too, so the tank never drags him into a keep-out
+  circle. The route search walls off every cell outside a `PathInside` set the bot stands in.
+- The bounds do not pick the Park zone's own spot: the script does (the kit's `PickFloorSpot`); it should use the same
+  room.
 
 ### Gate
 

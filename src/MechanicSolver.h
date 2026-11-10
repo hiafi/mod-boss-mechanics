@@ -23,6 +23,7 @@
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_SOLVER_H
 #define MOD_BOSS_MECHANICS_MECHANIC_SOLVER_H
 
+#include "MechanicDropSpot.h"
 #include "MechanicGeometry.h"
 #include "MechanicMath.h"
 #include <algorithm>
@@ -210,11 +211,20 @@ namespace BossMechanics::Solver
         std::vector<Region> regions;
         std::vector<Ally> allies;
         std::vector<Carried> carried;
+        // Stratholme X1: other players' carried shapes at their live spots (a Spread/RunOut carrier still walking to
+        // its planned spot). Soft blockers for the route search only (MechanicRoute.h: a crossing cost per cell, never
+        // a block) and SoftCrossed; Solve and every other check ignore them.
+        std::vector<Hazard> softHazards;
         FarFrom far;
         Freeze freeze;
         Sight sight;
         Reach reach;
         Park park;
+        // Stratholme X2: the drop spot rule of a carried shape (MechanicDropSpot.h): score terms and candidates.
+        Drop drop;
+        // Stratholme F-1b: hard spot bounds (MechanicDropSpot.h, Bounds): every set holds a moved-to target (and, with
+        // pathInside, its path); a parked boss's stop too (ParkOk). Empty = anywhere.
+        std::vector<Bounds> bounds;
         // Slot ring rotation: slot × 360° / slotCount (Assign::SlotOf among the carriers; 0 = no rotation).
         std::uint32_t slot = 0, slotCount = 0;
         // Solve even when the bot's spot passes TargetOk (a role move: healer sight, reach): the spot competes as an
@@ -261,6 +271,7 @@ namespace BossMechanics::Solver
         std::uint32_t crossStart = 0;       // a path was found, it fails inside a hazard that holds the bot
         std::uint32_t crossOther = 0;       // ...inside another hazard
         std::uint32_t budgetStops = 0;      // validation passes cut short by maxPathChecks
+        std::uint32_t outOfBounds = 0;      // F-1b: a target or its path outside the hard bounds (Input::bounds)
         // M4 cost (D9): lane-frame candidates in the candidate list, and the oracle path calls spent on them.
         std::uint32_t laneCandidates = 0;
         std::uint32_t lanePathChecks = 0;
@@ -277,6 +288,7 @@ namespace BossMechanics::Solver
             crossStart += o.crossStart;
             crossOther += o.crossOther;
             budgetStops += o.budgetStops;
+            outOfBounds += o.outOfBounds;
             laneCandidates += o.laneCandidates;
             lanePathChecks += o.lanePathChecks;
         }
@@ -1036,7 +1048,8 @@ namespace BossMechanics::Solver
                 return false;                       // the tank stays outside the zone
             float const k = pk.stopYd / std::max(d, 1e-3f);
             Geo::Vec3 const stop{ p.x + (pk.boss.x - p.x) * k, p.y + (pk.boss.y - p.y) * k, pk.boss.z };
-            return ParkStopOk(pk, stop);
+            // F-1b: the boss's stop keeps the bounds too (a door's keep-out circle: the stock leash).
+            return ParkStopOk(pk, stop) && BossMechanics::DropSpot::InBounds(in.bounds, stop);
         }
 
         inline bool FreezeOk(Input const& in, Ms arrival)
@@ -1832,6 +1845,127 @@ namespace BossMechanics::Solver
                 ring(h.shape, h.poses, pk.depthYd + pk.stopYd + kExitPushYd, { 0.f, 1.5f }, false);
         }
 
+        // ---- Drop spot (Stratholme build X2; the terms and their order are in MechanicDropSpot.h) ----
+
+        // The carried shape the drop rule is for, while it lives; nullptr otherwise.
+        inline Carried const* DropCarried(Input const& in)
+        {
+            if (!in.drop.present)
+                return nullptr;
+            for (Carried const& c : in.carried)
+                if (c.id == in.drop.id && CarriedLive(in, c))
+                    return &c;
+            return nullptr;
+        }
+
+        // The centroid of the allies the carried shape counts; false when it counts none.
+        inline bool DropCentroid(Input const& in, Carried const& c, Geo::Vec3& out)
+        {
+            float x = 0.f;
+            float y = 0.f;
+            std::uint32_t n = 0;
+            for (std::uint32_t idx : c.allies)
+                if (idx < in.allies.size())
+                {
+                    x += in.allies[idx].p.x;
+                    y += in.allies[idx].p.y;
+                    ++n;
+                }
+            if (!n)
+                return false;
+            out = { x / n, y / n, in.bot.z };
+            return true;
+        }
+
+        // The drop rule's score with the bot at p (lower is better): avoid points, range and room always, behind the
+        // group always; then a preferred spot (a bonus, nothing else counts), or staging next to an enterable one,
+        // else the room's edge and the distance from the group.
+        inline float DropScore(Input const& in, Geo::Vec3 const& p)
+        {
+            namespace DS = BossMechanics::DropSpot;
+            Carried const* c = DropCarried(in);
+            if (!c)
+                return 0.f;
+            Drop const& d = in.drop;
+            float s = 0.f;
+            Geo::Pose const pose = CarriedPose(*c, p, c->fixedFacing);
+            for (DropCircle const& a : d.avoid)
+            {
+                float const gap = a.r + DS::kAvoidPadYd - SignedDistance(c->shape, pose, { a.c.x, a.c.y, pose.z });
+                if (gap > 0.f)
+                    s += DS::kAvoidBase + DS::kAvoidPerYd * gap;
+            }
+            if (d.maxRangeYd > 0.f)
+                s += DS::kRangePerYd * std::max(0.f, Dist2(d.rangeFrom, p) - d.maxRangeYd);
+            float const room = DS::RoomDistance(d, p);
+            if (room < 0.f)
+                s += DS::kOutsideBase + DS::kOutsidePerYd * -room;
+            Geo::Vec3 centroid;
+            bool const group = DropCentroid(in, *c, centroid);
+            if (d.behind && group)
+            {
+                float const reach = c->mode == Carried::Mode::OnBot ? Geo::Bounds(c->shape) : 0.f;
+                s += DS::kBehindPerYd * std::max(0.f, DS::Ahead(centroid, d.travelFacing, p, reach));
+            }
+            if (DS::InsidePrefer(d, p))
+                return s - DS::kPreferBonus;
+            if (float const stage = DS::StageBonus(d, p); stage > 0.f)
+                return s - stage;
+            if (d.edge && std::isfinite(room))
+                s += DS::kEdgePerYd * std::max(0.f, room - DS::kEdgeInsetYd);
+            if (d.away && group)
+                s -= DS::kAwayPerYd * std::min(Dist2(centroid, p), DS::kAwayCapYd);
+            return s;
+        }
+
+        // Drop rule candidates within the walk before the landing: in and around each preferred spot (staging points
+        // just outside an enterable one), along the room's edge, and away from the group.
+        inline void DropCandidates(Input const& in, std::vector<Geo::Vec3>& out)
+        {
+            namespace DS = BossMechanics::DropSpot;
+            Carried const* c = DropCarried(in);
+            if (!c)
+                return;
+            Drop const& d = in.drop;
+            Geo::Vec3 const& bot = in.bot;
+            float const reach = Speed(in) * SecondsOf(std::max(Ms(0), d.landAt - in.now)) + 2.f;
+            auto push = [&](Geo::Vec3 const& q)
+            {
+                if (Dist2(bot, q) <= reach)
+                    out.push_back({ q.x, q.y, bot.z });
+            };
+            auto polar = [](Geo::Vec3 const& from, float bearing, float r)
+            {
+                return Geo::Vec3{ from.x + std::cos(bearing) * r, from.y + std::sin(bearing) * r, from.z };
+            };
+            for (DropCircle const& pr : d.prefer)
+            {
+                float const base = Dist2(bot, pr.c) > 1e-3f ? std::atan2(bot.y - pr.c.y, bot.x - pr.c.x) : 0.f;
+                push(pr.c);
+                for (float off : { 0.f, 0.5f, -0.5f, 1.f, -1.f })
+                {
+                    for (float r : { pr.r - 1.f, pr.r * 0.5f })
+                        if (r > 0.f)
+                            push(polar(pr.c, base + off, r));
+                    if (pr.enterable)
+                        push(polar(pr.c, base + off, pr.r + c->marginYd + DS::kStageGapYd));
+                }
+            }
+            if (d.edge)
+                for (Geo::Vec3 const& q : DS::EdgePoints(d, DS::kEdgeInsetYd * 0.5f, bot.z))
+                    push(q);
+            Geo::Vec3 centroid;
+            if (d.away && DropCentroid(in, *c, centroid))
+            {
+                float const base = Dist2(bot, centroid) > 1e-3f ? std::atan2(bot.y - centroid.y, bot.x - centroid.x)
+                    : 0.f;
+                for (std::uint32_t i = 0; i < DS::kAwayBearings; ++i)
+                    for (float r : DS::kAwayRings)
+                        push(polar(centroid, base - Geo::kPi * 0.5f
+                            + Geo::kPi * static_cast<float>(i) / static_cast<float>(DS::kAwayBearings - 1), r));
+            }
+        }
+
         // All M3 candidates (targeted: they go before the blanket rings).
         inline void PlayerKindCandidates(Input const& in, float reach, std::vector<Geo::Vec3>& out)
         {
@@ -1846,6 +1980,7 @@ namespace BossMechanics::Solver
                 CarriedCandidates(in, c, out);
                 carriedCircle = carriedCircle || (c.mode == Carried::Mode::OnBot && c.shape.type == ShapeType::Circle);
             }
+            DropCandidates(in, out);   // Stratholme X2: the drop rule's spots
             // Slot ring: 16 bearings on the role band's outer radius, rotated by the bot's slot among the carriers
             // (M2's role ring sits at mid-band, too tight for a spread around a target at reach).
             if (carriedCircle && in.role.present && in.params.slotRing)
@@ -1865,6 +2000,29 @@ namespace BossMechanics::Solver
             }
             if (in.park.present)
                 ParkCandidates(in, out);
+        }
+    }
+
+    // Stratholme X2: the Zones of the drop's enterable preferred spots (`ids`: their mechanic ids) stop being hot at
+    // drop.enterAt - marginMs (a plain or lasting window; a projectile or mine is left alone), so a target inside one
+    // is safe from an arrival at enterAt on and the way in is free after it. A window that would end before it starts
+    // is emptied. Idempotent: the view calls it after every player pass, and BuildInput rebuilds the hazards (whole)
+    // once the drop's mechanic is gone.
+    inline void LiftEnterable(Input& in, std::vector<std::uint32_t> const& ids)
+    {
+        if (!in.drop.present || ids.empty())
+            return;
+        Ms const end = in.drop.enterAt - in.params.marginMs;
+        for (Hazard& h : in.hazards)
+        {
+            if (std::find(ids.begin(), ids.end(), h.id) == ids.end())
+                continue;
+            if (h.timing.type != TimingType::Interval && h.timing.type != TimingType::Instant)
+                continue;
+            if (end <= h.timing.from)
+                h.timing.from = h.timing.to = Ms(0);
+            else
+                h.timing.to = std::min(h.timing.to, end);
         }
     }
 
@@ -2034,7 +2192,11 @@ namespace BossMechanics::Solver
         {
             Weights const& w = in.params.w;
             float score = w.path * dist;
-            if (in.role.present)
+            // Stratholme X2: a carrier with a drop rule leaves its role band for the drop (the rule's terms decide).
+            bool const dropping = DropCarried(in) != nullptr;
+            if (dropping)
+                score += DropScore(in, c);
+            else if (in.role.present)
             {
                 float const d = Dist2(in.role.anchor, c);
                 score += w.role * std::max({ 0.f, in.role.minYd - d, d - in.role.maxYd });
@@ -2437,6 +2599,12 @@ namespace BossMechanics::Solver
             hazardFree[i] = 1;
             if (!Detail::PlayerKindsOk(in, c, arrival, nullptr))
                 continue;
+            // F-1b: a moved-to target keeps the hard bounds (the bot's own spot never fails them).
+            if (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c))
+            {
+                ++plan.stats.outOfBounds;
+                continue;
+            }
             kept.push_back({ i, dist, Detail::Score(in, c, dist, arrival, deadline, i == 0), c });
         }
 
@@ -2564,6 +2732,14 @@ namespace BossMechanics::Solver
                     if (!TargetOk(in, path.back(), arrival, horizonEnd))
                     {
                         ++out.stats.endUnsafe;
+                        continue;
+                    }
+                    // F-1b: the real end (a snap or the oracle may move it) and, with pathInside, the walk.
+                    if (!in.bounds.empty() && Detail::Dist3(path.back(), in.bot) > Detail::kMovedYd
+                        && (!BossMechanics::DropSpot::InBounds(in.bounds, path.back())
+                            || !BossMechanics::DropSpot::PathInBounds(in.bounds, path)))
+                    {
+                        ++out.stats.outOfBounds;
                         continue;
                     }
                     PathCheck const pc = CheckPath(pin, path, in.now, allowGrace);
@@ -2701,8 +2877,10 @@ namespace BossMechanics::Solver
                     continue;
                 Geo::Vec3 const& c = cands[i];
                 float const dist = Detail::Dist3(in.bot, c);
-                std::uint32_t const violated = kinds
-                    ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0;
+                // F-1b: a target outside the hard bounds ranks like one more broken rule.
+                std::uint32_t const violated = (kinds
+                    ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0)
+                    + (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c) ? 1u : 0u);
                 Ms cap = kForever;
                 bool walk = true;
                 if (top.size() >= Detail::kFallbackRanked)

@@ -196,6 +196,170 @@ namespace BossMechanics
         static BaitRule Farthest() { return { Type::Farthest, 0 }; }
     };
 
+    // Hard spot bounds (Stratholme F-1b, R-1-B B-1): where a bot may plan to stand while a mechanic carrying them is in
+    // its view (MechanicRef::Within; DropSpotRule::Within for a carrier's drop). The union of `areas` (none =
+    // anywhere; like the kit's arena regions: polygons, circles, boxes, each with a z band), minus the keep-out
+    // circles (doors: the navmesh walks through a closed door). PathInside(): the walked path stays inside too, once
+    // it is in. The bot's own spot is never refused (a bot already outside may stay), and a parked boss's stop keeps
+    // the bounds as well. Bots only (Solver::Bounds, MechanicDropSpot.h). For a room with a door on its east wall:
+    //
+    //     SpotBounds room = SpotBounds().Polygon({ ... the walls ... }, floorZ - 3.f, floorZ + 5.f)
+    //         .KeepOut(doorCenter, 6.f).PathInside();
+    //     Mechanic::Circle(me, spot, 4.f, 6s).Park(me).Within(room);
+    //     ref.DropSpot(DropSpotRule().Edge().Away().Within(room));    // the room doubles as the drop's edge room
+    struct SpotBounds
+    {
+        struct Area
+        {
+            std::vector<Position> polygon;  // 3+ points, or
+            Position center;                // ...a circle (radius > 0)
+            float radius = 0.f;
+            float zMin = -100000.f;
+            float zMax = 100000.f;
+        };
+
+        struct KeepOutCircle
+        {
+            Position center;
+            float radius = 0.f;
+        };
+
+        std::vector<Area> areas;
+        std::vector<KeepOutCircle> keepOut;
+        bool pathInside = false;
+
+        static constexpr float kAnyZ = 100000.f;
+
+        SpotBounds& Polygon(std::vector<Position> points, float zMin = -kAnyZ, float zMax = kAnyZ)
+        {
+            Area a;
+            a.polygon = std::move(points);
+            a.zMin = zMin;
+            a.zMax = zMax;
+            areas.push_back(std::move(a));
+            return *this;
+        }
+        SpotBounds& Circle(Position const& center, float radius, float zMin = -kAnyZ, float zMax = kAnyZ)
+        {
+            Area a;
+            a.center = center;
+            a.radius = radius;
+            a.zMin = zMin;
+            a.zMax = zMax;
+            areas.push_back(std::move(a));
+            return *this;
+        }
+        // A room frame's box: origin = a corner, X along `angle` for sizeX, Y along angle + 90 degrees for sizeY.
+        SpotBounds& Box(Position const& origin, float angle, float sizeX, float sizeY, float zMin = -kAnyZ,
+            float zMax = kAnyZ)
+        {
+            float const c = std::cos(angle);
+            float const s = std::sin(angle);
+            float const x = origin.GetPositionX();
+            float const y = origin.GetPositionY();
+            float const z = origin.GetPositionZ();
+            return Polygon({ Position(x, y, z), Position(x + c * sizeX, y + s * sizeX, z),
+                Position(x + c * sizeX - s * sizeY, y + s * sizeX + c * sizeY, z),
+                Position(x - s * sizeY, y + c * sizeY, z) }, zMin, zMax);
+        }
+        // An axis-aligned box [minX, maxX] x [minY, maxY].
+        SpotBounds& Rect(float minX, float minY, float maxX, float maxY, float zMin = -kAnyZ, float zMax = kAnyZ)
+        {
+            return Polygon({ Position(minX, minY, 0.f), Position(maxX, minY, 0.f), Position(maxX, maxY, 0.f),
+                Position(minX, maxY, 0.f) }, zMin, zMax);
+        }
+        SpotBounds& KeepOut(Position const& center, float radius)
+        {
+            keepOut.push_back({ center, radius });
+            return *this;
+        }
+        SpotBounds& PathInside() { pathInside = true; return *this; }
+    };
+
+    // The drop spot rule (Stratholme build X2): where the carrier of a shape anchored on itself (a Zone with
+    // AnchorOn(player): a circle that follows a player and lands where they stand) or of a line aimed at it (a Line
+    // whose `to` end is the player: a lane from the boss) takes it before it lands. Bots only: the hitbox, the marker
+    // and the resolve are unchanged, and a human carrier sees nothing. Soft, in this order: onto a preferred spot (an
+    // old web), else next to an enterable one until it opens, else the room's edge and away from the group; behind
+    // the travel direction, off the avoid points, inside the room and within maxRangeYd of the owner always. The
+    // carried shape's hard rule (no ally inside it) stays. Built in place and passed to MechanicRef::DropSpot:
+    //
+    //     Mechanic::Circle(me, target, 5.f, 3000ms).AnchorOn(target).Damage(25.f).Weakened()
+    //         .DropSpot(DropSpotRule().Room(plazaCenter, 30.f).Edge().Away().Prefer(web.pos, 5.f, web.handle.id));
+    struct DropSpotRule
+    {
+        struct Circle
+        {
+            Position center;
+            float radius = 0.f;
+            uint32 enterable = 0;       // Prefer: a Zone on this spot (its mechanic id) the carrier may step into
+        };
+
+        std::vector<Position> roomPolygon;  // the room's outline (3+ points), or
+        Position roomCenter;                // ...a circle room (roomRadius > 0)
+        float roomRadius = 0.f;
+        bool edge = false;
+        bool away = false;
+        bool behind = false;
+        float travelFacing = 0.f;           // radians: the way the group moves (behind = the other way)
+        float maxRangeYd = 0.f;             // from the owner; 0 = no limit
+        std::vector<Circle> prefer;
+        std::vector<Circle> avoid;
+        // An enterable preferred spot opens this long before the landing (the carrier waits next to it until then,
+        // so it stands in the old web for about this long plus its way out, DropSpot::kEnterableExitMs; a script
+        // that punishes a long stay checks DropSpot::DwellFits).
+        Milliseconds maxDwell{ 800 };
+        // Within(bounds) (Stratholme F-1b): hard bounds for the carrier's spot (SpotBounds above). With no Room, a
+        // single-area bounds is the room too (the edge follows its walls).
+        std::optional<SpotBounds> bounds;
+
+        DropSpotRule& Room(std::vector<Position> polygon) { roomPolygon = std::move(polygon); return *this; }
+        DropSpotRule& Room(Position const& center, float radius)
+        {
+            roomCenter = center;
+            roomRadius = radius;
+            return *this;
+        }
+        // A room frame's box: origin = a corner, X along `angle` for sizeX, Y along angle + 90 degrees for sizeY.
+        DropSpotRule& Room(Position const& origin, float angle, float sizeX, float sizeY)
+        {
+            float const c = std::cos(angle);
+            float const s = std::sin(angle);
+            float const x = origin.GetPositionX();
+            float const y = origin.GetPositionY();
+            float const z = origin.GetPositionZ();
+            roomPolygon = { Position(x, y, z), Position(x + c * sizeX, y + s * sizeX, z),
+                Position(x + c * sizeX - s * sizeY, y + s * sizeX + c * sizeY, z),
+                Position(x - s * sizeY, y + c * sizeY, z) };
+            return *this;
+        }
+        DropSpotRule& Edge() { edge = true; return *this; }
+        // A tie-breaker among the spots another term moves the carrier to (Edge, Prefer, the hard rule): its reward
+        // per yard is below a yard of walking, so Away alone never moves a carrier whose spot is clear.
+        DropSpotRule& Away() { away = true; return *this; }
+        DropSpotRule& Behind(float facing)
+        {
+            behind = true;
+            travelFacing = facing;
+            return *this;
+        }
+        DropSpotRule& MaxRange(float yd) { maxRangeYd = yd; return *this; }
+        // `enterable`: the mechanic id of the spot's own Zone (MechanicHandle::id), which the carrier may step into
+        // from maxDwell before the landing; 0 = a spot to land on from outside (old fire: radius = puddle + reach).
+        DropSpotRule& Prefer(Position const& center, float radius, uint32 enterable = 0)
+        {
+            prefer.push_back({ center, radius, enterable });
+            return *this;
+        }
+        DropSpotRule& Avoid(Position const& center, float radius)
+        {
+            avoid.push_back({ center, radius, 0 });
+            return *this;
+        }
+        DropSpotRule& MaxDwell(Milliseconds ms) { maxDwell = ms; return *this; }
+        DropSpotRule& Within(SpotBounds b) { bounds = std::move(b); return *this; }
+    };
+
     // A bot's planned spot on one mechanic (M3 handoff §3.6). Registry::Reserve replaces the bot's earlier entry and
     // keeps its `since`; Tick drops it at `until`.
     struct Reservation
@@ -290,6 +454,11 @@ namespace BossMechanics
         bool park = false;
         ObjectGuid parkUnit;
         BaitRule bait;
+        // DropSpot(rule) (Stratholme X2): where the carrier bot takes this shape before it lands. Bots only.
+        std::optional<DropSpotRule> dropSpot;
+        // Within(bounds) (Stratholme F-1b): while this is in a bot's view and its owner fights that bot, the bot's
+        // planned spots keep these bounds. Bots only.
+        std::optional<SpotBounds> bounds;
         GuidSet targets;                // Spread/RunOut/HoldStill: the players (Spread: empty = everyone eligible)
         std::unordered_map<ObjectGuid, Position> spots;     // Spot
         std::vector<Reservation> reservations;
