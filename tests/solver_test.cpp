@@ -1490,7 +1490,11 @@ namespace
             "mean %.0f us%s\n",
             static_cast<int>(wallPlan.outcome), wallPlan.stats.probes, wallPlan.pathChecks, wallMean,
             wallMean > 2000.0 ? "  ** OVER **" : "");
-        CHECK(wallPlan.stats.probes <= hot.params.maxProbes + 8);
+        // The pocket pass (Stratholme SWEEP-2 D6) probes its own points on a budget of its own: at most maxProbes more.
+        CHECK(wallPlan.stats.probes <= 2 * hot.params.maxProbes + 8);
+        Solver::Input noPocket = hot;
+        noPocket.params.hazardEdgeArcs = false;
+        CHECK(Solver::Solve(noPocket, walls).stats.probes <= hot.params.maxProbes + 8);
         CHECK(wallPlan.stats.offMesh == wallPlan.stats.probes);
         CHECK(sink > 0);
     }

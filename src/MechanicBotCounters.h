@@ -29,6 +29,8 @@ namespace BossMechanics
         uint32 pathChecks = 0;
         std::array<uint32, kOutcomes> outcomes{};       // indexed by Solver::Outcome
         uint32 tightMoves = 0;      // Move outcomes found only at the reduced margin (Solver::Params::tightMarginYd)
+        uint32 pocketMoves = 0;     // Move outcomes found only by the pocket pass (Solver::Params::hazardEdgeArcs)
+        uint32 pocketPathChecks = 0;    // oracle path calls the pocket pass spent (part of pathChecks)
         uint32 lateArrivals = 0;    // escapes still inside a hazard's hitbox once its window there had started
         uint32 lateFallbacks = 0;   // ...of which the plan was a Fallback or NoPath (late by construction)
         uint32 stuckResolves = 0;   // re-solved because the bot did not move for 500 ms during an escape

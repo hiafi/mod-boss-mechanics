@@ -1625,7 +1625,8 @@ namespace BossMechanics
     std::string FormatSolveStats(Solver::SolveStats const& s)
     {
         return Acore::StringFormat("kept {}, probes {} (off {}, snapped {}), no path {}, end unsafe {}, crosses start "
-            "{} / other {}, budget stops {}, out of bounds {}", s.kept, s.probes, s.offMesh, s.snapped, s.noPath,
-            s.endUnsafe, s.crossStart, s.crossOther, s.budgetStops, s.outOfBounds);
+            "{} / other {}, budget stops {}, out of bounds {}, pocket {} point(s) {} path check(s)", s.kept, s.probes,
+            s.offMesh, s.snapped, s.noPath, s.endUnsafe, s.crossStart, s.crossOther, s.budgetStops, s.outOfBounds,
+            s.pocketCandidates, s.pocketPathChecks);
     }
 }

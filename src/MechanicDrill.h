@@ -164,6 +164,15 @@ namespace BossMechanics::Drill
         return bellTag + 2;
     }
 
+    // A pass of the catch circle is a catch only when it hit the hunted player (Stratholme SWEEP-2 D5: the hunted
+    // player's pet on the chaser's start used to end the hunt at the end of the howl). The circle is players only
+    // (Eligibility::playersOnly), so nobody else is hit; a hit on anyone else would still not be the catch.
+    template <class Id>
+    bool HuntCaught(std::vector<Id> const& hits, Id const& hunted)
+    {
+        return std::find(hits.begin(), hits.end(), hunted) != hits.end();
+    }
+
     // The chaser's speed in yd/s at `rate` x player run speed.
     constexpr float HuntSpeedYdS(float rate)
     {
