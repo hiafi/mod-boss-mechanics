@@ -98,6 +98,14 @@ namespace BossMechanics
             return IsShapeKind(k) && !mine && !decoy;
         }
 
+        // Eligibility's stack window (Registry::IsEligible): a player with `stacks` of the eligibility aura is
+        // eligible when minStacks <= stacks <= maxStacks. maxStacks 0 keeps out everyone carrying the aura at all
+        // (Vosh'gajin's Needle, `Eligible({BOUND, maxStacks = 0})`: the Bound player is never the needle's target).
+        constexpr bool StacksEligible(std::uint32_t stacks, std::uint8_t minStacks, std::uint8_t maxStacks)
+        {
+            return stacks >= minStacks && stacks <= maxStacks;
+        }
+
         // The resolve filter's rule (Registry::FilterResolveTargets and the telegraph-only pass).
         constexpr bool KeepResolveTarget(Kind k, Candidate const& c)
         {

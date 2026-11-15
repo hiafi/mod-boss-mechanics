@@ -333,7 +333,8 @@ namespace
 
     bool M5Spell(std::uint32_t id)
     {
-        return (id >= Ids::SPELL_M5_FIRST && id <= Ids::SPELL_M5_LAST) || Ids::RiderAllowed(id);
+        return (id >= Ids::SPELL_M5_FIRST && id <= Ids::SPELL_M5_LAST) || Ids::RiderAllowed(id)
+            || id == Ids::SPELL_DRILL_TAUNT_SWAP;
     }
 
     bool M5Creature(std::uint32_t entry)

@@ -21,6 +21,7 @@
 #include "MechanicBotBrain.h"
 #include "MechanicBotGate.h"
 #include "MechanicBotState.h"
+#include "MechanicBotTauntSwap.h"
 #include "MechanicDescriptorView.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
@@ -438,7 +439,8 @@ std::string BotTargets::ReportLine(MechanicBotState const& st)
     TargetRules::Focus const& f = st.targets.focus;
     MechanicBotCounters const& c = st.counters;
     std::string const focus = f.target ? Acore::StringFormat("{} prio {}{}{}", ObjectGuid(f.target).ToString(),
-        f.priority, f.Engaged() ? " engaged" : "", f.aoeOk ? " aoe ok" : "") : std::string("-");
+        f.priority, f.Engaged() ? " engaged" : "", f.aoeOk ? " aoe ok" : "") + (f.swapHold ? " (swap hold)" : "")
+        : std::string("-");
     return Acore::StringFormat("m5 targets: focus {} | switches {}, on lower targets {} ms, break-out max {} ms | "
         "ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, minions pulled "
         "off {} | turned teammates released {}", focus, c.focusSwitches, c.msLowerTarget, c.breakOutMsMax,
@@ -496,13 +498,21 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
     DescriptorView& v = st->descriptor;
     if (!active || v.descriptor.targets.empty() || !bot->IsInCombat())
         return none;
+    // WP-TS: the taunt swap's bosses (a copy: the decision is taken before the facts below, and a refresh in it would
+    // not copy the view again within this ms). A boss the bot keeps off is no candidate; one it holds is its focus.
+    TauntSwap::Decision const swap = BotTauntSwap::Refresh(botAI, *st, now);
 
-    std::vector<ObjectGuid> guids{ v.owner };
-    for (EncounterUnit const& u : v.units)
-        guids.push_back(u.guid);
-    for (ObjectGuid const& g : attackers)
-        if (std::find(guids.begin(), guids.end(), g) == guids.end())
+    std::vector<ObjectGuid> guids;
+    auto addGuid = [&](ObjectGuid const& g)
+    {
+        if (!swap.HeldOff(g.GetRawValue()) && std::find(guids.begin(), guids.end(), g) == guids.end())
             guids.push_back(g);
+    };
+    addGuid(v.owner);
+    for (EncounterUnit const& u : v.units)
+        addGuid(u.guid);
+    for (ObjectGuid const& g : attackers)
+        addGuid(g);
 
     std::vector<Desc::TargetCandidate> candidates;
     std::vector<Unit*> units;
@@ -525,6 +535,7 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
     facts.tank = PlayerbotAI::IsTank(bot);
     facts.healer = PlayerbotAI::IsHeal(bot);
     facts.melee = PlayerbotAI::IsMelee(bot);
+    facts.mainTank = facts.tank && PlayerbotAI::IsMainTank(bot);   // WP-TS: Who::MainTank / Who::AssistTank
     facts.guid = bot->GetGUID().GetRawValue();
     Desc::Context const ctx = ContextOf(v, bot);
     TargetRules::Focus f;
@@ -543,6 +554,13 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
         candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(at));
         units.erase(units.begin() + static_cast<std::ptrdiff_t>(at));
         f = TargetRules::Focus();
+    }
+    // WP-TS: a tank keeps the swap boss it holds, whatever the list ranks above it (the assist tank's add entry).
+    if (Desc::Key const held = TauntSwap::HeldFocus(swap, KeyOf(current)); held && f.target != held)
+    {
+        f = TargetRules::Focus();
+        f.target = held;
+        f.swapHold = true;
     }
     st->targets.focus = f;
     return f;

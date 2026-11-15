@@ -14,6 +14,7 @@
 #include "MechanicBotLock.h"
 #include "MechanicBotState.h"
 #include "MechanicBotTargets.h"
+#include "MechanicBotTauntSwap.h"
 #include "MechanicLeaks.h"
 #include "MotionMaster.h"
 #include "MoveSpline.h"
@@ -95,6 +96,8 @@ void MechanicBotStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode("boss focus", { NextAction("boss focus", ACTION_RAID + 2) }));
     // M5 WP-I: kick the interrupt list's casts, above the stock kick rows (MechanicBotInterrupt.h).
     triggers.push_back(new TriggerNode("boss interrupt due", { NextAction("boss kick", ACTION_INTERRUPT + 5) }));
+    // Blackrock Spire WP-TS: the picked tank taunts the swap boss, above the focus (MechanicBotTauntSwap.h).
+    triggers.push_back(new TriggerNode("boss taunt swap", { NextAction("boss taunt swap", ACTION_RAID + 3) }));
 }
 
 void MechanicBotStrategy::InitMultipliers(std::vector<Multiplier*>& multipliers)
@@ -102,11 +105,13 @@ void MechanicBotStrategy::InitMultipliers(std::vector<Multiplier*>& multipliers)
     multipliers.push_back(new MechanicBotLockMultiplier(botAI));
     multipliers.push_back(new MechanicBotFocusMultiplier(botAI));     // M5 WP-T
     multipliers.push_back(new MechanicBotKickMultiplier(botAI));      // M5 WP-I
+    multipliers.push_back(new BossTauntSwapMultiplier(botAI));        // Blackrock Spire WP-TS: the hold-off
 }
 
-void MechanicBotStrategy::AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType /*type*/)
+void MechanicBotStrategy::AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType type)
 {
     BotTargets::AppendExclusions(botAI, exclusions);
+    BotTauntSwap::AppendExclusions(botAI, exclusions, type);     // WP-TS: the bosses a tank keeps off
 }
 
 bool MechanicBotRepositionTrigger::IsActive()

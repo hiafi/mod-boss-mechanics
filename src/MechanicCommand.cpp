@@ -10,7 +10,8 @@
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
- *               |stratholme-followups|stratholme-drops|stratholme-jump> [cycles=3] [seed=] [dmg=1] [self=0]
+ *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups> [cycles=3] [seed=]
+ *               [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -66,6 +67,11 @@
  * Stratholme build X3 (drill `stratholme-jump`): `jump <r> <ms>` is a Mechanic::Jump circle of r on the anchor: at the
  * end of the warning it hits every scope member inside who is on the ground (damage keys as a circle); whoever is in
  * the air is spared, and bots hop for it (MechanicJump.h).
+ *
+ * Blackrock Spire build (WP-G1 §3.9, drill `blackrock-spire-followups`): every command (and drill run) keeps the far
+ * ends of its last fixed lines (Dice::ends, Drill::LineEnds): `at=last:<n>` lands on the end of the line n before the
+ * last (a shape placed after a later line), and `to=last[:<n>]` aims a line at such an end, frozen like fix=1
+ * and recording no end of its own (WT11's haul and VO12's recall along an axe chain).
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -139,7 +145,8 @@ namespace
 
     // The dice of one command. Delayed registrations share it, so they keep drawing from the same seeded sequence.
     // `lastMember` is the member the last pick landed on (`pick=same`); `chain` the members picked since the last pick
-    // that was not `pick=other`; `lastEnd` the far end of the last fixed line registered (`at=last`); `lastCircle` the
+    // that was not `pick=other`; `ends` the far ends of the last fixed lines registered (`at=last[:<n>]`, `to=last`,
+    // Drill::LineEnds; a line aimed with to=last records none); `lastCircle` the
     // centre of the last point-anchored circle registered (`at=prev`); `hunt` the last `hunt` registered (a `soak
     // bell=` ends it).
     struct Dice
@@ -149,7 +156,7 @@ namespace
         Barrage::Rng rng;
         ObjectGuid lastMember;
         std::vector<ObjectGuid> chain;
-        std::optional<Position> lastEnd;
+        Drill::LineEnds<Position> ends;
         std::optional<Position> lastCircle;
         HuntPtr hunt;
     };
@@ -404,7 +411,8 @@ namespace
 
         // landing: at=member picks a group member when the repeat registers; scatter offsets a point anchor
         bool atMember = false;
-        bool atLast = false;            // at=last: the end of the last fixed line (Dice::lastEnd)
+        bool atLast = false;            // at=last[:<n>]: the end of a recent fixed line (Dice::ends)
+        uint32 atBack = 0;              // at=last:<n>: n lines before the last (0: the last)
         bool atEach = false;            // at=each: one shape under every member
         bool includeGm = false;
         float scatter = 0.f;
@@ -444,7 +452,8 @@ namespace
             None,
             Member,
             Target,
-            Me
+            Me,
+            Last                        // to=last[:<n>] (line): a recorded line end (Dice::ends), frozen
         };
 
         bool rear = false;              // frontal
@@ -499,6 +508,8 @@ namespace
         Milliseconds lead{ Drill::kDefaultPredictLeadMs };
         // Stratholme build (WP-G §3.9, drill `stratholme-followups`)
         bool exemptTo = false;          // exempt=target: the to= unit is not eligible (BZ1; RegisterRepeat)
+        // Blackrock Spire build (WP-G1 §3.9, drill `blackrock-spire-followups`)
+        uint32 toBack = 0;              // to=last:<n>: the end n lines before the last (0: the last)
     };
 
     bool IsShapeName(std::string const& s)
@@ -1214,9 +1225,9 @@ namespace
         }
         if (spec.atLast)
         {
-            // The end of the last fixed line; none yet: where the selected unit stands now.
-            if (dice.lastEnd)
-                spec.point = *dice.lastEnd;
+            // The end of the fixed line `atBack` before the last; none: where the selected unit stands now.
+            if (std::optional<Position> const end = dice.ends.Back(spec.atBack))
+                spec.point = *end;
             else if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
                 spec.point = selected->GetPosition();
             spec.point.SetOrientation(spec.facing);
@@ -1320,6 +1331,7 @@ namespace
             case TestSpec::To::Me:
                 spec.toUnit = spec.gm;
                 break;
+            case TestSpec::To::Last:
             case TestSpec::To::None:
                 break;
         }
@@ -1338,17 +1350,35 @@ namespace
                 elig.carriers.insert(ObjectGuid::Empty);
             spec.eligibility = elig;
         }
+        // to=last: the line is aimed at a recorded end, so it records none of its own (the next to=last:<n> keeps
+        // counting the same lines).
+        bool const aimedAtEnd = spec.to == TestSpec::To::Last;
         if (spec.fix && spec.to != TestSpec::To::None)
         {
-            // Frozen now: a point line from the source toward where the to= unit stands (reach: ending there).
-            Unit* toUnit = ObjectAccessor::GetUnit(*owner, spec.toUnit);
-            if (!toUnit)
+            // Frozen now: a point line from the source toward where the to= unit stands (reach: ending there), or
+            // (to=last) toward a recorded line end; none recorded: where the selected unit stands.
+            Position toward;
+            if (aimedAtEnd)
+            {
+                if (std::optional<Position> const end = dice.ends.Back(spec.toBack))
+                    toward = *end;
+                else if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+                    toward = selected->GetPosition();
+                else
+                {
+                    err = "to=last: no line end recorded and the selected unit is gone";
+                    return {};
+                }
+            }
+            else if (Unit* toUnit = ObjectAccessor::GetUnit(*owner, spec.toUnit))
+                toward = toUnit->GetPosition();
+            else
             {
                 err = "the to= unit is gone";
                 return {};
             }
             Drill::FixedLine const line = Drill::FixLine({ source.GetPositionX(), source.GetPositionY(),
-                source.GetPositionZ() }, { toUnit->GetPositionX(), toUnit->GetPositionY(), toUnit->GetPositionZ() },
+                source.GetPositionZ() }, { toward.GetPositionX(), toward.GetPositionY(), toward.GetPositionZ() },
                 spec.size, spec.reach, spec.facing);
             spec.unitAnchor = false;
             spec.to = TestSpec::To::None;
@@ -1391,13 +1421,14 @@ namespace
         // A point-anchored circle leaves its centre for the next `at=prev`.
         if (!ids.empty() && spec.shape == "circle" && !spec.unitAnchor)
             dice.lastCircle = spec.point;
-        // A fixed line (a point source along a fixed facing) leaves its far end for the next `at=last`.
+        // A fixed line (a point source along a fixed facing) leaves its far end for the next `at=last` (and
+        // `to=last`); a line aimed at a recorded end leaves none.
         if (!ids.empty() && (spec.shape == "line" || spec.shape == "projectile") && !spec.unitAnchor
-            && spec.to == TestSpec::To::None)
+            && spec.to == TestSpec::To::None && !aimedAtEnd)
         {
             Geo::Vec3 const end = Drill::LineEnd({ spec.point.GetPositionX(), spec.point.GetPositionY(),
                 spec.point.GetPositionZ() }, spec.facing, spec.size);
-            dice.lastEnd = Position(end.x, end.y, GroundZ(owner, end.x, end.y, end.z), spec.facing);
+            dice.ends.Push(Position(end.x, end.y, GroundZ(owner, end.x, end.y, end.z), spec.facing));
         }
         return ids;
     }
@@ -1548,10 +1579,17 @@ namespace
         if (s == "cone" || s == "frontal")
             spec.offset = opt.Float("offset", 0.f);
         // to=member|target|me: a line (or, Stratholme BZ1, a cone) aims at that unit live from its anchor.
-        auto readTo = [&opt, &spec]()
+        // to=last[:<n>] (lines only, Blackrock Spire WP-G1): aimed at a recorded line end, frozen like fix=1.
+        auto readTo = [&opt, &spec](bool allowLast)
         {
             std::string const to = opt.Str("to", "");
-            if (to == "member")
+            std::optional<uint32> const back = allowLast ? Drill::LastIndex(to) : std::nullopt;
+            if (back)
+            {
+                spec.to = TestSpec::To::Last;
+                spec.toBack = *back;
+            }
+            else if (to == "member")
                 spec.to = TestSpec::To::Member;
             else if (to == "target")
                 spec.to = TestSpec::To::Target;
@@ -1561,14 +1599,14 @@ namespace
                 opt.MarkBad("to");
         };
         if (s == "cone")
-            readTo();
+            readTo(false);
         if (s == "line" || s == "projectile")
         {
             spec.width = opt.Float("width", s == "projectile" ? 3.f : 4.f);
             spec.exclude = opt.Float("exclude", 0.f);
-            readTo();
+            readTo(s == "line");
             spec.reach = opt.Bool("reach", false);
-            spec.fix = spec.reach || opt.Bool("fix", false);
+            spec.fix = spec.reach || opt.Bool("fix", false) || spec.to == TestSpec::To::Last;
             spec.minDist = opt.Float("min", 0.f);
             if (spec.minDist < 0.f)
                 opt.MarkBad("min");
@@ -1850,8 +1888,11 @@ namespace
             spec.atGroup = true;
         else if (at == "gm")
             spec.atGm = true;
-        else if (at == "last")
+        else if (std::optional<uint32> back = Drill::LastIndex(at))
+        {
             spec.atLast = true;
+            spec.atBack = *back;
+        }
         else if (at == "each")
             spec.atEach = true;
         else if (at == "prev")
@@ -1929,6 +1970,10 @@ namespace
             return "to= aims the cone at a unit: no follow=1";
         if (spec.exemptTo && spec.to == TestSpec::To::None)
             return "exempt=target spares the unit the shape aims at: add to=member, target or me";
+        if (spec.exemptTo && spec.to == TestSpec::To::Last)
+            return "exempt=target spares a unit: to=last aims at a point";
+        if (spec.to == TestSpec::To::Last && spec.follow)
+            return "to=last freezes the line at a recorded end: no follow=1";
         if (spec.shifted && (spec.unitAnchor || spec.anchorMember))
             return "shift= moves a point anchor; leave anchor= out";
         if (spec.cluster && spec.lane)

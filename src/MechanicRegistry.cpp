@@ -1229,8 +1229,7 @@ namespace BossMechanics
             return false;
         if (e.auraSpell)
         {
-            uint32 const stacks = p->GetAuraCount(e.auraSpell);
-            if (stacks < e.minStacks || stacks > e.maxStacks)
+            if (!Judge::StacksEligible(p->GetAuraCount(e.auraSpell), e.minStacks, e.maxStacks))
                 return false;
         }
         return true;

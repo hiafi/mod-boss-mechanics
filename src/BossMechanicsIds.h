@@ -16,6 +16,7 @@
  * | 205019-205020 | M5 deadline debuff (Magic, 8 s) and its expiry burst              |
  * | 205021-205022 | M5 purgeable Magic buff, Enrage buff (soothe)                     |
  * | 205023        | M5 "Aiming" aura (raises an add's priority)                       |
+ * | 205024        | Taunt Swap (drill): tank swap debuff, 10 stacks, 15 s (WP-TS)     |
  * | 205000-205099 | the reserved spell block (`rider=` takes 205008 and 205009 only)  |
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
@@ -107,7 +108,12 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t SPELL_DRILL_ENRAGE = 205022;        // Enrage buff (soothe)
     constexpr std::uint32_t SPELL_DRILL_AIMING = 205023;        // raises an add's target priority
     constexpr std::uint32_t SPELL_M5_FIRST = SPELL_DRILL_CAST_LOW;
-    constexpr std::uint32_t SPELL_M5_LAST = SPELL_DRILL_AIMING;     // 205024-205029 reserved, undeclared
+    constexpr std::uint32_t SPELL_M5_LAST = SPELL_DRILL_AIMING;     // 205025-205029 reserved, undeclared
+    // Taunt Swap (drill) (Blackrock Spire build WP-TS; declared in core apps/dbc-tools source/npcs/boss_mechanics.py):
+    // the `taunt-swap` drill's tank swap debuff, harmless, 15 s refreshed on every stack, up to 10 stacks. A boss
+    // debuff's shape, so the stacks fall off the tank that gave the boss away and the tanks trade again and again.
+    constexpr std::uint32_t SPELL_DRILL_TAUNT_SWAP = 205024;
+    constexpr std::uint8_t TAUNT_SWAP_DRILL_MAX_STACKS = 10;
 
     // `.mech test rider=`: the harmless drill auras only (Baited and Marked). Weakened would be handed out on a job hit
     // (around the user ruling) and outlive the encounter; a resolve spell would deal a second hit; the M5 stand-ins

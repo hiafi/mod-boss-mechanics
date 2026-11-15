@@ -13,6 +13,9 @@
  * | trigger  | boss focus                 | MechanicBotFocusTrigger       | M5 WP-T, see         |
  * | action   | boss focus                 | MechanicBotFocusAction        | ACTION_RAID + 2      |
  * | (mult.)  | boss focus                 | MechanicBotFocusMultiplier    | MechanicBotTargets.h |
+ * | trigger  | boss taunt swap            | BossTauntSwapTrigger          | WP-TS, see the file  |
+ * | action   | boss taunt swap            | BossTauntSwapAction           | ACTION_RAID + 3      |
+ * | (mult.)  | boss taunt swap            | BossTauntSwapMultiplier       | MechanicBotTauntSwap |
  *
  * The triggers run the brain (MechanicBotBrain::Update, once per game-time ms) and read the mode it leaves. The
  * move action is a MovementAction so it can use the protected MoveTo; the lock multiplier exempts it by type (and

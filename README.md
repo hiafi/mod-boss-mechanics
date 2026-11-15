@@ -427,7 +427,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
-            |stratholme-followups|stratholme-drops|stratholme-jump> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups> [cycles=3 (alexei 1)]
+            [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -552,6 +553,12 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   group's travel direction, `prefer` makes every live persistent circle of the test owner on a point an enterable
   preferred spot, `avoid` makes each one an avoid point, and `dwell=<ms>` (default 800) is how long before the
   landing such a spot opens.
+- Blackrock Spire build (WP-G1 §3.9, drill `blackrock-spire-followups`): the command (or drill run) keeps the far
+  ends of its last 8 fixed lines (`Drill::LineEnds`). `at=last:<n>` lands on the end of the line n before the last
+  (`at=last` = `at=last:0`; a shape placed after a later line still reads an earlier one). `to=last[:<n>]` (line)
+  aims a line from its source at that end, frozen at registration like `fix=1` (`reach=1` ends it there); such a line
+  records no end of its own, so two hauls along two chains read `to=last:1` and `to=last`. An index past the recorded
+  ends lands on the selected unit. Not with `exempt=` or `follow=1`.
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -679,6 +686,21 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     (`Jump/<tag>`, `RunOut/2`): 1 rope, 2 the RunOut, 3 Double Dutch's 2 s skips, 4 its 1.5 s skips. The bar: no
     `Jump` hit at all (each one is a bot that did not hop: `.mech bots` "x3 jumps" says why). The sweep runs
     `stratholme-jump:6`.
+  - `blackrock-spire-followups` (Blackrock Spire build §3.9, WP-G1 wave 1 rows 0-12; 24 s, five cycles by default = 120
+    s, heroic numbers in `pct=`): 0 s, Omokk OM2's one-two, a 5 x 30 yd line from the creature toward a non-tank's spot
+    (2.5 s, `fix=1`), then one toward where that player stands as it lands (1.5 s, `pick=same`). 6 s, Gizrul and Halycon
+    HG2 + HG3, two 5 x 30 yd charges 1 s apart through the farthest non-tanks (3 s, `min=15 reach=1`), and an 8 yd
+    pounce at each line's far end, shown with its line as B7 builds HG3 and landing 1.5 s after its charge (4.5 s,
+    `at=last` right after its charge). 12 s, the axe chains (WT11 hard mode, Voone's VO11), a 2 yd chain from the
+    creature to each of two non-tanks' spots, 8 s (a 10% crossing every 2 s); as they end a 1.5 s warning and a line
+    along each (`to=last:1`, `to=last`): even cycles WT11's haul (3 yd, 35%), odd cycles Voone's War Cry recall (VO12 ->
+    VO7: 4 yd, 5 yd at the creature excluded, 40%). Weakened on all but OM2. Tags (`Zone/<tag>`): 1 punch, 2 second
+    punch, 3 charges, 4 pounces, 5 chains, 6 hauls, 7 recall lanes; 1, 3 and 5 are reported, 2, 4, 6 and 7 are under the
+    sweep's bar (`Drill::kBrsBarTags`: at most 1 hit per tag per spec run, no tag on more than 3 specs). It gates the
+    heroic sign-off of B1 (2), B7 (4), B9 (6) and B3 (7) only. The sweep runs `blackrock-spire-followups:5`, one sweep
+    for this drill alone (never `;`-joined with another):
+    `mechanics_sweep.py run --programs blackrock-spire-followups:5 --duration 120 --iterations 5 --step 100 --jobs 6
+    --sweep blackrock-spire-followups` (mod-dpssim `tools/`, after the build).
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -1238,6 +1260,81 @@ who counts as in the air, a 400 ms late resolve tick, the hop along a walk under
 RunOut, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range, and the drill's
 rows).
 
+### Taunt swap (Blackrock Spire WP-TS)
+
+Designer rulings 62-64 and shared doc BS7: at exactly 10 players a flex dungeon boss may stack a debuff on its tank,
+and the other tank takes it over at a stack count. Files: `src/MechanicTauntSwap.h` (pure rules, the taunt table;
+`tests/taunt_swap_test.cpp`), `src/MechanicBotTauntSwap.h/.cpp` (the glue). No mod-playerbots edit.
+
+**Boss data.** A `TauntSwapEntry` in the descriptor: the boss (`bossEntry`, or `TauntSwapEntry::ForUnit(guid, ...)`,
+or neither for the encounter owner), the debuff, the stack count (default 3) and a `when` judged on the boss. Stacks
+are those the boss itself put on the tank (`GetAura(spell, boss)`), so two wolves with one debuff id count apart;
+`.AnyCaster()` counts every caster's. The boss registers the entry only where the swap applies: in a flex dungeon only
+when the pull's held count is exactly 10 (ruling 63, the kit's `TankSwapOn(n)`), never by counting tanks.
+
+```cpp
+if (DungeonKit::Flex::TankSwapOn(n))
+    d.tauntSwaps.emplace_back(NPC_MOTHER_SMOLDERWEB, SPELL_WIDOWS_BITE, 3);
+// Halycon and Gizrul: one entry per wolf; the tanks trade them.
+d.tauntSwaps.emplace_back(NPC_HALYCON, SPELL_TORN_HIDE, 3);
+d.tauntSwaps.emplace_back(NPC_GIZRUL, SPELL_TORN_HIDE, 3);
+// "The second tank picks up Gizrul on arrival" (a target entry, not part of the swap).
+d.targets.emplace_back(NPC_GIZRUL, 1, Who::AssistTank);
+```
+
+**Rules** (each tank decides on its own, from the same facts; `TauntSwap::Decide`). A swap boss is a live encounter
+unit in combat that an entry names, its `when` holding. The tanks are the bot's group members on its map with a tank
+spec (`PlayerbotAI::IsTank`), humans included.
+
+- The boss's victim holds it. The victim is the caster of the last taunt on the boss when there is one
+  (`TauntSwap::EffectiveVictim`): the boss turns only at its next AI update, after every player's in the map update,
+  so a third tank stepping after the taunter would otherwise see no answer and taunt too.
+- When the victim is a tank with `swapAtStacks` or more, another tank whose own stacks of that boss's debuff have
+  fallen off (0) and whose taunt is ready taunts it (user ruling 2026-11-15: "they should taunt when the debuff has
+  fallen off of them"): one that holds no swap boss first, then the lower guid. One taunter per boss. A tank with 1 or
+  more stacks never taunts that boss, however high the victim's stacks; with no tank at 0 and ready, the victim keeps
+  the boss (the stacks grow: the tank's own failure).
+- A tank holding two swap bosses gives one to a tank holding none at once (the trade): among the bosses whose debuff
+  is gone from the free tank, the one where the holder has the most stacks (ties to the first entry); none, no trade.
+  Gizrul arriving on the main tank goes to a second tank still carrying Halycon stacks ("the second tank picks up
+  Gizrul"); a swap that left one tank with both wolves ends in one wolf each.
+- **Hold-off**: every other tank keeps off a boss another tank holds until it is picked to taunt. The `boss taunt
+  swap` multiplier zeroes its actions aimed at that boss (kicks excepted) and its area taunts; the waker stops its
+  melee, drops the boss as its current target and breaks a cast at it; the strategy's target exclusions (tank, dps
+  and debuff targets) keep the stock pickers off it, and the `boss kill target` focus leaves it out. Without this the
+  debuffed tank would pull the boss back with threat once the 3 s taunt ends (or taunt it back on the stock "lose
+  aggro" trigger: an explicit main tank does), and the waiting tank could rip it early.
+- A boss on a non-tank, or on nobody, is not judged: the stock taunts take it back as before.
+- A tank keeps the swap boss it holds as its focus over the list's picks (`Focus::swapHold`), so the assist tank's add
+  entry does not walk it off a wolf it took in a trade.
+
+With the designed 15 s debuff and a hit every 6 s the waiting tank is at 0 again when the other reaches 3
+(`taunt_swap_test` runs the timelines: Smolderweb and the wolves peak at 3 with no wait past the count; under Call of
+the Pack's 4 s bites a holder at 3 sometimes waits for the other tank's debuff to fall off, still peaking at 3).
+
+**Taunts** (`TauntSwap::kTable`, by spell id: playerbots' `IsTauntAction` knows only the stock action classes): Taunt
+355, Hand of Reckoning 62124, Growl 6795, Dark Command 56222, Insult 203722 (rogue tank), Demonic Taunt 200839 (Dark
+Apotheosis), Earth Shock (the highest rank known; a tank only: it taunts under Rockbiter), Mocking Blow 694, then
+Righteous Defense 31789 at the victim, never while the victim holds two swap bosses (it taunts up to 3 of the victim's
+attackers and would hand both wolves to the taker; `TauntSwap::FriendTauntAllowed`). Never cast by the swap: the area
+taunts (Challenging Shout 1161, Challenging Roar 5209, Challenging Howl 59671; blocked while the tank keeps off a boss)
+and Death Grip 49576 (it moves the boss). The swap is the `boss taunt swap` trigger and action at `ACTION_RAID + 3`
+(above the focus): the taunt when in reach and line of sight, else an attack on the boss to walk in; then the boss as
+the target.
+
+**Assist tank** (`Who::MainTank`, `Who::AssistTank`): the main tank is playerbots' `IsMainTank` (the group's main
+tank flag, else its first live tank); every other tank is an assist tank. `Who::Tank` still means both.
+
+**Drill** `taunt-swap` (Descriptor Training Dummy 300403, which is tauntable; not in the descriptor loops): two tanks;
+the dummy stacks Taunt Swap (drill) 205024 (15 s from the last stack, up to 10) on its victim every 6 s and the tanks
+trade at 3; an add for the first 12 s that the assist tank picks up. A tank taunts only once its own stacks have
+fallen off, and 15 s at a stack every 6 s clears the giver by the taker's third stack, so a 60 s run shows a swap every
+18 s (three), each tank peaking at 3.
+
+**Check**: `.mech desc` prints each entry and, per swap boss, its victim and the victim's stacks; `.mech bots` prints
+the `ts taunt swap` line per bot (holds, keeps off, the pending taunt and why, swaps and trades, refused casts, walks
+in, attacks stopped, actions blocked, the most stacks it held). Debug (`BossMechanics.Bots.Debug`) logs each swap.
+
 ### Gate
 
 Installed on every bot, master or not, by login, map change and a sweep every `GateSweepMs` (repairs
@@ -1503,7 +1600,9 @@ same rule).
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 205008 | Baited (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' bait rotation aura (`rider=`, `aura=`) |
 | 205009 | Marked (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' selector (`marker` steps) |
-| 205010-205099 | spare (the module's block; `rider=` takes 205008-205099) |
+| 205010-205023 | M5 descriptor stand-ins (`BossMechanicsIds.h`) |
+| 205024 | Taunt Swap (drill): harmless tank swap debuff, 10 stacks, 15 s; the `taunt-swap` drill's debuff |
+| 205025-205099 | spare (the module's block; `rider=` takes 205008-205099) |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
 | 300402 | Mechanics Training Dummy (`npc_boss_mechanics_dummy`, M4) |

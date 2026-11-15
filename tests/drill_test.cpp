@@ -216,7 +216,8 @@ namespace
             }
         }
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
-            "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump" })
+            "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
+            "blackrock-spire-followups" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -488,8 +489,8 @@ namespace
     }
 
     // STAGE-M3-R-REPORT n-11: alexei runs one cycle by default (2.6 minutes), deadmines-followups two (its alternating
-    // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s), the
-    // others three.
+    // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s),
+    // blackrock-spire-followups five (24 s cycles, 120 s), the others three.
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())
@@ -497,7 +498,8 @@ namespace
             std::string_view const name = d.name;
             CHECK(d.defaultCycles == (name == "alexei" ? 1u
                 : name == "deadmines-followups" || name == "sfk-hunt" ? 2u
-                : name == "stratholme-drops" ? 4u : name == "stratholme-jump" ? 6u : 3u));
+                : name == "stratholme-drops" ? 4u : name == "stratholme-jump" ? 6u
+                : name == "blackrock-spire-followups" ? 5u : 3u));
             CHECK(d.defaultCycles * d.cycleMs <= 180000u);
         }
     }

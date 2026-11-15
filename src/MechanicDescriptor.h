@@ -17,7 +17,8 @@
  * - dispels and purges (WP-P): IsUrgent, DispelHeld, OrderDispels, PickPurge;
  * - targets and the ignore list (WP-T): Fits, PickTarget, IsIgnored;
  * - turned teammates (SFK F1): IsHostilePlayer, read by TargetEntry::HostilePlayers and the playerbots fork's
- *   hostile-teammate hook (MechanicBotTargets.cpp).
+ *   hostile-teammate hook (MechanicBotTargets.cpp);
+ * - taunt swaps (Blackrock Spire WP-TS): TauntSwapEntry here, the rules in MechanicTauntSwap.h.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DESCRIPTOR_H
@@ -108,7 +109,9 @@ namespace BossMechanics
     };
 
     // Which bots an entry concerns. Melee and Ranged are damage dealers only; Dps is every damage dealer; tanks and
-    // healers take an entry only when it names them (Tank, Healer) or Any.
+    // healers take an entry only when it names them (Tank, Healer, MainTank, AssistTank) or Any. MainTank is the
+    // group's main tank (the main tank flag, else its first live tank: playerbots' IsMainTank); AssistTank every
+    // other tank (Blackrock Spire WP-TS: "the second tank picks up Gizrul / the champions / the Guards").
     enum class Who : std::uint8_t
     {
         Any,
@@ -116,7 +119,9 @@ namespace BossMechanics
         Ranged,
         Tank,
         Healer,
-        Dps
+        Dps,
+        MainTank,
+        AssistTank
     };
 
     // The structs below take their main fields through a constructor (a brace list naming only some fields would warn
@@ -232,6 +237,46 @@ namespace BossMechanics
         std::uint64_t bot = 0;              // OnlyFor: set, the entry concerns that bot alone (raw ObjectGuid)
     };
 
+    // A taunt swap (Blackrock Spire WP-TS, designer rulings 62-64, shared doc BS7): the boss's hits stack
+    // `debuffSpell` on its victim; once the victim is a tank with `swapAtStacks` or more, another tank whose own stacks
+    // have fallen off taunts it, and the debuffed tank keeps off it until its turn comes again (MechanicTauntSwap.h;
+    // user ruling 2026-11-15). A boss scripts the entry only where the swap applies: in a flex dungeon only when the
+    // pull's held player count is exactly 10 (ruling 63; the kit's TankSwapOn(n)). `when` is judged on the boss.
+    //     d.tauntSwaps.emplace_back(NPC_SMOLDERWEB, SPELL_WIDOWS_BITE, 3);
+    //     d.tauntSwaps.push_back(TauntSwapEntry::ForUnit(gizrul.GetRawValue(), SPELL_TORN_HIDE, 3));
+    struct TauntSwapEntry
+    {
+        TauntSwapEntry(std::uint32_t bossEntry_ = 0, std::uint32_t debuffSpell_ = 0, std::uint8_t swapAtStacks_ = 3,
+            Condition when_ = {})
+            : bossEntry(bossEntry_), debuffSpell(debuffSpell_), swapAtStacks(swapAtStacks_), when(std::move(when_))
+        {
+        }
+
+        // One unit (raw ObjectGuid), whatever its entry.
+        static TauntSwapEntry ForUnit(std::uint64_t guid, std::uint32_t debuffSpell, std::uint8_t swapAtStacks,
+            Condition when = {})
+        {
+            TauntSwapEntry e(0, debuffSpell, swapAtStacks, std::move(when));
+            e.guid = guid;
+            return e;
+        }
+
+        // Count the debuff's stacks from every caster (default: only the stacks this boss put on the tank, so two
+        // wolves with one debuff id count apart).
+        TauntSwapEntry& AnyCaster()
+        {
+            anyCaster = true;
+            return *this;
+        }
+
+        std::uint32_t bossEntry = 0;        // every encounter unit of this entry; 0 (and no guid): the owner
+        std::uint64_t guid = 0;             // raw ObjectGuid; set: that unit only
+        std::uint32_t debuffSpell = 0;
+        std::uint8_t swapAtStacks = 3;      // 0: never swaps (the entry still keeps the other tank off the boss)
+        Condition when;                     // judged on the boss; while it fails the boss is not a swap boss
+        bool anyCaster = false;
+    };
+
     // Ignored while `when` holds: no damage from bots or pets, no AoE count.
     struct IgnoreEntry
     {
@@ -256,6 +301,7 @@ namespace BossMechanics
         std::vector<PurgeEntry> purges;
         std::vector<TargetEntry> targets;
         std::vector<IgnoreEntry> ignores;
+        std::vector<TauntSwapEntry> tauntSwaps;     // Blackrock Spire WP-TS
         // Auras that mark a charmed player as turned against the group (SFK F1: Arugal's Turned). A charmed player
         // carrying one is a valid attack target for bots, and bots stop healing, buffing and curing it, until the
         // aura or the charm ends. Empty: a charmed teammate stays off limits (the playerbots default).
@@ -265,7 +311,7 @@ namespace BossMechanics
         bool Empty() const
         {
             return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty()
-                && hostilePlayerAuras.empty();
+                && tauntSwaps.empty() && hostilePlayerAuras.empty();
         }
     };
 }
@@ -428,6 +474,8 @@ namespace BossMechanics::Desc
         for (IgnoreEntry const& e : d.ignores)
             AddReference(r, e.when);
         for (DispelEntry const& e : d.dispels)
+            AddReference(r, e.when);
+        for (TauntSwapEntry const& e : d.tauntSwaps)
             AddReference(r, e.when);
         return r;
     }
@@ -936,6 +984,7 @@ namespace BossMechanics::Desc
         bool tank = false;
         bool healer = false;
         bool melee = false;     // a melee damage dealer (ignored for tanks and healers)
+        bool mainTank = false;  // the group's main tank (Who::MainTank; Who::AssistTank is every other tank)
         Key guid = 0;           // the bot itself (TargetEntry::OnlyFor); 0 matches no OnlyFor entry
     };
 
@@ -956,6 +1005,10 @@ namespace BossMechanics::Desc
                 return bot.healer;
             case Who::Dps:
                 return dps;
+            case Who::MainTank:
+                return bot.tank && bot.mainTank;
+            case Who::AssistTank:
+                return bot.tank && !bot.mainTank;
         }
         return false;
     }

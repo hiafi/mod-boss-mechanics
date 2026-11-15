@@ -13,8 +13,10 @@
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
+#include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -55,6 +57,10 @@ namespace BossMechanics
                     return "healer";
                 case Who::Dps:
                     return "dps";
+                case Who::MainTank:
+                    return "main tank";
+                case Who::AssistTank:
+                    return "assist tank";
             }
             return "?";
         }
@@ -126,9 +132,9 @@ namespace BossMechanics
             Descriptor const& d = e.descriptor;
             Milliseconds const now = GameTime::GetGameTimeMS();
             handler->PSendSysMessage("Descriptor of {}: phase {}, {} interrupt(s), {} dispel(s), {} purge(s), "
-                "{} target(s), {} ignore(s), stamp {}", UnitLabel(map, e.owner.GetRawValue()), d.phase,
-                d.interrupts.size(), d.dispels.size(), d.purges.size(), d.targets.size(), d.ignores.size(),
-                e.descriptorStamp);
+                "{} target(s), {} ignore(s), {} taunt swap(s), stamp {}", UnitLabel(map, e.owner.GetRawValue()),
+                d.phase, d.interrupts.size(), d.dispels.size(), d.purges.size(), d.targets.size(), d.ignores.size(),
+                d.tauntSwaps.size(), e.descriptorStamp);
             for (InterruptEntry const& i : d.interrupts)
                 handler->PSendSysMessage("  kick {} by {}: {}{}{}", SpellLabel(i.spellId), UnitOrEntry(map,
                     i.casterEntry, 0), i.priority ? Acore::StringFormat("priority {}", int32(i.priority))
@@ -149,6 +155,34 @@ namespace BossMechanics
                     : std::string(), t.breakOut ? ", break-out" : "", When(t.when));
             for (IgnoreEntry const& x : d.ignores)
                 handler->PSendSysMessage("  ignore {}{}", UnitOrEntry(map, x.entry, x.guid), When(x.when));
+            // Blackrock Spire WP-TS: each swap boss now, with its victim and the victim's stacks.
+            for (TauntSwapEntry const& t : d.tauntSwaps)
+            {
+                handler->PSendSysMessage("  taunt swap on {}: {} at {} stacks{}{}", (t.guid || t.bossEntry)
+                    ? UnitOrEntry(map, t.bossEntry, t.guid) : std::string("the owner"), SpellLabel(t.debuffSpell),
+                    int32(t.swapAtStacks), t.anyCaster ? ", stacks from any caster" : "", When(t.when));
+                std::vector<ObjectGuid> units{ e.owner };
+                for (EncounterUnit const& u : e.units)
+                    units.push_back(u.guid);
+                for (ObjectGuid const& g : units)
+                {
+                    Creature const* c = map->GetCreature(g);
+                    if (!c || !c->IsAlive() || (t.guid ? t.guid != g.GetRawValue()
+                        : t.bossEntry ? t.bossEntry != c->GetEntry() : g != e.owner))
+                        continue;
+                    Unit const* victim = c->GetVictim();
+                    uint32 stacks = 0;
+                    if (victim && t.debuffSpell)
+                    {
+                        if (t.anyCaster)
+                            stacks = victim->GetAuraCount(t.debuffSpell);
+                        else if (Aura const* a = victim->GetAura(t.debuffSpell, g))
+                            stacks = std::max<uint32>(a->GetStackAmount(), 1);
+                    }
+                    handler->PSendSysMessage("    {}: victim {}, {} stack(s)", UnitLabel(map, g.GetRawValue()),
+                        victim ? victim->GetName() : std::string("-"), stacks);
+                }
+            }
             for (uint32 aura : d.hostilePlayerAuras)
                 handler->PSendSysMessage("  hostile player aura {} (a charmed teammate with it is a target)",
                     SpellLabel(aura));

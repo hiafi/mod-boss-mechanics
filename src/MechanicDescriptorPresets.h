@@ -167,6 +167,17 @@ namespace BossMechanics::Desc
             return d;
         }
 
+        // Blackrock Spire WP-TS, the two-tank drill: the dummy (the owner) stacks Taunt Swap (drill) 205024 on its
+        // victim with each `cast`; at 3 the other tank taunts it. Stacks count from the dummy (the cast's caster). The
+        // assist tank picks up the Drill Add (Who::AssistTank), as the second tank picks up Gizrul.
+        inline Descriptor TauntSwapDrill()
+        {
+            Descriptor d;
+            d.tauntSwaps.emplace_back(0, I::SPELL_DRILL_TAUNT_SWAP, 3);
+            d.targets.emplace_back(I::NPC_DRILL_ADD, 1, Who::AssistTank);
+            return d;
+        }
+
         // Every list at once (the `descriptor` drill): kicks, dispels, purges; prisons (3) before the aiming add
         // (2) before the casters (1) before the dummy; the purge adds below the dummy; the copies ignored.
         inline Descriptor All()
@@ -205,6 +216,8 @@ namespace BossMechanics::Desc
             { "targets-split", "ranged on the caster, melee on the add", &DrillPresets::TargetsSplit },
             { "targets-breakout", "prisons first, the tank's, then the healer's", &DrillPresets::TargetsBreakOut },
             { "ignore", "the copies are ignored", &DrillPresets::Ignore },
+            { "taunt-swap", "the tanks trade the dummy at 3 Taunt Swap stacks; the assist tank picks up the add",
+                &DrillPresets::TauntSwapDrill },
             { "descriptor", "every list at once: kicks, dispels, purges, prisons > aiming add > casters, copies "
                 "ignored", &DrillPresets::All },
         };

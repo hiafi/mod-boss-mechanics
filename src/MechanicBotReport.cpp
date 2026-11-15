@@ -16,6 +16,7 @@
 #include "MechanicBotDispel.h"
 #include "MechanicBotInterrupt.h"
 #include "MechanicBotTargets.h"
+#include "MechanicBotTauntSwap.h"
 #include "Chat.h"
 #include "GameTime.h"
 #include "Group.h"
@@ -161,6 +162,8 @@ namespace BossMechanics
             handler->PSendSysMessage("{}", BotDispel::ReportLine(botAI, *st));
             // M5 WP-I: kicks, holds, misses and the current kick plan (MechanicBotInterrupt.cpp).
             handler->PSendSysMessage("{}", BotKick::ReportLine(*st));
+            // Blackrock Spire WP-TS: the taunt swap (MechanicBotTauntSwap.cpp).
+            handler->PSendSysMessage("  {}", BotTauntSwap::ReportLine(*st));
             std::string tasks;
             for (BotTask const& t : st->viewInfo.tasks)
                 tasks += Acore::StringFormat("{}{} {} {} ({} .. {} ms)", tasks.empty() ? "" : "; ", t.mechanicId,

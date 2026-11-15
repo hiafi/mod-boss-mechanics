@@ -28,6 +28,7 @@
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
 #include "MechanicSolver.h"
+#include "MechanicTauntSwap.h"
 #include "MechanicTargetRules.h"
 #include "ObjectGuid.h"
 #include "Value.h"
@@ -194,6 +195,8 @@ namespace BossMechanics
         uint64 dispelWakeSignature = 0;
         // M5 WP-F (R m-6): `boss dispel urgent` plans nothing before this (a cast it planned was refused).
         Milliseconds dispelRetryAt{ 0 };
+        // Blackrock Spire WP-TS: the taunt swap decision and its counters (MechanicBotTauntSwap.cpp).
+        TauntSwap::State tauntSwap;
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

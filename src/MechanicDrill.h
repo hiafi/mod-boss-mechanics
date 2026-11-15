@@ -456,6 +456,100 @@ namespace BossMechanics::Drill
     constexpr std::uint32_t kJumpTagDutchFast = 4;      // Double Dutch: the three 1.5 s skips
     constexpr float kJumpRopeRadius = 40.f;             // the whole square around the selected unit
 
+    // ---- Blackrock Spire follow-ups (Blackrock Spire build §3.9, drill `blackrock-spire-followups`) ----------------
+    // The follow-ups of the Blackrock Spire build that gate a heroic sign-off (wave 1: B1 Omokk, B7 Gizrul and
+    // Halycon, B9's hard mode, B3 Voone). `.mech test` keys this adds (the runtime is MechanicCommand.cpp, Dice::ends):
+    //   at=last:<n>       the far end of the fixed line registered n lines before the last one (`at=last` is
+    //                     `at=last:0`); a shape placed after a later line still reads an earlier one (HG3's pounces
+    //                     register with their own charge and read `at=last`);
+    //   to=last[:<n>]     (line) aims a line from its source at that recorded end, frozen at registration like fix=1
+    //                     (reach=1 ends it there). A line aimed this way records no end of its own (it is a recorded
+    //                     point already), so the hauls of two chains read last:1 and last.
+    // Every command (and drill run) keeps the ends of its last kMaxLineEnds fixed lines (LineEnds); an index past the
+    // recorded ones lands where the selected unit stands (as `at=last` with no line yet).
+    constexpr std::uint32_t kMaxLineEnds = 8;
+
+    // The index of `at=` / `to=` "last" or "last:<n>" (n below kMaxLineEnds); nullopt for anything else.
+    inline std::optional<std::uint32_t> LastIndex(std::string_view v)
+    {
+        if (v == "last")
+            return 0;
+        if (v.size() < 6 || v.substr(0, 5) != "last:")
+            return std::nullopt;
+        std::uint32_t n = 0;
+        for (char const ch : v.substr(5))
+        {
+            if (ch < '0' || ch > '9')
+                return std::nullopt;
+            n = n * 10 + static_cast<std::uint32_t>(ch - '0');
+            if (n >= kMaxLineEnds)
+                return std::nullopt;
+        }
+        return n;
+    }
+
+    // The far ends of the last kMaxLineEnds fixed lines, oldest first (P: a position type).
+    template <class P>
+    class LineEnds
+    {
+    public:
+        void Push(P const& end)
+        {
+            if (_ends.size() == kMaxLineEnds)
+                _ends.erase(_ends.begin());
+            _ends.push_back(end);
+        }
+
+        // The end `back` lines before the last one (0: the last); nullopt when fewer were recorded.
+        std::optional<P> Back(std::uint32_t back) const
+        {
+            if (back >= _ends.size())
+                return std::nullopt;
+            return _ends[_ends.size() - 1 - back];
+        }
+
+        std::size_t Size() const { return _ends.size(); }
+
+    private:
+        std::vector<P> _ends;
+    };
+
+    // Ledger tags of `blackrock-spire-followups` (sweep keys `Zone/<tag>`). The first shapes (1, 3, 5) are reported;
+    // the follow-ups (2, 6, 7: 1.5 s; 4: the pounce, landing 1.5 s after its charge) are under the sweep's bar
+    // (BrsBarTag). Wave 2 (WP-G2) adds its rows after these.
+    constexpr std::uint32_t kBrsTagHaymaker = 1;        // OM2: a 5 x 30 line toward a non-tank's spot, 2.5 s
+    constexpr std::uint32_t kBrsTagOneTwo = 2;          // OM2 heroic: the second line at that player's new spot, 1.5 s
+    constexpr std::uint32_t kBrsTagCharge = 3;          // HG2 heroic: two 5 x 30 charges 1 s apart, 3 s
+    constexpr std::uint32_t kBrsTagPounce = 4;          // HG3 heroic: circle 8 at each charge's end, with its line
+    constexpr std::uint32_t kBrsTagChain = 5;           // WT11 / VO11: a 2 yd chain to each of two axes, 8 s
+    constexpr std::uint32_t kBrsTagHaul = 6;            // WT11 hard mode: a 3 yd haul along each chain, 1.5 s taut
+    constexpr std::uint32_t kBrsTagRecall = 7;          // VO12 heroic: War Cry's recall lanes, 4 yd, 1.5 s
+    constexpr std::uint32_t kBrsBarTags[] = { 2, 4, 6, 7 };
+
+    inline bool BrsBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kBrsBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    constexpr std::uint32_t kBrsFollowupMs = 1500;      // every follow-up's warning (§3.9; §7 #26: 2 s on a fail)
+    // HG3's pounce is drawn with its charge line (B7 builds SP's reading) and lands kBrsFollowupMs after the charge:
+    // the charge's 3 s plus 1.5 s. Its bar still counts the pounce hits (B7's heroic gate).
+    constexpr std::uint32_t kPounceWarnMs = 3000 + kBrsFollowupMs;
+    constexpr float kHaymakerLength = 30.f;             // OM2 and HG2: 5 x 30 yd
+    constexpr float kHaymakerWidth = 5.f;
+    constexpr float kChargeMinYd = 15.f;                // HG2 "at the farthest non-tanks": min=, else the farthest
+    constexpr std::uint32_t kChargeGapMs = 1000;        // HG2 heroic: the two charges 1 s apart
+    constexpr float kPounceRadius = 8.f;                // HG3
+    constexpr float kChainWidth = 2.f;                  // WT11 / VO11
+    constexpr std::uint32_t kChainLifeMs = 8000;        // WT11: the haul's taut warning starts as the chain ends
+    constexpr std::uint32_t kChainTickMs = 2000;        // a crossing hits once per chain per 2 s
+    constexpr float kHaulWidth = 3.f;                   // WT11
+    constexpr float kRecallWidth = 4.f;                 // VO7 (VO12 recalls with a 1.5 s warning)
+    constexpr float kRecallExclude = 5.f;               // VO7 ExcludeSourceEnd(5): the lanes spare the boss's 5 yd
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -710,6 +804,38 @@ namespace BossMechanics::Drill
                     { 15500, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
                     { 17000, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
                 }, 6 },     // six cycles a run (120 s): the sweep runs stratholme-jump:6
+            // Blackrock Spire build §3.9 (WP-G1, wave 1 rows 0-12), heroic numbers (pct= in the percent mode). 0 s,
+            // Omokk OM2 heroic one-two: a 5 x 30 yd line from the creature toward a non-tank's spot, frozen there (2.5
+            // s), then a second toward where that player stands as the first lands (1.5 s). 6 s, Gizrul and Halycon HG2
+            // + HG3 heroic: two charges 1 s apart, 5 x 30 yd lines from the creature through the farthest non-tanks
+            // (min=15, else the farthest; reach=1 so a farther one is still reached), 3 s, and an 8 yd pounce at each
+            // line's far end, shown with its line (as B7 builds HG3) and landing 1.5 s after its charge: 4.5 s (at=last
+            // right after its own charge, ties run in list order). 12 s, the axe chains (WT11 hard mode, VO11 heroic):
+            // a 2 yd chain from the creature to the spot of each of two non-tanks (their stuck axes), 8 s (2 s, then 6
+            // s with a 10% crossing every 2 s); as they end, a 1.5 s warning and a line along each chain: even cycles
+            // the haul (WT11: 3 yd, 35%), odd cycles War Cry's recall (VO12 -> VO7: 4 yd, the creature's 5 yd excluded,
+            // 40%). OM2's knockback, HG2's Rabies and VO12's Berserking are left out (the bar counts hits).
+            { "blackrock-spire-followups", "one-two punch, two charges and their pounces, axe chains then the haul "
+                "or the recall", 24000, false, {
+                    { 0, "line 30 2500 width=5 anchor=target to=member pick=nontank fix=1 pct=50 tag=1" },
+                    { 0, "line 30 1500 width=5 anchor=target to=member pick=same fix=1 after=resolve pct=50 tag=2" },
+                    { 6000, "line 30 3000 width=5 anchor=target to=member pick=nontank min=15 reach=1 pct=40 weak=1 "
+                        "tag=3" },
+                    { 6000, "circle 8 4500 at=last pct=30 weak=1 tag=4" },
+                    { 7000, "line 30 3000 width=5 anchor=target to=member pick=other min=15 reach=1 pct=40 weak=1 "
+                        "tag=3" },
+                    { 7000, "circle 8 4500 at=last pct=30 weak=1 tag=4" },
+                    { 12000, "line 5 2000 width=2 anchor=target to=member pick=nontank reach=1 persist=6000 "
+                        "tick=2000 pct=10 weak=1 tag=5" },
+                    { 12000, "line 5 2000 width=2 anchor=target to=member pick=other reach=1 persist=6000 tick=2000 "
+                        "pct=10 weak=1 tag=5" },
+                    { 20000, "line 5 1500 width=3 anchor=target to=last:1 reach=1 cycle=even pct=35 weak=1 tag=6" },
+                    { 20000, "line 5 1500 width=3 anchor=target to=last reach=1 cycle=even pct=35 weak=1 tag=6" },
+                    { 20000, "line 5 1500 width=4 exclude=5 anchor=target to=last:1 reach=1 cycle=odd pct=40 weak=1 "
+                        "tag=7" },
+                    { 20000, "line 5 1500 width=4 exclude=5 anchor=target to=last reach=1 cycle=odd pct=40 weak=1 "
+                        "tag=7" },
+                }, 5 },     // five cycles a run (120 s): the sweep runs blackrock-spire-followups:5
         };
         return drills;
     }

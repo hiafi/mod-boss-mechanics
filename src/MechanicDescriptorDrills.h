@@ -118,6 +118,17 @@ namespace BossMechanics::Drill
             { "ignore", "three copies beside the dummy: never hit, not counted for AoE",
                 "describe ignore,add 300406 n=3,wait:30" },
 
+            // ---- taunt swap (Blackrock Spire WP-TS) ----
+            // Two tanks: the dummy stacks Taunt Swap (drill) 205024 on its victim every 6 s (the `cast` is the
+            // dummy's, so the stacks count from it); at 3 the other tank taunts and the debuffed one keeps off. A tank
+            // taunts only once its own stacks have fallen off (user ruling 2026-11-15): the debuff lasts 15 s from its
+            // last stack, a boss's shape (Smolderweb's bite every 6 s), so the giver is clear by the taker's third
+            // stack and a 60 s run shows a swap every 18 s (three). A Drill Add for the first 12 s: the assist tank
+            // picks it up (Who::AssistTank) and still takes the first swap. Needs two tank bots (or a human tank and
+            // a bot) in the group; not in the loops.
+            { "taunt-swap", "two tanks trade the dummy at 3 stacks, again and again; the assist tank picks up an add "
+                "first", "describe taunt-swap,add 300405 n=1 ttl=12000,cast 205024 every=6000,wait:60" },
+
             // ---- everything ----
             // The dummy's default loop and the sim slice: every list at once in 60 s, on the combined preset.
             { "descriptor", "every list at once (60 s): kicks, dispels, purges, targets, prisons, copies",
