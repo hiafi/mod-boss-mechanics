@@ -2,8 +2,8 @@
 // offset in src/MechanicMath.h, the solver's radial s, slice exits and ParkTogether in src/MechanicSolver.h, the wide
 // cone and arc band displays in src/BossMechanicsIds.h): the spec rules, the gaps and wall segments, the placement
 // rules, the marker pieces, single solves (slice, gap, tank park), fights in the brain model (Emberseer's pulses, also
-// with the user's rulings and the ring orbit of WP-SF; Rend's sweeps) and the cost of four rings at once against the
-// solver budget (M5: 2,000 us).
+// with the user's rulings and the ring orbit of WP-SF; Rend's sweeps; Blackrock Spire F-3: both also on the live
+// timing, BrainModel::Config::Live) and the cost of four rings at once against the solver budget (M5: 2,000 us).
 // Build: tests/run.sh.
 
 #include "check.h"
@@ -668,6 +668,9 @@ namespace
         // turn to the next (ConeFrontSpec::nextTurnDeg).
         bool ruled = false;
         bool hint = false;
+        // Blackrock Spire F-3: the live timing (BrainModel::Config::Live: movement at once, rings seen one update
+        // late, the registry's swept judge), which the live sweeps showed the default timing hides.
+        bool live = false;
     };
 
     // One Furnace Pulse per 15 s (12 s heroic) for 60 s: the nova's 2.5 s warning, then `rings` rings `ringGap` apart,
@@ -688,6 +691,8 @@ namespace
     {
         BrainModel::Config cfg;
         cfg.params.marginMs = Ms(300);
+        if (spec.live)
+            cfg.Live();
         BrainModel::World world;
         world.cfg = cfg;
         std::vector<Vec3> slots;
@@ -760,7 +765,7 @@ namespace
         for (Ms now = start; now < end; now += cfg.step)
         {
             for (Pending& p : pending)
-                if (p.h.id != 0 && p.at <= now)
+                if (p.h.id != 0 && p.at + cfg.sightLag <= now)
                 {
                     world.AddHazard(p.h);
                     p.h.id = 0;
@@ -810,6 +815,14 @@ namespace
             { "ruled heroic 4 rings, 5 hinted", 4, 45.f, 60.f, Ms(1500), 16.f, 5, 5.f, true, true },
             { "ruled heroic 4 rings, 10 hinted", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 5.f, true, true },
             { "ruled heroic 4 rings, 10 at 15 yd", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 15.f, true, true },
+            // F-3: the ruled cases on the live timing (BrainModel::Config::Live), under the same gates: before F-3's
+            // orbit timing (Detail::kOrbitStartDelay) the heroic 4-ring cases had 23-28% ring hits on it.
+            { "live ruled normal 3 rings, 5 close", 3, 60.f, 45.f, Ms(2000), 16.f, 5, 5.f, true, false, true },
+            { "live ruled heroic 3 rings, 5 close", 3, 45.f, 60.f, Ms(1500), 10.f, 5, 5.f, true, false, true },
+            { "live ruled heroic 4 rings, 5 close", 4, 45.f, 60.f, Ms(1500), 16.f, 5, 5.f, true, false, true },
+            { "live ruled heroic 4 rings, 5 hinted", 4, 45.f, 60.f, Ms(1500), 16.f, 5, 5.f, true, true, true },
+            { "live ruled heroic 4 rings, 10 hinted", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 5.f, true, true, true },
+            { "live ruled heroic 4 rings, 10 at 15 yd", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 15.f, true, true, true },
         };
         for (PulseSpec const& spec : specs)
         {
@@ -850,9 +863,25 @@ namespace
 
     // Rend RG6: one wall (normal) or two 3 s apart with their gaps on opposite sides (heroic), every 30 s (10 s
     // heroic), 3 s warning, through the 40 yd main strip; the group spread over the arena, back to its spots after.
-    BrainModel::Counters RunSweeps(bool heroic, std::uint32_t bots, std::uint32_t seed, float maxApart = -1.f)
+    // F-3b (R-3 m-1): a plain circle Zone dropped on every bot's spot `at` after each call, landing `warn` later (a
+    // shape placed on the players while the walls roll: Gyth's mark cone, Shadowflame). radiusYd 0: none.
+    constexpr std::uint32_t kCircleIdBase = 1000;
+
+    struct CircleDrop
+    {
+        float radiusYd = 0.f;
+        Ms at{ 3500 };
+        Ms warn{ 3000 };
+        std::uint32_t drops = 0;        // out: circles dropped (one per bot and call)
+        std::uint32_t hits = 0;         // out: circle hits (Counters::hits counts the walls and the circles)
+    };
+
+    BrainModel::Counters RunSweeps(bool heroic, std::uint32_t bots, std::uint32_t seed, float maxApart = -1.f,
+        bool live = false, CircleDrop* circle = nullptr)
     {
         BrainModel::Config cfg;
+        if (live)
+            cfg.Live();
         BrainModel::World world;
         world.cfg = cfg;
         std::vector<Vec3> slots;
@@ -891,9 +920,12 @@ namespace
             std::vector<Hazard> hs;
         };
         std::vector<Pending> pending;
+        std::vector<Ms> drops;
         std::uint32_t id = 1;
         for (Ms call = t0; call + Ms(14000) < end; call += every)
         {
+            if (circle && circle->radiusYd > 0.f)
+                drops.push_back(call + circle->at);
             LineFrontSpec s;
             s.facing = Geo::kPi;
             s.travelYd = 86.f;
@@ -908,17 +940,36 @@ namespace
                 pending.push_back({ call, LineHazards(id++, s2, call + Ms(6000), start) });
             }
         }
+        std::size_t nextDrop = 0;
         for (Ms now = t0; now < end; now += cfg.step)
         {
             for (Pending& p : pending)
-                if (!p.hs.empty() && p.at <= now)
+                if (!p.hs.empty() && p.at + cfg.sightLag <= now)
                 {
                     for (Hazard& h : p.hs)
                         world.AddHazard(h);
                     p.hs.clear();
                 }
+            if (nextDrop < drops.size() && drops[nextDrop] + cfg.sightLag <= now)
+            {
+                for (BrainModel::Bot const& b : world.bots)
+                {
+                    Hazard h;
+                    h.id = kCircleIdBase + circle->drops++;
+                    h.shape = Shape::Circle(circle->radiusYd);
+                    h.poses = { Pose{ b.pos.x, b.pos.y, 0.f, 0.f } };
+                    h.marginYd = kMargin;
+                    h.timing = Solver::MakeInstant(drops[nextDrop] + circle->warn, Ms(500));
+                    world.AddHazard(h);
+                }
+                ++nextDrop;
+            }
             world.Step(now);
         }
+        if (circle)
+            for (BrainModel::Bot const& b : world.bots)
+                circle->hits += static_cast<std::uint32_t>(std::count_if(b.hitBy.begin(), b.hitBy.end(),
+                    [](std::uint32_t hid) { return hid >= kCircleIdBase; }));
         return world.Total();
     }
 
@@ -926,27 +977,63 @@ namespace
     {
         // Normal: one wall a call. Heroic: two walls 3 s apart, the second gap on the other side, anywhere there (up to
         // 32 yd from the first: reported) or within 20 yd of the first (the placement the README recommends: gated).
+        // F-3: also on the live timing (BrainModel::Config::Live), gated alike: before F-3's wall Fallback (the bot's
+        // own spot in the ranking, the exact walk's departure window) the heroic case had 28-36% hits on it.
         struct Case
         {
             char const* name;
             bool heroic;
             float maxApart;
             bool gated;
+            bool live = false;      // F-3: BrainModel::Config::Live
         };
         for (Case const& c : { Case{ "normal one wall,            ", false, -1.f, true },
                  Case{ "heroic two walls, any apart, ", true, -1.f, false },
-                 Case{ "heroic two walls, <= 20 apart,", true, 20.f, true } })
+                 Case{ "heroic two walls, <= 20 apart,", true, 20.f, true },
+                 Case{ "live normal one wall,       ", false, -1.f, true, true },
+                 Case{ "live heroic two, <= 20 apart,", true, 20.f, true, true } })
             for (std::uint32_t bots : { 5u, 10u })
             {
                 BrainModel::Counters sum;
                 for (std::uint32_t seed = 0; seed < 4; ++seed)
-                    sum.Add(RunSweeps(c.heroic, bots, seed, c.maxApart));
+                    sum.Add(RunSweeps(c.heroic, bots, seed, c.maxApart, c.live));
                 std::uint32_t const passes = 4 * 3 * bots * (c.heroic ? 2 : 1);
                 std::printf("front sweeps %s %2u bots: solves %5u, move %5u, fallback %4u, hits %3u of %3u wall "
                     "passes, solve us max %5lld\n", c.name, bots, sum.solves, sum.outcomes[1] + sum.outcomes[2],
                     sum.Fallbacks(), sum.hits, passes, static_cast<long long>(sum.solveUsMax));
                 if (c.gated)
                     CHECK(sum.hits * 50 <= passes);     // at most 2% of the wall passes
+            }
+    }
+
+    // F-3b (R-3 m-1): Rend's heroic walls (gaps within 20 yd) with a circle dropped on every bot 3.5 s after the call,
+    // landing 3 s later, between the walls: Gyth's mark (a 4 s cone) or any shape placed on the players during the
+    // sweep. F-3's wall Fallback kept the bot's own spot on the ranking's floor whatever else would land there, so a
+    // bot waiting in the first gap held its spot under the circle: live, 2 yd 11 circle / 1 wall hits, 5 yd 21 / 6
+    // (R-3's scenario, 8 seeds; the base solver: 0 / 226 and 8 / 241). F-3b lets the spots near it in the same gap
+    // join the floor when a non-wall hazard will land on its spot: 0 / 1 and 0 / 4 live, 0 / 2 and 0 / 26 on the
+    // model's own timing. Gates: circles at most 2% of the drops on both timings; walls at most 2% of the wall passes
+    // live, 5% on the model's own timing (its escapes start 150 ms late; 3.6% at 5 yd).
+    void TestSweepsWithCircle()
+    {
+        for (bool live : { false, true })
+            for (float radius : { 2.f, 5.f })
+            {
+                BrainModel::Counters sum;
+                CircleDrop circle;
+                circle.radiusYd = radius;
+                for (std::uint32_t seed = 0; seed < 8; ++seed)
+                    for (std::uint32_t bots : { 5u, 10u })
+                        sum.Add(RunSweeps(true, bots, seed, 20.f, live, &circle));
+                std::uint32_t const passes = 8 * 3 * (5 + 10) * 2;
+                std::uint32_t const wallHits = sum.hits - circle.hits;
+                std::printf("front sweeps %s heroic two + %.0f yd circle: solves %5u, fallback %5u, circle hits %3u of "
+                    "%3u, wall hits %3u of %3u wall passes, solve us max %5lld\n", live ? "live" : "host", radius,
+                    sum.solves, sum.Fallbacks(), circle.hits, circle.drops, wallHits, passes,
+                    static_cast<long long>(sum.solveUsMax));
+                CHECK(circle.drops == 8 * 3 * (5 + 10));
+                CHECK(circle.hits * 50 <= circle.drops);
+                CHECK(wallHits * (live ? 50 : 20) <= passes);
             }
     }
 
@@ -1110,6 +1197,7 @@ int main()
     TestParkTogether();
     TestPulses();
     TestSweeps();
+    TestSweepsWithCircle();
     TestDrill();
     Benchmark();
     return Report("front_test");

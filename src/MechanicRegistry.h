@@ -514,6 +514,9 @@ namespace BossMechanics
         // Lethal() (Stratholme X4; Judge::LethalFits): bots never plan a way across it (Solver::Hazard::lethal). Bots
         // only.
         bool lethal = false;
+        // SparesPets() (Blackrock Spire F-3): the owner's own strike spares pets and guardians (the kit's LethalRing
+        // with pets = false): a pet owner's view adds no pet margin to it (ViewRules::LethalPetExtraYd). Bots only.
+        bool sparesPets = false;
 
         // callbacks (owner scripts; dropped when the encounter ends, never called once the owner left the map)
         std::function<void(Unit* hit)> onHit;
