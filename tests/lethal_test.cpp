@@ -295,6 +295,10 @@ namespace
         CHECK_NEAR(ViewRules::LethalPetExtraYd(kMargin, true), 2.25, 1e-4);
         CHECK(ViewRules::LethalPetExtraYd(kMargin, false) == 0.f);
         CHECK(ViewRules::LethalPetExtraYd(4.f, true) == 0.f);         // a wider margin already holds the pet
+        // Blackrock Spire F-3: only a lethal hazard that strikes pets gets it (not players only, not SparesPets).
+        CHECK_NEAR(ViewRules::LethalPetExtraYd(kMargin, true, true), 2.25, 1e-4);
+        CHECK(ViewRules::LethalPetExtraYd(kMargin, true, false) == 0.f);
+        CHECK(ViewRules::LethalPetExtraYd(kMargin, false, false) == 0.f);
         auto petY = [](Vec3 const& bot) { return bot.y + ViewRules::kPetFollowYd; };
         for (bool pet : { false, true })
         {

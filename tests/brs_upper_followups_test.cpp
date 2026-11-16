@@ -4,7 +4,8 @@
 // heroic, B12 Rend RG6 heroic, B15 Drakkisath DR17 + DR18), the keys the rows use (next=, edge=, inside=, lethal=,
 // only=member, a cone's fix=1), the geometry they rely on (the rings' slices and turn hints, the gaps in Rend's
 // strip, a way out of every blow inside the challenger's ring) and a brain-model run of the Challenge (one bot kept
-// inside a lethal ring by its Within bounds while six blows land on it). Build: tests/run.sh.
+// inside a lethal ring by its Within bounds while six blows land on it; Blackrock Spire F-3: also a pet owner, and on
+// the live timing) and of row 24 (Rend's two walls, F-3, on both timings). Build: tests/run.sh.
 
 #include "check.h"
 #include "brain_model.h"
@@ -12,6 +13,7 @@
 #include "MechanicDrillPlan.h"
 #include "MechanicFront.h"
 #include "MechanicSolver.h"
+#include "MechanicViewRules.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -544,9 +546,14 @@ namespace
     // spot (`roleYd` from him: a melee 3 yd, a ranged 25 yd, outside the ring). The lethal ring from the close on,
     // the six blows (the drill's order, or a B15 shuffle) aimed at where it stands as each is shown, the Within
     // circle of 10 yd in its view throughout.
+    // F-3 (STAGE-SWEEP-DIAG Finding 2): `pet`: the challenger owns a pet or guardian, and its view adds the pet margin
+    // to the lethal ring as MechanicBotView does (ViewRules::LethalPetExtraYd, as drift); `strikesPets`: the ring as
+    // the view saw it before F-3 (a players-only ring that spares pets still got the margin). `live`: the live timing
+    // (BrainModel::Config::Live).
     enum class Order : std::uint8_t { Drill, Shuffle, ThunderclapSweep };
 
-    ChallengeResult RunChallenges(float roleYd, Order how, std::uint32_t seeds)
+    ChallengeResult RunChallenges(float roleYd, Order how, std::uint32_t seeds, bool pet = false,
+        bool strikesPets = false, bool live = false)
     {
         ChallengeResult out;
         Drill::Def const& d = Followups();
@@ -571,6 +578,8 @@ namespace
         {
             BrainModel::Config cfg;
             cfg.params.marginMs = Ms(300);
+            if (live)
+                cfg.Live();
             BrainModel::World world;
             world.cfg = cfg;
             float const bearing = static_cast<float>(next(6283)) / 1000.f;
@@ -614,7 +623,10 @@ namespace
             ring.shape = Shape::Donut(Drill::kRingRadiusYd - Drill::kRingWidthYd / 2.f,
                 Drill::kRingRadiusYd + Drill::kRingWidthYd / 2.f);
             ring.poses = { Pose{ 0.f, 0.f, 0.f, 0.f } };
-            ring.marginYd = kMargin;
+            // The drill's ring is eligible to the challenger alone (only=member: players only), the real one spares
+            // pets (the kit's SparesPets): no pet margin since F-3.
+            ring.driftYd = ViewRules::LethalPetExtraYd(kMargin, pet, strikesPets);
+            ring.marginYd = kMargin + ring.driftYd;
             ring.lethal = true;
             // ViewRules::LethalTiming: hot from its registration (the close) to its end.
             ring.timing = Solver::MakeInterval(close, close + Ms(Drill::kRingArmMs + Drill::kRingLifeMs));
@@ -626,10 +638,12 @@ namespace
             for (Ms now = close; now < end; now += cfg.step)
             {
                 for (std::size_t k = 0; k < order.size(); ++k)
-                    if (now == close + Ms(static_cast<std::int64_t>(k) * Drill::kBlowEveryMs))
+                    if (now == close + Ms(static_cast<std::int64_t>(k) * Drill::kBlowEveryMs) + cfg.sightLag)
                     {
                         Vec3 const at = world.bots[0].pos;
-                        for (Hazard const& h : BlowHazards(order[k], id, at, now + Ms(Drill::kBlowWarnMs), 0.4f))
+                        Ms const land = close
+                            + Ms(static_cast<std::int64_t>(k) * Drill::kBlowEveryMs + Drill::kBlowWarnMs);
+                        for (Hazard const& h : BlowHazards(order[k], id, at, land, 0.4f))
                         {
                             idsOf[k].push_back(h.id);
                             world.AddHazard(h);
@@ -670,19 +684,31 @@ namespace
             char const* name;
             float roleYd;
             Order how;
+            bool pet = false;
+            bool strikesPets = false;   // the pet margin as the view gave it before F-3 (reported only)
+            bool live = false;
         };
         // Gated: the drill's order (no blow hit) and, in every case, the ring and the bounds. Reported: B15's
-        // shuffles and the Thunderclap -> Sweep step on its own (the report's B15 question).
+        // shuffles and the Thunderclap -> Sweep step on its own (the report's B15 question). F-3 (STAGE-SWEEP-DIAG
+        // Finding 2): a pet owner as the challenger, gated like the pet-less one, also on the live timing; reported:
+        // the pet margin on the ring as built before F-3 (no spot fits: the Thunderclap lands on it).
         Case const cases[] = {
             { "melee, drill order", 3.f, Order::Drill },
             { "ranged 25 yd, drill order", 25.f, Order::Drill },
             { "melee, B15 shuffles", 3.f, Order::Shuffle },
             { "ranged 25 yd, B15 shuffles", 25.f, Order::Shuffle },
             { "melee, thunderclap -> sweep", 3.f, Order::ThunderclapSweep },
+            { "pet, melee, drill order", 3.f, Order::Drill, true },
+            { "pet, ranged 25 yd, drill order", 25.f, Order::Drill, true },
+            { "live, melee, drill order", 3.f, Order::Drill, false, false, true },
+            { "live, ranged 25 yd, drill order", 25.f, Order::Drill, false, false, true },
+            { "live, pet, melee, drill order", 3.f, Order::Drill, true, false, true },
+            { "live, pet, ranged, drill order", 25.f, Order::Drill, true, false, true },
+            { "pet margin as built, ranged", 25.f, Order::Drill, true, true },
         };
         for (Case const& c : cases)
         {
-            ChallengeResult const r = RunChallenges(c.roleYd, c.how, 40);
+            ChallengeResult const r = RunChallenges(c.roleYd, c.how, 40, c.pet, c.strikesPets, c.live);
             std::uint32_t blows = 0;
             std::uint32_t hits = 0;
             std::printf("  challenge bots: %-28s %u runs, ring %u, left bounds %u, fallbacks %u, solve max %lld us;",
@@ -703,6 +729,12 @@ namespace
             CHECK(r.ringHits == 0);
             CHECK(r.leftBounds == 0);
             CHECK(blows == r.runs * Drill::kBlows);
+            if (c.strikesPets)
+            {
+                // The as-built margin: the ring forbids 8.0 yd and out, the Thunderclap 8.75 yd and in.
+                CHECK(r.hits[static_cast<std::size_t>(Blow::Thunderclap)] > 0);
+                continue;
+            }
             if (c.how == Order::Drill)
                 CHECK(hits == 0);
             else
@@ -711,6 +743,157 @@ namespace
                 CHECK(hits == r.hits[static_cast<std::size_t>(Blow::Sweep)]);
             }
         }
+    }
+
+    // ---- row 24 in the brain model (F-3) ----------------------------------------------------------------------------
+    // Rend's two walls as the row registers them: both at the call, 68 yd wide over 86 yd of travel across the boss
+    // (MechanicCommand.cpp linefront: the swept area's middle on him), the first gap anywhere in the 40 yd strip (edge
+    // 15), the second across the centerline within 20 yd of it, 3 s apart; the Within circle of 20 yd round him. The
+    // sweep's group (mod-dpssim SimMechanicsScenario.cpp): the tank 3 yd off him toward the anchor, the healer 18 yd
+    // and the member under test 12 yd on the arc round that side, two melee 3 yd off him; stock follow back to those
+    // spots. The walls travel along `travelDeg` (0: in from the arc's side, through the group and then him).
+    constexpr float kRendNearApartYd = 16.f;    // gaps this far apart or nearer: 10 yd between their near edges
+
+    struct RendWallsResult
+    {
+        std::uint32_t first = 0;        // hits by the first wall (the sweep's Zone/11)
+        std::uint32_t secondNear = 0;   // by the second (Zone/12), gaps at most kRendNearApartYd apart
+        std::uint32_t secondFar = 0;    // by the second, gaps farther apart
+        std::uint32_t passes = 0;       // member passes of each wall
+        std::uint32_t passesNear = 0;   // of them with the gaps at most kRendNearApartYd apart
+        BrainModel::Counters c;
+    };
+
+    RendWallsResult RunRendWalls(float travelDeg, bool live, std::uint32_t seeds)
+    {
+        RendWallsResult out;
+        std::uint32_t rng = 0x6a09e667u;
+        auto roll = [&rng]()
+        {
+            rng = rng * 1664525u + 1013904223u;
+            return static_cast<float>(rng >> 8) / 16777216.f;
+        };
+        float const halfTravel = Drill::kRendTravelYd * 0.5f;
+        for (std::uint32_t seed = 0; seed < seeds; ++seed)
+        {
+            BrainModel::Config cfg;
+            if (live)
+                cfg.Live();
+            BrainModel::World world;
+            world.cfg = cfg;
+            // The anchor side at bearing pi; the walls travel along `facing`, from behind him on that line.
+            float const facing = travelDeg * kDeg;
+            std::vector<Vec3> slots;
+            auto at = [](float bearingDeg, float r)
+            {
+                return Vec3{ r * std::cos(bearingDeg * kDeg), r * std::sin(bearingDeg * kDeg), 0.f };
+            };
+            slots.push_back(at(180.f, 3.f));                // tank
+            slots.push_back(at(150.f, 18.f));               // healer
+            slots.push_back(at(170.f, 12.f));               // member under test
+            slots.push_back(at(10.f, 3.f));                 // melee
+            slots.push_back(at(-10.f, 3.f));                // melee
+            for (Vec3 const& v : slots)
+            {
+                BrainModel::Bot b;
+                b.pos = v;
+                world.bots.push_back(b);
+            }
+            world.follow = [&slots](std::size_t i, Vec3& to)
+            {
+                to = slots[i];
+                return true;
+            };
+            Solver::Bounds room;
+            Solver::BoundsArea area;
+            area.center = { 0.f, 0.f, 0.f };
+            area.radius = Drill::kRendRoomYd;
+            room.areas.push_back(area);
+            world.kinds = [&room](std::size_t, Solver::Input& in, Ms, std::vector<BrainModel::Task>&)
+            {
+                in.bounds = { room };
+            };
+            LineFrontSpec first;
+            first.facing = facing;
+            first.travelYd = Drill::kRendTravelYd;
+            first.widthYd = Drill::kRendWidthYd;
+            float const u1 = roll();
+            float const u2 = roll();
+            std::optional<float> const placed = Front::PlaceGap(Drill::kRendWidthYd, Drill::kRendGapYd, {}, u1, 0,
+                Drill::kRendEdgeYd);
+            CHECK(placed.has_value());
+            float const g1 = placed.value_or(0.f);
+            std::optional<float> const across = Front::PlaceGap(Drill::kRendWidthYd, Drill::kRendGapYd, {}, u2,
+                -Front::SideOf(g1), Drill::kRendEdgeYd, g1, Drill::kRendApartYd);
+            CHECK(across.has_value());
+            float const g2 = across.value_or(-g1);
+            first.gaps = { { g1, Drill::kRendGapYd } };
+            LineFrontSpec second = first;
+            second.gaps = { { g2, Drill::kRendGapYd } };
+            Vec3 const start{ -std::cos(facing) * halfTravel, -std::sin(facing) * halfTravel, 0.f };
+            Ms const t0{ 100000 };
+            Ms const call = t0 + Ms(2000);
+            Ms const launch = call + Ms(Drill::kRendWarnMs);
+            std::vector<Hazard> walls;
+            Pose const pose{ start.x, start.y, 0.f, facing };
+            for (LineFrontSpec const* spec : { &first, &second })
+                for (Front::Segment const& seg : Front::Segments(Front::LineShape(*spec), pose, spec->gaps))
+                {
+                    Hazard h;
+                    h.id = spec == &first ? 1u : 2u;
+                    h.shape = seg.shape;
+                    h.poses = { seg.pose };
+                    h.marginYd = kMargin;
+                    h.timing = Solver::MakeProjectile(Front::LineParams(*spec),
+                        spec == &first ? launch : launch + Ms(Drill::kRendSpacingMs));
+                    h.front = true;
+                    walls.push_back(h);
+                }
+            bool added = false;
+            Ms const end = launch + Ms(Drill::kRendSpacingMs) + Front::Duration(Front::LineParams(second)) + Ms(1000);
+            for (Ms now = t0; now < end; now += cfg.step)
+            {
+                if (!added && now >= call + cfg.sightLag)
+                {
+                    for (Hazard const& h : walls)
+                        world.AddHazard(h);
+                    added = true;
+                }
+                world.Step(now);
+            }
+            bool const near = std::fabs(g1 - g2) <= kRendNearApartYd;
+            for (BrainModel::Bot const& b : world.bots)
+                for (std::uint32_t hid : b.hitBy)
+                    ++(hid == 1 ? out.first : (near ? out.secondNear : out.secondFar));
+            out.passes += static_cast<std::uint32_t>(world.bots.size());
+            out.passesNear += near ? static_cast<std::uint32_t>(world.bots.size()) : 0u;
+            out.c.Add(world.Total());
+        }
+        return out;
+    }
+
+    void TestRendBots()
+    {
+        // F-3: the live sweep (mechsweep-brs-followups-1116) had the first wall on nearly every member in 4 of 5
+        // iterations: the Fallback left the first gap at once on a way through the first wall (the second gap is
+        // hazard-free from an arrival behind it, the first never is), which the model's 150 ms start delay hid
+        // (live timing before F-3: 72% first-wall hits). Gated on both timings: the first wall at most 2% of the member
+        // passes, the second at most 2% of those with the gaps 16 yd apart or nearer. Reported: the second wall with
+        // the gaps farther apart (up to the ruled 20 yd), where the bots wait at the 20 yd circle's far edge and the
+        // circle leaves too little room to cross behind the first wall in time (Rend's own 40 x 86 yd strip does:
+        // front_test's live sweeps).
+        for (bool live : { false, true })
+            for (float travel : { 0.f, 90.f, 180.f })
+            {
+                RendWallsResult const r = RunRendWalls(travel, live, 24);
+                std::printf("  rend walls (row 24): %-4s travel %3.0f deg: first wall %2u of %3u passes, second %2u of "
+                    "%3u (gaps <= 16 yd apart) and %2u of %3u (farther), solves %4u, fallbacks %4u, solve max %lld "
+                    "us\n", live ? "live" : "host", travel, r.first, r.passes, r.secondNear, r.passesNear, r.secondFar,
+                    r.passes - r.passesNear, r.c.solves, r.c.Fallbacks(), static_cast<long long>(r.c.solveUsMax));
+                CHECK(r.passes == 24u * 5u && r.passesNear > 0);
+                CHECK(r.first * 50 <= r.passes);
+                CHECK(r.secondNear * 50 <= r.passesNear);
+            }
     }
 
     // The program: `blackrock-spire-followups:3` is one 120 s entry; each wave 2 row runs once.
@@ -743,6 +926,7 @@ int main()
     TestChallengeTable();
     TestChallengeGeometry();
     TestChallengeBots();
+    TestRendBots();
     TestSweepProgram();
     return Report("brs_upper_followups_test");
 }

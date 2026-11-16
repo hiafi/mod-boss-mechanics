@@ -207,6 +207,10 @@ namespace BossMechanics::Solver
         // M5 CD (C3 B): the spacing term's radius. The barrage's largest circle and Spread are 6 yd, and a donut's
         // ring reaches its hole from 3-8 yd: two ranged bots inside this of each other are both caught by one shot.
         float spacingYd = 6.f;
+        // Blackrock Spire F-3: the walk (Detail::WalkPath) checks each sample over [t - earlyMs, t], t its planned
+        // time: a bot that leaves sooner than planned reaches it that much early. 0 = the planned time only. Only the
+        // Fallback's exact walk sets it, with a wall in the view (Solve, Detail::kSweepLagMs).
+        Ms earlyMs{ 0 };
     };
 
     struct Input
@@ -432,6 +436,12 @@ namespace BossMechanics::Solver
         constexpr std::array<float, 6> kRingRadii{ 3.f, 6.f, 9.f, 12.f, 16.f, 20.f };
         constexpr std::uint32_t kRingBearings = 16;
         constexpr std::uint32_t kFallbackScans = 32;     // fallback: straight-line time-inside scans per solve
+        // Blackrock Spire F-3: one map update. The registry hits a player the band passed over since the previous
+        // update (MechanicRegistry.cpp StepProjectile, SweptBands), so a step in behind a passing band needs this much
+        // more than the exact hitbox.
+        constexpr Ms kSweepLagMs{ 100 };
+        // Blackrock Spire F-3b (R-3 m-1): the wall Fallback's own-gap spots, this near the bot (Solve, step 4).
+        constexpr float kWallGapNearYd = 20.f;
         // The pocket pass (Params::hazardEdgeArcs): bearings round each hazard edge (15 deg: 2.6 yd apart on a 10 yd
         // edge, inside a 2.3 yd pocket's width plus its margins), and at most this many points per solve, nearest
         // first.
@@ -1234,6 +1244,7 @@ namespace BossMechanics::Solver
         // Fallback ranks candidates by their full time inside, so the walk must not stop at the first hit).
         // measureCap (measure only, M4 WP-Q G7): stop once the time inside exceeds it; timeInsideHot is then some
         // value above the cap, not the full time (the Fallback ranking only needs to know the walk lost).
+        // Params::earlyMs (F-3): each moving sample is checked from that much before its planned time.
         inline PathCheck WalkPath(Input const& in, std::vector<Geo::Vec3> const& path, Ms start, bool allowGrace,
             bool measure, Ms measureCap = kForever)
         {
@@ -1247,6 +1258,7 @@ namespace BossMechanics::Solver
             Ms const stepMs = TravelMs(kStepYd, speed);
             Ms const widen = in.params.marginMs + stepMs;
             Ms const moveStart = start + in.params.startDelay;
+            Ms const early = std::max(Ms(0), in.params.earlyMs);
             std::size_t const n = in.hazards.size();
 
             // Start hazards (their region holds path[0]) are exempt only while the path is leaving them: the
@@ -1395,7 +1407,7 @@ namespace BossMechanics::Solver
                 Geo::Vec3 const& a = path[k - 1];
                 Geo::Vec3 const& b = path[k];
                 float const len = Dist3(a, b);
-                Ms const legFrom = k == 1 ? start : moveStart + TravelMs(dist, speed);
+                Ms const legFrom = k == 1 ? start : moveStart + TravelMs(dist, speed) - early;
                 Ms const legTo = moveStart + TravelMs(dist + len, speed);
                 // Samples at most one margin apart (STAGE-M3-R-REPORT m-11): a straight leg past a corner then keeps
                 // at least cos(30°) of the margin, never touching the hitbox; 0.5 yd as before for full margins.
@@ -1409,7 +1421,7 @@ namespace BossMechanics::Solver
                     float const u = static_cast<float>(j) / steps;
                     Geo::Vec3 const p{ a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, a.z + (b.z - a.z) * u };
                     Ms const t = moveStart + TravelMs(dist + len * u, speed);
-                    if (!visit(p, t, t, dwell))
+                    if (!visit(p, t - early, t, dwell))
                     {
                         res.arriveAt = moveStart + TravelMs(PathLength(path), speed);
                         return res;
@@ -2760,6 +2772,11 @@ namespace BossMechanics::Solver
         constexpr std::array<float, 4> kOrbitRadii{ 4.f, 5.5f, 7.f, 8.5f };
         constexpr Ms kOrbitMarginMs{ 150 };
         constexpr Ms kOrbitGoMs{ 100 };             // a departure this soon is now; a later one is a hold
+        // Blackrock Spire F-3 (STAGE-SWEEP-DIAG Finding 1): the step starts from a standing bot (a Hold), and the
+        // brain's MoveTo launches the spline at once, so the step is planned with no start delay. Params::startDelay
+        // is the right assumption for an escape ahead of a hazard, the wrong one behind a passing band: it sent the
+        // bots out of their slot early, into the trailing edge of the band the live judge sweeps.
+        constexpr Ms kOrbitStartDelay{ 0 };
         constexpr float kOrbitMaxYd = 20.f;         // a bot this far from the apex or nearer is also tried at its own
         constexpr float kOrbitDetourYd = 1.f;       // Solve: the oracle's way to the step may be this much longer
 
@@ -2824,7 +2841,7 @@ namespace BossMechanics::Solver
             float const speed = Speed(in);
             Ms const stepMs = TravelMs(kStepYd, speed);
             Ms const widen = kOrbitMarginMs + stepMs;
-            Ms const delay = in.params.startDelay;
+            Ms const delay = kOrbitStartDelay;
             // Standing where it is until the departure: clean until its first window there.
             Ms spotFirst = kForever;
             windows(in.bot, [&](HotWindow const& w)
@@ -3482,6 +3499,93 @@ namespace BossMechanics::Solver
             for (std::uint32_t i = 0; i < cands.size() && minCount != 0; ++i)
                 if (hazardFree[i] && !unreachable.count(i) && !lethalBad(i))
                     minCount = 0;
+            // Blackrock Spire F-3 (Rend's heroic walls, the live sweep's Zone/11): with a wall in the view (a line
+            // front), the spot the bot stands on joins that floor. A spot in the first gap is never hazard-free (the
+            // second wall comes through it), while a spot in the second gap is, from an arrival behind the first
+            // wall: without its own spot in the ranking the bot left the first gap at once on a way through the first
+            // wall (the ranking's time inside on the way, then the latest first window, is what keeps it there until
+            // that way is clean). Cone fronts keep the floor as it was (the ring orbit's sequences).
+            bool const walls = std::any_of(in.hazards.begin(), in.hazards.end(), [](Hazard const& h)
+            {
+                return h.front && h.shape.type == ShapeType::Line;
+            });
+            if (walls && minCount == 0 && !unreachable.count(0))
+            {
+                counts[0] = 0;
+                // F-3b (R-3 m-1): the bot's own spot is on the floor whatever else lands on it there, and its walk is
+                // zero-length, so it outranked every way that crosses anything: a bot waiting in the first gap held
+                // its spot under a shape dropped on it (Gyth's mark cone, Shadowflame) until a step out no longer fit.
+                // When a non-wall hazard will be hot on its spot, the spots near it in the same gap join the floor too:
+                // the first wall that reaches them is the one that reaches the bot's spot, the straight way there
+                // touches no wall's exact hitbox, and no non-wall hazard is hot there from the arrival on. The
+                // ranking (time inside on the way, then the latest first window) then steps the bot aside within the
+                // gap. Brain model (tests/front_test.cpp, "rend walls + circle"): a circle on every bot 3.5 s after
+                // the call, 3 s warning, live timing: 2 yd 11 circle / 1 wall hits -> 0 / 1, 5 yd 21 / 6 -> 0 / 4.
+                // Kept narrow: the own spot alone stays on the floor (dropping it, or every spot clean of non-wall
+                // hazards, brought back 22-48 wall hits in R-3's tries), and no other spot joins it without such a
+                // hazard (no change to the walls alone).
+                auto isWall = [](Hazard const& h)
+                {
+                    return h.front && h.shape.type == ShapeType::Line;
+                };
+                auto nonWallHot = [&](Geo::Vec3 const& c, Ms arrival)
+                {
+                    return std::any_of(in.hazards.begin(), in.hazards.end(), [&](Hazard const& h)
+                    {
+                        return !isWall(h) && Detail::HotOver(h, c, arrival, std::max(arrival, horizonEnd),
+                            in.params.marginMs);
+                    });
+                };
+                // The id of the wall whose window opens first at `c` from `arrival` on (0: none in the horizon).
+                auto firstWallId = [&](Geo::Vec3 const& c, Ms arrival)
+                {
+                    Ms first = kForever;
+                    std::uint32_t id = 0;
+                    for (Hazard const& h : in.hazards)
+                        if (isWall(h))
+                            Detail::ForEachWindow(h, c, [&](HotWindow const& w)
+                            {
+                                if (Detail::Meets(w, in.params.marginMs, arrival, std::max(arrival, horizonEnd))
+                                    && w.from < first)
+                                {
+                                    first = w.from;
+                                    id = h.id;
+                                }
+                            });
+                    return id;
+                };
+                if (nonWallHot(in.bot, moveStart))
+                {
+                    std::uint32_t const ownWall = firstWallId(in.bot, moveStart);
+                    Input wallsOnly;
+                    wallsOnly.bot = in.bot;
+                    wallsOnly.speed = in.speed;
+                    wallsOnly.now = in.now;
+                    wallsOnly.params = in.params;
+                    wallsOnly.params.marginMs = Ms(0);
+                    for (Hazard const& h : in.hazards)
+                        if (isWall(h))
+                        {
+                            wallsOnly.hazards.push_back(h);
+                            wallsOnly.hazards.back().marginYd = std::max(0.f, h.driftYd);
+                        }
+                    for (std::uint32_t i = 1; i < cands.size(); ++i)
+                    {
+                        if (counts[i] == 0 || unreachable.count(i))
+                            continue;
+                        Geo::Vec3 const& c = cands[i];
+                        float const d = Detail::Dist3(in.bot, c);
+                        if (d > Detail::kWallGapNearYd)
+                            continue;
+                        Ms const arrival = moveStart + Detail::TravelMs(d, speed);
+                        if (firstWallId(c, arrival) != ownWall || nonWallHot(c, arrival) || lethalBad(i))
+                            continue;
+                        if (Detail::WalkPath(wallsOnly, { in.bot, c }, in.now, true, true).timeInsideHot > Ms(0))
+                            continue;
+                        counts[i] = 0;
+                    }
+                }
+            }
             if (minCount != 0)
             {
                 for (std::uint32_t i = 0; i < cands.size(); ++i)
@@ -3547,6 +3651,12 @@ namespace BossMechanics::Solver
             exact.params.marginMs = Ms(0);
             for (Hazard& h : exact.hazards)
                 h.marginYd = std::max(0.f, h.driftYd);
+            // F-3: with a wall in the view, the way from the first gap steps in right behind the first wall. The live
+            // bot leaves at once (not startDelay later), and the registry sweeps the band since the previous update:
+            // the exact walk checks each sample from that much before its planned time, so a way that clips the
+            // wall's trailing edge live is not a clean one.
+            if (walls)
+                exact.params.earlyMs = in.params.startDelay + Detail::kSweepLagMs;
             auto rankedLess = [](Ranked const& a, Ranked const& b)
             {
                 if (a.inside != b.inside)
@@ -3752,7 +3862,10 @@ namespace BossMechanics::Solver
             if (fronts && havePath)
                 work.clearUntil = firstHotAt(work.target, work.arriveAt);
             work.score = 0.f;
-            // M4 §3.7: the exposure of the path taken, at the exact hitboxes (a clear or a hot fallback).
+            // M4 §3.7: the exposure of the path taken, at the exact hitboxes (a clear or a hot fallback). R-3 m-2: at
+            // the planned times only, as everywhere else (FallbackHolds compares it with a walk without the early
+            // window): F-3's early window ranks a wall Fallback's way, it does not make a clear one read hot.
+            exact.params.earlyMs = Ms(0);
             work.exposure = Detail::WalkPath(exact, path, in.now, true, true).timeInsideHot;
             if (kinds)
                 work.violated = Detail::Violations(in, work.target, work.arriveAt);

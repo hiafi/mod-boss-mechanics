@@ -32,6 +32,9 @@
 // M5 CD (STAGE-M5-CD-REPORT fix spec): the chase valve's walk-in (Config::walkIn), the stranding clock and its route
 // (Config::strandRoute), the solver's spacing term fed with Input::standing (Config::standing) and the lock's refusal
 // of facing-only actions in Escape (Config::escapeFacingBlock, a counter only: the model has no facing).
+// Blackrock Spire F-3 (optional, Config::Live): the live timing (movement at once, hazards seen one update late, the
+// registry's swept judge); without it the model's bots move exactly when the solver assumes, which hid the rolling
+// front misses of the live sweeps (STAGE-SWEEP-DIAG-REPORT).
 #ifndef MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 #define MOD_BOSS_MECHANICS_TEST_BRAIN_MODEL_H
 
@@ -133,6 +136,28 @@ namespace BrainModel
         // M5 CD (C6): the lock refuses facing-only actions in Escape (LockRules::FacingOnlyRefused). The model counts
         // the Escape steps whose walk points away from World::chaseTarget, where stock `set facing` would run.
         bool escapeFacingBlock = true;
+        // Blackrock Spire F-3 (STAGE-SWEEP-DIAG Finding 1): the live timing, off by default (the older tests keep
+        // their numbers). Live, the brain's MoveTo launches the spline at once: the bot is on its way at the next map
+        // update, not params.startDelay after the decision as the solver assumes (moveDelay; < 0: that assumption).
+        // A drill or boss registers a shape in its own map update, after the players' (Map.cpp), so the brains first
+        // see it one update later (sightLag: the tests add their hazards that much late). The registry judges a
+        // projectile on the band swept since the previous update (MechanicRegistry.cpp StepProjectile, SweptBands):
+        // its trailing edge counts one update late (sweptJudge). Live() turns all three on.
+        Ms moveDelay{ -1 };
+        Ms sightLag{ 0 };
+        bool sweptJudge = false;
+
+        void Live()
+        {
+            moveDelay = Ms(0);
+            sightLag = step;
+            sweptJudge = true;
+        }
+
+        Ms MoveDelay() const
+        {
+            return moveDelay >= Ms(0) ? moveDelay : params.startDelay;
+        }
     };
 
     enum class Mode { Watch, Escape, Hold };
@@ -416,7 +441,7 @@ namespace BrainModel
             b.wp = 0;
             b.routePending = false;
             b.regionRoute = false;
-            b.moveFrom = now + cfg.params.startDelay;
+            b.moveFrom = now + cfg.MoveDelay();
             b.outOfRoleSince = Ms(0);
         }
 
@@ -1036,7 +1061,8 @@ namespace BrainModel
         }
 
         // Hits on the exact hitboxes in (now, end]: a plain Zone when it resolves, a projectile while its body covers
-        // the bot (checked at the end of the step), a mine when the bot enters it.
+        // the bot (checked at the end of the step; Config::sweptJudge: the band swept over the step, as the registry),
+        // a mine when the bot enters it.
         void Judge(Bot& b, Ms now, Ms end)
         {
             bool inMine = false;
@@ -1053,7 +1079,21 @@ namespace BrainModel
                 if (!inside || std::find(b.hitBy.begin(), b.hitBy.end(), h.id) != b.hitBy.end())
                     continue;
                 bool hit = false;
-                if (h.timing.type == Solver::TimingType::Projectile)
+                if (h.timing.type == Solver::TimingType::Projectile && cfg.sweptJudge)
+                {
+                    // The registry's sweep: the band anywhere over (now, end], on the exact hitbox.
+                    if (end > h.timing.from)
+                    {
+                        float s = 0.f;
+                        for (Geo::Pose const& pose : h.poses)
+                            if (Solver::SignedDistance(h.shape, pose, b.pos) <= 0.f)
+                                s = ProjectileS(h.shape, pose, b.pos);
+                        for (SweepBand const& band : SweptBands(h.timing.projectile,
+                            std::max(Ms(0), now - h.timing.from), end - h.timing.from))
+                            hit = hit || (s >= band.lo && s <= band.hi);
+                    }
+                }
+                else if (h.timing.type == Solver::TimingType::Projectile)
                 {
                     Solver::Hazard exact = h;
                     exact.marginYd = 0.f;
