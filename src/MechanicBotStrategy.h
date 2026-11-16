@@ -16,6 +16,11 @@
  * | trigger  | boss taunt swap            | BossTauntSwapTrigger          | WP-TS, see the file  |
  * | action   | boss taunt swap            | BossTauntSwapAction           | ACTION_RAID + 3      |
  * | (mult.)  | boss taunt swap            | BossTauntSwapMultiplier       | MechanicBotTauntSwap |
+ * | trigger  | boss pass throw            | BossPassThrowTrigger          | WP-PS, see           |
+ * | action   | boss pass throw            | BossPassThrowAction           | ACTION_EMERGENCY + 3 |
+ * | trigger  | boss pass catch            | BossPassCatchTrigger          | MechanicBotPass.h    |
+ * | action   | boss pass catch            | BossPassCatchAction           | ACTION_RAID + 4      |
+ * | (mult.)  | boss pass catch            | BossPassCatchMultiplier       |                      |
  *
  * The triggers run the brain (MechanicBotBrain::Update, once per game-time ms) and read the mode it leaves. The
  * move action is a MovementAction so it can use the protected MoveTo; the lock multiplier exempts it by type (and

@@ -178,6 +178,26 @@ namespace BossMechanics::Desc
             return d;
         }
 
+        // Blackrock Spire WP-PS, the `pass` drill: the hot potato on the drill auras. The holder is whoever carries
+        // Marked (drill) 205009 (the drill's `debuff 205009` hands it to one member); the module moves it to the
+        // catcher itself (no item in the drill) and puts Baited (drill) 205008 on the thrower for 8 s, the drill's
+        // Scorched Hands: a Baited player does not catch. Catchers far from the dummy (at least 10 yd for a ready
+        // spot) and off the drill's egg circles (`pass-eggs`, tag kPassEggTag) within 4 yd; the holder throws once
+        // the dummy is within 8 yd of it, or after 5 s, never before 1.5 s. Two ready catchers.
+        constexpr std::uint32_t kPassEggTag = 60;
+
+        inline Descriptor PassDrill()
+        {
+            Descriptor d;
+            d.passes.push_back(PassEntry::MovingAura(I::SPELL_MARKED_DRILL, 30.f, I::SPELL_BAITED_DRILL,
+                milliseconds(8000))
+                .CatchWhen(Condition::LacksAura(I::SPELL_BAITED_DRILL))
+                .FarFrom(0).KeepFrom(10.f).FewestZones(kPassEggTag, 4.f)
+                .When(PassTrigger::UnitNear(0, 8.f)).When(PassTrigger::HeldFor(milliseconds(5000)))
+                .MinHold(milliseconds(1500)).Flight(milliseconds(500)).ReadyCatchers(2));
+            return d;
+        }
+
         // Every list at once (the `descriptor` drill): kicks, dispels, purges; prisons (3) before the aiming add
         // (2) before the casters (1) before the dummy; the purge adds below the dummy; the copies ignored.
         inline Descriptor All()
@@ -218,6 +238,8 @@ namespace BossMechanics::Desc
             { "ignore", "the copies are ignored", &DrillPresets::Ignore },
             { "taunt-swap", "the tanks trade the dummy at 3 Taunt Swap stacks; the assist tank picks up the add",
                 &DrillPresets::TauntSwapDrill },
+            { "pass", "Marked is the hot potato: thrown on near the dummy or after 5 s, away from the dummy and the "
+                "egg circles; the thrower is Baited for 8 s", &DrillPresets::PassDrill },
             { "descriptor", "every list at once: kicks, dispels, purges, prisons > aiming add > casters, copies "
                 "ignored", &DrillPresets::All },
         };

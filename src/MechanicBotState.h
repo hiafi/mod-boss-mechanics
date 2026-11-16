@@ -27,6 +27,7 @@
 #include "MechanicKickRules.h"
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
+#include "MechanicPass.h"
 #include "MechanicSolver.h"
 #include "MechanicTauntSwap.h"
 #include "MechanicTargetRules.h"
@@ -197,6 +198,8 @@ namespace BossMechanics
         Milliseconds dispelRetryAt{ 0 };
         // Blackrock Spire WP-TS: the taunt swap decision and its counters (MechanicBotTauntSwap.cpp).
         TauntSwap::State tauntSwap;
+        // Blackrock Spire WP-PS: the pass decision (throw, ready spot) and its counters (MechanicBotPass.cpp).
+        Pass::BotState pass;
 
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)

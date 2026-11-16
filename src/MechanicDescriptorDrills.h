@@ -129,6 +129,15 @@ namespace BossMechanics::Drill
             { "taunt-swap", "two tanks trade the dummy at 3 stacks, again and again; the assist tank picks up an add "
                 "first", "describe taunt-swap,add 300405 n=1 ttl=12000,cast 205024 every=6000,wait:60" },
 
+            // ---- pass (Blackrock Spire WP-PS) ----
+            // The hot potato (Solakar's Father Flame) on the drill auras: one member gets Marked (drill), the holder;
+            // 40 egg circles (`pass-eggs`: 2 yd, 25 yd round the dummy, laid again every 20 s, three times) stand for
+            // the Rookery's clutches. The holder bot throws once the dummy is within 8 yd or after 5 s (never before
+            // 1.5 s); the two best catchers (far from the dummy, off the eggs) walk to a ready spot first. The ledger's
+            // Zone/60 counts egg contacts. About 64 s; not in the loops.
+            { "pass", "Marked is passed between members away from the dummy and 40 egg circles; the thrower is Baited "
+                "8 s", "describe pass,debuff 205009 n=1,pass-eggs" },
+
             // ---- everything ----
             // The dummy's default loop and the sim slice: every list at once in 60 s, on the combined preset.
             { "descriptor", "every list at once (60 s): kicks, dispels, purges, targets, prisons, copies",

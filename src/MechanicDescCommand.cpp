@@ -132,9 +132,9 @@ namespace BossMechanics
             Descriptor const& d = e.descriptor;
             Milliseconds const now = GameTime::GetGameTimeMS();
             handler->PSendSysMessage("Descriptor of {}: phase {}, {} interrupt(s), {} dispel(s), {} purge(s), "
-                "{} target(s), {} ignore(s), {} taunt swap(s), stamp {}", UnitLabel(map, e.owner.GetRawValue()),
-                d.phase, d.interrupts.size(), d.dispels.size(), d.purges.size(), d.targets.size(), d.ignores.size(),
-                d.tauntSwaps.size(), e.descriptorStamp);
+                "{} target(s), {} ignore(s), {} taunt swap(s), {} pass(es), stamp {}", UnitLabel(map,
+                e.owner.GetRawValue()), d.phase, d.interrupts.size(), d.dispels.size(), d.purges.size(),
+                d.targets.size(), d.ignores.size(), d.tauntSwaps.size(), d.passes.size(), e.descriptorStamp);
             for (InterruptEntry const& i : d.interrupts)
                 handler->PSendSysMessage("  kick {} by {}: {}{}{}", SpellLabel(i.spellId), UnitOrEntry(map,
                     i.casterEntry, 0), i.priority ? Acore::StringFormat("priority {}", int32(i.priority))
@@ -182,6 +182,47 @@ namespace BossMechanics
                     handler->PSendSysMessage("    {}: victim {}, {} stack(s)", UnitLabel(map, g.GetRawValue()),
                         victim ? victim->GetName() : std::string("-"), stacks);
                 }
+            }
+            // Blackrock Spire WP-PS: each pass, with the player holding it now (`.mech bots` has the throws).
+            for (PassEntry const& p : d.passes)
+            {
+                std::string how = p.how == PassEntry::Throw::Item ? Acore::StringFormat("item {}", p.item)
+                    : p.how == PassEntry::Throw::Spell ? "spell " + SpellLabel(p.spell)
+                    : "aura moved" + (p.afterAura ? ", then " + SpellLabel(p.afterAura) : std::string());
+                std::string triggers;
+                for (PassTrigger const& t : p.triggers)
+                {
+                    std::string one;
+                    switch (t.kind)
+                    {
+                        case PassTrigger::Kind::HeldFor:
+                            one = Acore::StringFormat("held {} ms", t.ms.count());
+                            break;
+                        case PassTrigger::Kind::UnitNear:
+                            one = Acore::StringFormat("{} within {:.0f} yd{}", t.entry ? Acore::StringFormat(
+                                "entry {}", t.entry) : std::string("the owner"), t.yd, When(t.when));
+                            break;
+                        case PassTrigger::Kind::Casting:
+                            one = Acore::StringFormat("{} casts {}", t.entry ? Acore::StringFormat("entry {}",
+                                t.entry) : std::string("the owner"), SpellLabel(t.id));
+                            break;
+                        case PassTrigger::Kind::Mechanic:
+                            one = Acore::StringFormat("mechanic tag {} live", t.id);
+                            break;
+                    }
+                    triggers += (triggers.empty() ? "" : "; ") + one + (t.urgent ? " (urgent)" : "");
+                }
+                std::string holder = "-";
+                for (MapReference const& ref : map->GetPlayers())
+                    if (Player const* pl = ref.GetSource(); pl && pl->HasAura(p.holderAura))
+                        holder = pl->GetName();
+                handler->PSendSysMessage("  pass {} by {}, {:.0f} yd{}: catch{}{}, far from {} unit(s){}, zones tag {} "
+                    "within {:.0f} yd, ready {}; throw on: {}; {} minimum hold(s); holder now {}", SpellLabel(
+                    p.holderAura), how, p.range, p.sight ? "" : " (no sight)", Inner(p.catchWhen), p.preferSet
+                    ? ", first" + Inner(p.prefer) : std::string(), p.farFrom.size(), p.keepFromYd > 0.f
+                    ? Acore::StringFormat(" (keep {:.0f} yd)", p.keepFromYd) : std::string(), p.zoneTag, p.zoneYd,
+                    int32(p.readyCatchers), triggers.empty() ? std::string("never") : triggers, p.holds.size(),
+                    holder);
             }
             for (uint32 aura : d.hostilePlayerAuras)
                 handler->PSendSysMessage("  hostile player aura {} (a charmed teammate with it is a target)",
