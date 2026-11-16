@@ -19,6 +19,7 @@
 #include "MechanicBotStrategy.h"
 #include "MechanicBotTargets.h"
 #include "MechanicBotTauntSwap.h"
+#include "MechanicBotPass.h"
 #include "NamedObjectContext.h"
 
 class MechanicBotStrategyContext : public NamedObjectContext<Strategy>
@@ -50,6 +51,9 @@ public:
         creators["boss kick"] = &MechanicBotActionContext::boss_kick;
         // Blackrock Spire WP-TS: the taunt swap (MechanicBotTauntSwap.h).
         creators["boss taunt swap"] = &MechanicBotActionContext::boss_taunt_swap;
+        // Blackrock Spire WP-PS: the pass (MechanicBotPass.h).
+        creators["boss pass throw"] = &MechanicBotActionContext::boss_pass_throw;
+        creators["boss pass catch"] = &MechanicBotActionContext::boss_pass_catch;
     }
 
 private:
@@ -61,6 +65,8 @@ private:
     static Action* boss_focus(PlayerbotAI* botAI) { return new MechanicBotFocusAction(botAI); }
     static Action* boss_kick(PlayerbotAI* botAI) { return new BossKickAction(botAI); }
     static Action* boss_taunt_swap(PlayerbotAI* botAI) { return new BossTauntSwapAction(botAI); }
+    static Action* boss_pass_throw(PlayerbotAI* botAI) { return new BossPassThrowAction(botAI); }
+    static Action* boss_pass_catch(PlayerbotAI* botAI) { return new BossPassCatchAction(botAI); }
 };
 
 class MechanicBotTriggerContext : public NamedObjectContext<Trigger>
@@ -80,6 +86,9 @@ public:
         creators["boss interrupt due"] = &MechanicBotTriggerContext::boss_interrupt_due;
         // Blackrock Spire WP-TS: the taunt swap (MechanicBotTauntSwap.h).
         creators["boss taunt swap"] = &MechanicBotTriggerContext::boss_taunt_swap;
+        // Blackrock Spire WP-PS: the pass (MechanicBotPass.h).
+        creators["boss pass throw"] = &MechanicBotTriggerContext::boss_pass_throw;
+        creators["boss pass catch"] = &MechanicBotTriggerContext::boss_pass_catch;
     }
 
 private:
@@ -91,6 +100,8 @@ private:
     static Trigger* boss_focus(PlayerbotAI* botAI) { return new MechanicBotFocusTrigger(botAI); }
     static Trigger* boss_interrupt_due(PlayerbotAI* botAI) { return new BossInterruptDueTrigger(botAI); }
     static Trigger* boss_taunt_swap(PlayerbotAI* botAI) { return new BossTauntSwapTrigger(botAI); }
+    static Trigger* boss_pass_throw(PlayerbotAI* botAI) { return new BossPassThrowTrigger(botAI); }
+    static Trigger* boss_pass_catch(PlayerbotAI* botAI) { return new BossPassCatchTrigger(botAI); }
 };
 
 class MechanicBotValueContext : public NamedObjectContext<UntypedValue>

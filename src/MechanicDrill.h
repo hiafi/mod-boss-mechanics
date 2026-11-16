@@ -836,6 +836,15 @@ namespace BossMechanics::Drill
                     { 20000, "line 5 1500 width=4 exclude=5 anchor=target to=last reach=1 cycle=odd pct=40 weak=1 "
                         "tag=7" },
                 }, 5 },     // five cycles a run (120 s): the sweep runs blackrock-spire-followups:5
+
+            // Blackrock Spire WP-PS (the `pass` descriptor drill): the Rookery's egg clutches as 40 small persistent
+            // circles, 2 yd, scattered within 25 yd of the selected unit, laid 50 ms apart and kept 16 s; three 20 s
+            // cycles lay them again elsewhere. pct=0 (flat 1 in the dummy's flat mode): no harm, but each tick inside
+            // is a ledger hit on tag 60 (DrillPresets::kPassEggTag), so the sweep counts egg contacts. No marker.
+            { "pass-eggs", "40 egg circles (2 yd, within 25 yd), 16 s, laid again every 20 s: the pass drill's eggs",
+                20000, false, {
+                    { 0, "circle 2 500 pct=0 persist=16000 tick=1000 repeat=40 every=50 scatter=25 tele=0 tag=60" },
+                } },
         };
         return drills;
     }

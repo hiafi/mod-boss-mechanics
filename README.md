@@ -1335,6 +1335,112 @@ fallen off, and 15 s at a stack every 6 s clears the giver by the taker's third 
 the `ts taunt swap` line per bot (holds, keeps off, the pending taunt and why, swaps and trades, refused casts, walks
 in, attacks stopped, actions blocked, the most stacks it held). Debug (`BossMechanics.Bots.Debug`) logs each swap.
 
+### Pass (Blackrock Spire WP-PS)
+
+Shared doc BS6, library L26 Hot Potato, designer ruling 57: the player holding something (an aura, usually with an
+item in the bags) throws it on to another player; boss data says who may catch it, the range, the pick among the
+catchers, when to throw and how long a catcher holds first. Bots throw by it, humans by hand. Solakar's Father Flame is
+the first use; Lady Vashj's Tainted Core (mod-playerbots' own chain today) is the next. Files: `src/MechanicPass.h`
+(pure rules: pick, triggers, ready spots, the per-map slot; `tests/pass_test.cpp`), `src/MechanicBotPass.h/.cpp` (the
+glue), `PassEntry` / `PassTrigger` / `PassHold` and `Condition::AnyOf` in `src/MechanicDescriptor.h`. No mod-playerbots
+or core edit.
+
+**Boss data.** A `PassEntry` in the descriptor (`d.passes`). The holder is whoever carries `holderAura`.
+
+```cpp
+Descriptor d;
+d.passes.push_back(PassEntry::WithItem(SPELL_FATHER_FLAME, ITEM_FATHER_FLAME, 30.f)
+    .CatchWhen(Condition::AnyOf({ Condition::LacksAura(SPELL_SCORCHED_HANDS),
+        Condition::HasAura(SPELL_SPEAR_WOUND) }))
+    .Prefer(Condition::HasAura(SPELL_SPEAR_WOUND))                  // heroic: the wounded first
+    .FarFrom(NPC_SOLAKAR).FarFrom(NPC_ROOKERY_HATCHER).KeepFrom(15.f)
+    .FewestZones(TAG_EGGS, 4.f)                                     // the egg clutches, registered Tag(TAG_EGGS)
+    .When(PassTrigger::UnitNear(NPC_SOLAKAR, 15.f, Condition::HasAura(SPELL_WARDENS_HUNT)))
+    .When(PassTrigger::UnitNear(NPC_ROOKERY_HATCHER, 15.f))
+    .When(PassTrigger::HeldFor(holdMs))                             // 6 / 4 s normal, 4 / 3 s heroic (5 / 6+)
+    .MinHold(2000ms, Condition::HasAura(SPELL_SPEAR_WOUND))        // sear the wound first
+    .Flight(1000ms).Room(48.5f, -338.f, 107.5f, -252.5f));
+Mechanic::Describe(me, std::move(d));
+```
+
+| Part | What |
+| --- | --- |
+| `WithItem(aura, item, range)` | the holder uses `item` on the catcher (`ImbueItem`); the item's spell moves the aura |
+| `WithSpell(aura, spell, range)` | the holder casts `spell` at the catcher (a server cast if it does not know it) |
+| `MovingAura(aura, range, after, ms)` | the module moves the aura, puts `after` on the thrower for `ms` (the drill) |
+| `CatchWhen(c)` | judged on each candidate; default anyone. `Condition::AnyOf` is new (Not of AllOf of Nots) |
+| `Prefer(c)` | ranked before everyone else (still subject to CatchWhen) |
+| `FarFrom(entry)` | catchers far from the nearest live unit of each entry (0: the encounter owner) score higher |
+| `KeepFrom(yd)` | a ready spot stays at least this far from those units |
+| `FewestZones(tag, yd, w)` | each live mechanic tagged `tag` within `yd` (edge; circles, donuts) costs `w` yd (10) |
+| `When(PassTrigger)` | `HeldFor(ms)`, `UnitNear(entry, yd, when)`, `Casting(entry, spell, yd)`, `Mechanic(tag, ms)` |
+| `PassTrigger::Urgent()` | any one trigger fires the throw; an urgent one goes through the minimum holds |
+| `MinHold(ms, when)` | a new holder keeps it `ms` from its catch while `when` holds on it |
+| `Flight(ms)` (1500) | no second throw by that holder, and the throw is not judged, for this long |
+| `ReadyCatchers(n)` (1) | the best `n` catchers walk to a ready spot (0: none moves) |
+| `NoSight()` | no line of sight needed between the holder and the catcher |
+| `Room(box)`, `RoomCircle(c, r)` | ready spots stay inside |
+| `ActiveWhen(c)` | judged on the owner: the pass idles while it fails |
+
+**Rules** (`Pass::RankThrow`, `RankReady`, `PickReady`, `ThrowTarget`, `ThrowDue`, `SpotFit`, `RankSpots`):
+
+- Catchers: the holder's group members on its map (humans too), alive, not GMs, `CatchWhen` holding. A throw goes to
+  one within `range - 0.5` (3D, edge to edge) and in the holder's line of sight (unless `NoSight`). Order: `Prefer`
+  first, then the score (the distance to the nearest FarFrom unit, capped at 40 yd, minus `w` per counted zone), then
+  the lower guid.
+- Ready catchers: the same order over every eligible catcher, out of range or sight costing (a yard per yard beyond
+  `range - 4`, 15 for no sight), so the best one walks into reach. Both picks are sticky: the one in place keeps it
+  unless another of the same preference scores 5 yd more. The throw goes to the first ready catcher when it can catch
+  now, else to the best one who can. The boss's tank never walks (it keeps the boss where it is); humans never walk.
+- The throw is due when a trigger fires, unless a minimum hold whose condition holds on the holder has not run out (an
+  urgent trigger goes through it) or the holder's last throw still flies. `HeldFor` counts from the catch (the first
+  holder: from when the book first saw it).
+- A flight that runs out with the thrower still holding is a failed throw; two in a row at one catcher leave it out
+  for 5 s (the Vashj chain's re-plan without the catcher).
+- Ready spot: a ready catcher bot whose own spot is fit holds it (no counted zone within `yd`, `KeepFrom` met, within
+  `range - 4` of the holder on the same floor, in its sight, 4 yd from the other ready catchers' spots); else it walks
+  to the cheapest of 96 candidates (rings round it and round the holder; cost = the walk + 30 per zone + 5 per yard
+  short of KeepFrom + 20 per yard short of 4 yd from another ready spot; out of the room or the holder's reach: never),
+  probed in that order (at most 8): on the navmesh, out of the bot's hazards for 3 s, in the holder's sight, and
+  cheaper than standing still. The spot is reserved on the map's book. At it, the bot holds up to 8 s: the
+  `boss pass catch` multiplier zeroes the stock movement actions (not the brain's, not a taunt swap); the brain still
+  escapes hazards first (the lock blocks the walk in Escape, Hold and Freeze).
+
+**Bots.** `boss pass throw` (trigger and plain `Action`, `ACTION_EMERGENCY + 3`, never blocked by the lock): the item
+on the catcher (`ImbueItem`, the Vashj `ThrowCore` pattern: credit Crow, mod-playerbots #1888 / #2892), the spell, or
+the aura moved. `boss pass catch` (trigger and `MovementAction`, `ACTION_RAID + 4`): the walk to the ready spot.
+`boss pass catch` multiplier: the hold. The waker (`BotPass::AfterTick`) breaks a holder's cast in progress for a due
+throw and wakes the holder and a catcher that starts walking. The book (one per map, `Map::CustomData`
+`mod-boss-mechanics-pass`) is brought up to date by the first bot that looks in a game-time millisecond, at most every
+100 ms (at once on a change of holder or a throw).
+
+**Check**: `.mech desc` prints each pass (the throw, range, catch rule, triggers, holds) and who holds it now;
+`.mech bots` prints a `ps pass` line per bot (its role, the throw due and why, its throws, refusals, casts broken,
+walks, spots picked, no spot found, moves held) and the book (holder, first ready catcher, throws, catches, failed
+throws, other changes, drops). Debug (`BossMechanics.Bots.Debug`) logs each throw and walk.
+
+**Drill** `pass` (descriptor drill, on the Descriptor Training Dummy 300403 or the sim; not in the loops):
+`describe pass,debuff 205009 n=1,pass-eggs`. One member gets Marked (drill) 205009, the holder; the module moves it
+(`MovingAura`) and puts Baited (drill) 205008 on the thrower for 8 s (the drill's Scorched Hands); catchers far from
+the dummy (ready spots 10 yd off it) and off the eggs; the holder throws once the dummy is within 8 yd or after 5 s,
+never before 1.5 s; two ready catchers. `pass-eggs` (a `.mech drill` too) lays 40 egg circles (2 yd, within 25 yd of
+the selected unit, 50 ms apart, 16 s, `tag=60`, no marker, `pct=0`: 1 damage a tick in the dummy's flat mode) three
+times 20 s apart; the ledger's `Zone/60` counts egg contacts. About 64 s.
+
+**Cost** (`tests/pass_test`, host, `-O1`): a solve with the Rookery's 33 real clutches (live gameobject 175124) about
+0.1 ms, with 40 zones about 0.1 ms, with one zone per egg (138) about 0.2-0.45 ms; a route across the room with them
+0.35-0.45 ms; the pass's own rules per update (9 catchers ranked twice, 96 spot candidates, 40 zones) about 12 us.
+All well under M5's 2,000 us. Only 6% of the Rookery's floor is fit to catch on with the holder in the middle and
+Solakar at his spawn (no clutch within 4 yd and 15 yd from him), so the walk to a ready spot matters.
+
+**Catcher supply** (the heat table of SP SK4/SK5 as a model, throws on HeldFor alone): fewest / mean eligible catchers
+at a throw over 120 s: normal 5 (6 s holds, Scorched 15 s) 2 / 2.2; normal 10 (4 s, 25 s) 4 / 4.6; heroic 5 (4 s,
+10 s) 2 / 2.1; heroic 10 (3 s, 25 s) 3 / 3.7.
+
+**Limits**: one holder per entry (a second player with the aura is ignored while the first holds); the counted zones
+are circles and donuts by their outer radius; a human holder is never thrown for; a lost holder (nobody holds) gives
+nothing to the bots (the boss's Soak pickup is the script's, SK7).
+
 ### Gate
 
 Installed on every bot, master or not, by login, map change and a sweep every `GateSweepMs` (repairs
