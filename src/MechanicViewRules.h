@@ -198,6 +198,16 @@ namespace BossMechanics::ViewRules
         return hasPet ? std::max(0.f, kPetFollowYd + kPetLethalSlackYd - safetyMarginYd) : 0.f;
     }
 
+    // Blackrock Spire F-3 (STAGE-SWEEP-DIAG Finding 2): the extra keeps the pet out of a wall that would kill it, so
+    // only a lethal hazard that strikes pets gets it. `strikesPets` false: one eligible to players only
+    // (Eligibility::playersOnly, the drill's only=member) or one whose owner spares pets (MechanicRef::SparesPets: the
+    // kit's LethalRing with pets = false, Drakkisath's duel ring, which pushes a pet out). With the extra, a pet owner
+    // challenged in the duel ring found no spot: the ring forbade 8.0 yd and out, the Thunderclap 8.75 yd and in.
+    inline float LethalPetExtraYd(float safetyMarginYd, bool hasPet, bool strikesPets)
+    {
+        return strikesPets ? LethalPetExtraYd(safetyMarginYd, hasPet) : 0.f;
+    }
+
     // Stratholme F-1b (R-1-KIT F2): a Spread/RunOut registered with no warning (resolveAt <= createdAt) and no
     // persistence cannot be dodged: it resolves on the registry's next tick (a script's hit routed through the
     // registry, DungeonKit's RegistryHit: a RunOut measured from the boss, reach + 10 yd, on the tank too). It stays
