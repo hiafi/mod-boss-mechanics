@@ -1,8 +1,9 @@
 // Standalone tests for the rolling fronts (Blackrock Spire build WP-RF; src/MechanicFront.h, the projectile launch
 // offset in src/MechanicMath.h, the solver's radial s, slice exits and ParkTogether in src/MechanicSolver.h, the wide
 // cone and arc band displays in src/BossMechanicsIds.h): the spec rules, the gaps and wall segments, the placement
-// rules, the marker pieces, single solves (slice, gap, tank park), fights in the brain model (Emberseer's pulses,
-// Rend's sweeps) and the cost of four rings at once against the solver budget (M5: 2,000 us).
+// rules, the marker pieces, single solves (slice, gap, tank park), fights in the brain model (Emberseer's pulses, also
+// with the user's rulings and the ring orbit of WP-SF; Rend's sweeps) and the cost of four rings at once against the
+// solver budget (M5: 2,000 us).
 // Build: tests/run.sh.
 
 #include "check.h"
@@ -11,6 +12,7 @@
 #include "MechanicFront.h"
 #include "MechanicSolver.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -661,17 +663,25 @@ namespace
         float stacks;
         std::uint32_t bots;
         float rangedYd;         // where the ranged half stands from the boss (the melee half at 3 yd)
+        // Blackrock Spire WP-SF, the user's rolling front rulings (HANDOFF section 10, 2026-11-15): ring 1 shown 5 s
+        // ahead (the nova keeps its 2.5 s), rings 2-4 from the apex. `hint`: every ring but the last carries the
+        // turn to the next (ConeFrontSpec::nextTurnDeg).
+        bool ruled = false;
+        bool hint = false;
     };
 
     // One Furnace Pulse per 15 s (12 s heroic) for 60 s: the nova's 2.5 s warning, then `rings` rings `ringGap` apart,
     // each slice turned `turnDeg` clockwise, ring k registered as ring k - 1 launches (SP EM3: "its slice appears as
     // the ring before it launches"). The group stands round the boss at the apex (melee 3 yd, ranged 15-25 yd) and
-    // drifts back there between pulses (stock follow). Hits: the exact band (no margin) over a bot.
+    // drifts back there between pulses (stock follow). Hits: the exact band (no margin) over a bot. Ruled (WP-SF): the
+    // first ring shown 5 s ahead and the nova 2.5 s before it erupts with that ring, the later rings from the apex.
     struct PulseResult
     {
         BrainModel::Counters c;
         std::uint32_t novaHits = 0;
         std::uint32_t ringHits = 0;
+        std::array<std::uint32_t, 4> byRing{};
+        std::uint32_t pulses = 0;
     };
 
     PulseResult RunPulses(PulseSpec const& spec, std::uint32_t seed)
@@ -719,23 +729,32 @@ namespace
         };
         std::vector<Pending> pending;
         std::vector<std::uint32_t> novas;
+        std::vector<std::uint32_t> ringOf(1, 0);
+        std::uint32_t pulsesRun = 0;
         std::uint32_t rng = 0x9e3779b9u * (seed + 1);
-        for (Ms pulse = start; pulse + Ms(8000) < end; pulse += pulseEvery)
+        Ms const ahead = spec.ruled ? Ms(5000) : Ms(2500);
+        for (Ms pulse = start; pulse + ahead + Ms(5500) < end; pulse += pulseEvery)
         {
             rng = rng * 1664525u + 1013904223u;
             float const first = static_cast<float>(rng >> 8) / 16777216.f * Geo::kTwoPi;
-            Ms const launch = pulse + Ms(2500);
+            Ms const launch = pulse + ahead;
+            ++pulsesRun;
             novas.push_back(id);
-            pending.push_back({ pulse, Nova(id++, nova, launch) });
+            pending.push_back({ launch - Ms(2500), Nova(id++, nova, launch) });
             for (std::uint32_t k = 0; k < spec.rings; ++k)
             {
                 ConeFrontSpec ring;
                 ring.sliceBearing = Front::SliceBearing(first, k, spec.turnDeg);
                 ring.sliceDeg = spec.sliceDeg;
-                ring.startYd = nova;
+                ring.startYd = spec.ruled && k > 0 ? 0.f : nova;
+                ring.nextTurnDeg = spec.hint && k + 1 < spec.rings ? spec.turnDeg : 0.f;
                 Ms const ringLaunch = launch + spec.ringGap * k;
                 Ms const shown = k == 0 ? pulse : ringLaunch - spec.ringGap;
-                pending.push_back({ shown, ConeHazard(id++, ring, ringLaunch) });
+                Hazard h = ConeHazard(id, ring, ringLaunch);
+                h.nextTurn = -Geo::DegToRad(ring.nextTurnDeg);     // as the bot view sets it
+                pending.push_back({ shown, h });
+                ringOf.resize(id + 1, 0);
+                ringOf[id++] = k;
             }
         }
         for (Ms now = start; now < end; now += cfg.step)
@@ -750,9 +769,16 @@ namespace
         }
         PulseResult out;
         out.c = world.Total();
+        out.pulses = pulsesRun;
         for (BrainModel::Bot const& b : world.bots)
             for (std::uint32_t hid : b.hitBy)
-                ++(std::find(novas.begin(), novas.end(), hid) != novas.end() ? out.novaHits : out.ringHits);
+                if (std::find(novas.begin(), novas.end(), hid) != novas.end())
+                    ++out.novaHits;
+                else
+                {
+                    ++out.ringHits;
+                    ++out.byRing[std::min<std::size_t>(ringOf[hid], out.byRing.size() - 1)];
+                }
         return out;
     }
 
@@ -775,27 +801,50 @@ namespace
             { "heroic 4 rings, 10 close", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 5.f },
             { "normal 1 ring, 5 at 15 yd", 1, 60.f, 45.f, Ms(2000), 3.f, 5, 15.f },
             { "heroic 4 rings, 10 at 15 yd", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 15.f },
+            // WP-SF: the user's rulings (ring 1 shown 5 s ahead, rings 2-4 from the apex): consecutive heroic slices
+            // 15 degrees apart with 1.0 s between one band passing and the next arriving (the B10 report's ~38%
+            // ring hits before the ring orbit). Gated (gate %, hint % with the turn hint, nova %).
+            { "ruled normal 3 rings, 5 close", 3, 60.f, 45.f, Ms(2000), 16.f, 5, 5.f, true, false },
+            { "ruled heroic 3 rings, 5 close", 3, 45.f, 60.f, Ms(1500), 10.f, 5, 5.f, true, false },
+            { "ruled heroic 4 rings, 5 close", 4, 45.f, 60.f, Ms(1500), 16.f, 5, 5.f, true, false },
+            { "ruled heroic 4 rings, 5 hinted", 4, 45.f, 60.f, Ms(1500), 16.f, 5, 5.f, true, true },
+            { "ruled heroic 4 rings, 10 hinted", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 5.f, true, true },
+            { "ruled heroic 4 rings, 10 at 15 yd", 4, 45.f, 60.f, Ms(1500), 16.f, 10, 15.f, true, true },
         };
         for (PulseSpec const& spec : specs)
         {
             BrainModel::Counters sum;
             std::uint32_t novaHits = 0;
             std::uint32_t ringHits = 0;
+            std::uint32_t pulses = 0;
+            std::array<std::uint32_t, 4> byRing{};
             for (std::uint32_t seed = 0; seed < 4; ++seed)
             {
                 PulseResult const r = RunPulses(spec, seed);
                 sum.Add(r.c);
                 novaHits += r.novaHits;
                 ringHits += r.ringHits;
+                pulses += r.pulses;
+                for (std::size_t k = 0; k < byRing.size(); ++k)
+                    byRing[k] += r.byRing[k];
             }
-            std::uint32_t const passes = 4 * 5 * spec.bots * spec.rings;    // seeds x pulses x bots x rings
-            std::printf("front pulses %-28s solves %5u, move %5u, fallback %3u, nova hits %3u of %3u, ring hits %3u "
-                "of %4u, solve us max %5lld mean %4lld\n", spec.name, sum.solves, sum.outcomes[1] + sum.outcomes[2],
-                sum.Fallbacks(), novaHits, 4 * 5 * spec.bots, ringHits, passes,
-                static_cast<long long>(sum.solveUsMax),
+            std::uint32_t const passes = pulses * spec.bots * spec.rings;  // seeds x pulses x bots x rings
+            std::uint32_t const novaPasses = pulses * spec.bots;
+            std::printf("front pulses %-33s solves %5u, move %5u, fallback %4u, nova hits %3u of %3u, ring hits %3u "
+                "of %4u (by ring %u/%u/%u/%u), solve us max %5lld mean %4lld\n", spec.name, sum.solves,
+                sum.outcomes[1] + sum.outcomes[2], sum.Fallbacks(), novaHits, novaPasses, ringHits, passes, byRing[0],
+                byRing[1], byRing[2], byRing[3], static_cast<long long>(sum.solveUsMax),
                 static_cast<long long>(sum.solves ? sum.solveUsTotal / sum.solves : 0));
-            if (spec.rangedYd < 10.f)
+            if (spec.rangedYd >= 10.f)
+                continue;
+            if (!spec.ruled)
                 CHECK(ringHits * 100 <= passes);
+            else if (spec.rings < 4)
+                CHECK(ringHits * 100 <= 3 * passes);                // the B10 gate: heroic up to 3 rings <= 3%
+            else
+                CHECK(ringHits * 100 <= (spec.hint ? 10u : 20u) * passes);
+            if (spec.ruled)
+                CHECK(novaHits * 100 <= 15 * novaPasses);           // the B10 gate on the nova
         }
     }
 
@@ -922,21 +971,51 @@ namespace
             return static_cast<float>(st.atMs) + Drill::Number(t[2]).value_or(0.f);
         };
         std::vector<Drill::Step> const& st = d->steps;
-        CHECK(st.size() == 9);
-        // EM2 + EM3 normal: the nova and ring 1 together, ring 2 two seconds later turned 45; heroic 1.5 s, 60.
-        CHECK(launch(st[0]) == launch(st[1]) && launch(st[2]) - launch(st[1]) == 2000.f);
-        CHECK(KeyOf(st[1].line, "slice", 0.f) == 60.f && KeyOf(st[2].line, "turn", 0.f) == 45.f);
-        CHECK(KeyOf(st[1].line, "start", 0.f) == Drill::Number(Drill::Tokens(st[0].line)[1]).value_or(0.f));
-        CHECK(launch(st[3]) == launch(st[4]) && launch(st[5]) - launch(st[4]) == 1500.f
-            && launch(st[6]) - launch(st[5]) == 1500.f);
-        CHECK(KeyOf(st[4].line, "slice", 0.f) == 45.f && KeyOf(st[5].line, "turn", 0.f) == 60.f);
-        // Each later ring is shown as the ring before it launches (SP EM3).
-        CHECK(static_cast<float>(st[2].atMs) == launch(st[1]) && static_cast<float>(st[5].atMs) == launch(st[4])
-            && static_cast<float>(st[6].atMs) == launch(st[5]));
-        // RG6: 8 yd gap, the second wall 3 s after the first, the other side, within 20 yd.
-        CHECK(launch(st[8]) - launch(st[7]) == 3000.f && KeyOf(st[7].line, "gap", 0.f) == 8.f);
-        CHECK(Drill::Value(st[8].line, "side") == std::optional<std::string_view>("other")
-            && KeyOf(st[8].line, "apart", -1.f) == 20.f);
+        CHECK(st.size() == 10);
+        if (st.size() != 10)
+            return;
+        auto ring = [](Drill::Step const& step) { return Drill::Tokens(step.line)[0] == "conefront"; };
+        // The rolling front rulings (as G2's row 18): ring 1 shown 5 s ahead, the nova registered 2.5 s later with its
+        // 2.5 s warning, erupting as ring 1 launches; each later ring shown as the ring before it launches.
+        // Normal (7 stacks): ring 1, nova 9.1, ring 2 two seconds later turned 45 (60 degree slices).
+        // Heroic (14 stacks): ring 1, nova 11.2, rings 2-4 1.5 s apart turned 60 (45 degree slices).
+        struct Pulse { std::size_t first; std::size_t rings; float nova; float slice; float turn; float spacing; };
+        for (Pulse const& p : { Pulse{ 0, 2, 9.1f, 60.f, 45.f, 2000.f }, Pulse{ 3, 4, 11.2f, 45.f, 60.f, 1500.f } })
+        {
+            Drill::Step const& r1 = st[p.first];
+            Drill::Step const& nova = st[p.first + 1];
+            CHECK(ring(r1) && Drill::Tokens(nova.line)[0] == "circle");
+            CHECK_NEAR(Drill::Number(Drill::Tokens(nova.line)[1]).value_or(0.f), p.nova, 1e-4);
+            CHECK(launch(r1) - static_cast<float>(r1.atMs) == 5000.f);
+            CHECK(launch(nova) - static_cast<float>(nova.atMs) == 2500.f && launch(nova) == launch(r1));
+            // Ring 1 random, from the nova's edge, at the creature (it comes before the nova).
+            CHECK(!Drill::Value(r1.line, "at") && !Drill::Value(r1.line, "turn") && !Drill::Value(r1.line, "bearing"));
+            CHECK_NEAR(KeyOf(r1.line, "start", -1.f), p.nova, 1e-4);
+            for (std::size_t k = 0; k < p.rings; ++k)
+            {
+                Drill::Step const& r = st[k == 0 ? p.first : p.first + 1 + k];
+                CHECK(ring(r));
+                CHECK(KeyOf(r.line, "slice", 0.f) == p.slice);
+                CHECK(Drill::Value(r.line, "park") == std::optional<std::string_view>("1"));
+                CHECK_NEAR(KeyOf(r.line, "until", 0.f), p.nova + 12.f, 1e-4);
+                // The hint on every ring that has a next one (WP-SF), none on the last.
+                CHECK(KeyOf(r.line, "next", 0.f) == (k + 1 < p.rings ? p.turn : 0.f));
+                if (k == 0)
+                    continue;
+                Drill::Step const& prev = st[k == 1 ? p.first : p.first + k];
+                // Later rings: from the apex pinned at the nova (ruling 2, at=prev), turned, shown as the one before
+                // launches.
+                CHECK(Drill::Value(r.line, "at") == std::optional<std::string_view>("prev"));
+                CHECK(KeyOf(r.line, "start", -1.f) == 0.f && KeyOf(r.line, "turn", 0.f) == p.turn);
+                CHECK(static_cast<float>(r.atMs) == launch(prev) && launch(r) - launch(prev) == p.spacing);
+            }
+        }
+        // RG6: 8 yd gap, the second wall 3 s after the first, the other side, within 20 yd (ruling 3).
+        CHECK(launch(st[9]) - launch(st[8]) == 3000.f && KeyOf(st[8].line, "gap", 0.f) == 8.f);
+        CHECK(Drill::Value(st[9].line, "side") == std::optional<std::string_view>("other")
+            && KeyOf(st[9].line, "apart", -1.f) == 20.f);
+        // The walls start after the last heroic ring has rolled out.
+        CHECK(static_cast<float>(st[8].atMs) >= launch(st[7]) + Drill::FrontRollMs(st[7].line));
         for (Drill::Step const& step : st)
         {
             CHECK(Drill::FrontRollMs(step.line) >= 0.f);
@@ -945,8 +1024,9 @@ namespace
             CHECK(static_cast<float>(step.atMs) + Drill::Number(Drill::Tokens(step.line)[2]).value_or(0.f)
                 + Drill::FrontRollMs(step.line) <= static_cast<float>(d->cycleMs));
         }
-        CHECK_NEAR(Drill::FrontRollMs(st[1].line), (45.f - 9.f) / 8.f * 1000.f, 1e-2);
-        CHECK_NEAR(Drill::FrontRollMs(st[7].line), 50.f / 8.f * 1000.f, 1e-2);
+        CHECK_NEAR(Drill::FrontRollMs(st[0].line), (45.f - 9.1f) / 8.f * 1000.f, 1e-1);
+        CHECK_NEAR(Drill::FrontRollMs(st[2].line), 45.f / 8.f * 1000.f, 1e-1);
+        CHECK_NEAR(Drill::FrontRollMs(st[8].line), 50.f / 8.f * 1000.f, 1e-2);
         CHECK(Drill::FrontBarTag(3) && Drill::FrontBarTag(6) && Drill::FrontBarTag(8) && !Drill::FrontBarTag(2));
     }
 

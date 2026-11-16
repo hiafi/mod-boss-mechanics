@@ -57,6 +57,10 @@ namespace BossMechanics
         float endYd = 45.f;         // the front is over once the band's inner edge passes this (the walls)
         float bandYd = 4.f;         // the band's thickness
         float speed = 8.f;          // yd/s
+        // Blackrock Spire WP-SF, bots only: a ring of a sequence whose next ring is coming, that ring's slice turned
+        // this many degrees clockwise from this one (Front::SliceBearing's turn; 0: none or not known). The bots' orbit
+        // (MechanicSolver.h Detail::RingOrbit) waits at the slice's side toward it; players learn the turn.
+        float nextTurnDeg = 0.f;
     };
 
     // A rolling line front (Mechanic::LineFront): a wall across the room sweeping along `facing`. The start point is
@@ -79,6 +83,7 @@ namespace BossMechanics
         float startYd = 0.f;        // cone: the band's inner edge at launch
         float sliceBearing = 0.f;   // cone: the safe slice (radians) ...
         float sliceDeg = 0.f;       // ... and its width (0: none)
+        float nextTurnDeg = 0.f;    // cone: ConeFrontSpec::nextTurnDeg
         std::vector<FrontGap> gaps; // line
     };
 }
@@ -100,7 +105,8 @@ namespace BossMechanics::Front
     inline bool Valid(ConeFrontSpec const& s)
     {
         return s.bandYd >= kMinBandYd && s.speed > 0.f && s.startYd >= 0.f && s.endYd > s.startYd
-            && s.sliceDeg >= 0.f && s.sliceDeg <= kMaxSliceDeg && std::isfinite(s.sliceBearing);
+            && s.sliceDeg >= 0.f && s.sliceDeg <= kMaxSliceDeg && std::isfinite(s.sliceBearing)
+            && std::isfinite(s.nextTurnDeg);
     }
 
     inline bool Valid(LineFrontSpec const& s)
@@ -162,6 +168,7 @@ namespace BossMechanics::Front
         f.startYd = s.startYd;
         f.sliceBearing = Geo::WrapPi(s.sliceBearing);
         f.sliceDeg = s.sliceDeg;
+        f.nextTurnDeg = s.nextTurnDeg;
         return f;
     }
 

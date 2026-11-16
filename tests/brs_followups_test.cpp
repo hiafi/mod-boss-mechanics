@@ -170,12 +170,20 @@ namespace
         if (!found)
             return;
         Drill::Def const& d = *found;
-        CHECK(d.cycleMs == 24000 && d.defaultCycles == 5 && !d.ownerAtCreature);
+        // WP-G2 grew the cycle to 40 s (wave 1's rows, then one wave 2 row: brs_upper_followups_test), three a run.
+        CHECK(d.cycleMs == 40000 && d.defaultCycles == 3 && !d.ownerAtCreature);
         std::set<std::uint32_t> tags;
         for (Drill::Step const& s : d.steps)
         {
             std::uint32_t const tag = Tag(s.line);
-            CHECK(tag >= Drill::kBrsTagHaymaker && tag <= Drill::kBrsTagRecall);
+            CHECK(tag >= Drill::kBrsTagHaymaker && tag <= Drill::kBrsTagThunderclap);
+            if (tag > Drill::kBrsTagRecall)
+            {
+                // Wave 2 rows start after wave 1's last row has landed (21.5 s).
+                CHECK(s.atMs >= Drill::kBrsWave2Ms);
+                continue;
+            }
+            CHECK(s.atMs < Drill::kBrsWave2Ms);
             tags.insert(tag);
             // Every step deals damage (the runner appends dmg=), names its heroic percent and its timing keys parse.
             CHECK(Drill::DamageStep(s.line));
@@ -202,14 +210,14 @@ namespace
                         CHECK(t.resolveMs - t.startMs >= 2000u);
                 }
         }
-        CHECK(!Drill::BrsBarTag(0) && !Drill::BrsBarTag(8));
+        CHECK(!Drill::BrsBarTag(0) && !Drill::BrsBarTag(8) && !Drill::BrsBarTag(20));
         // Every row is over before the next row starts (6 s apart) and the cycle before the next cycle.
         for (std::uint32_t cycle : { 0u, 1u })
         {
             std::vector<std::optional<std::uint32_t>> const at = Drill::StepOffsets(d, cycle);
             for (std::size_t i = 0; i < d.steps.size(); ++i)
             {
-                if (!at[i])
+                if (!at[i] || Tag(d.steps[i].line) > Drill::kBrsTagRecall)
                     continue;
                 std::uint32_t const end = *at[i] + Drill::WarnMs(d.steps[i].line)
                     + static_cast<std::uint32_t>(Key(d.steps[i].line, "persist", 0.f));
@@ -217,7 +225,7 @@ namespace
                 std::uint32_t const row = std::min<std::uint32_t>(*at[i] / 6000, 2);
                 if (row < 2)
                     CHECK(end <= (row + 1) * 6000);
-                CHECK(end <= d.cycleMs);
+                CHECK(end <= Drill::kBrsWave2Ms);
             }
         }
     }
@@ -438,7 +446,7 @@ namespace
     void TestSweepProgram()
     {
         std::string err;
-        for (char const* name : { "blackrock-spire-followups:5", "blackrock-spire-followups" })
+        for (char const* name : { "blackrock-spire-followups:3", "blackrock-spire-followups" })
         {
             std::optional<Drill::Program> const p = Drill::ParseProgram(name, err);
             CHECK(p && err.empty());
@@ -449,15 +457,20 @@ namespace
             }
             Drill::ProgramEntry const& e = p->entries[0];
             CHECK(e.kind == Drill::EntryKind::Drill && e.drill == Followups());
-            CHECK(e.cycles == 5 && e.lengthMs == 120000);
+            CHECK(e.cycles == 3 && e.lengthMs == 120000);
             std::vector<Drill::ScheduledStep> const s = Drill::StepSchedule(*e.drill, e.cycles);
-            // Each cycle runs either the two hauls or the two recall lanes: 2 of the steps are skipped per cycle.
-            CHECK(s.size() == 5 * (e.drill->steps.size() - 2));
+            // Each cycle runs either the two hauls or the two recall lanes (2 of wave 1's steps skipped) and one wave 2
+            // row: every wave 1 row three times, each wave 2 row once.
+            std::size_t wave1 = 0;
+            std::size_t wave2 = 0;
+            for (Drill::Step const& step : e.drill->steps)
+                (Tag(step.line) > Drill::kBrsTagRecall ? wave2 : wave1) += 1;
+            CHECK(s.size() == 3 * (wave1 - 2) + wave2);
             for (Drill::ScheduledStep const& st : s)
             {
                 std::string_view const line = e.drill->steps[st.step].line;
-                CHECK(st.delayMs + Drill::WarnMs(line) + static_cast<std::uint32_t>(Key(line, "persist", 0.f))
-                    <= 120000u);
+                CHECK(static_cast<float>(st.delayMs + Drill::WarnMs(line)) + Key(line, "persist", 0.f)
+                    + Drill::FrontRollMs(line) <= 120000.f);
             }
         }
     }

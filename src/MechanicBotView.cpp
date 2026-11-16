@@ -1319,6 +1319,9 @@ namespace BossMechanics
             h.timing = timing;
             h.lethal = m.lethal;
             h.front = m.front.has_value();      // WP-RF: Solve's front stages
+            // WP-SF: the ring orbit's turn to the next ring (clockwise degrees -> counterclockwise radians).
+            if (m.front && m.front->type == FrontType::Cone)
+                h.nextTurn = -Geo::DegToRad(m.front->nextTurnDeg);
             h.poses.push_back(pose);
             bool const turns = m.anchor.IsUnit() && m.anchor.followFacing && !m.to && slackRad > 0.f
                 && (shape.type == ShapeType::Line || (shape.type == ShapeType::Cone && shape.angleDeg < 360.f));

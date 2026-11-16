@@ -99,7 +99,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player; that player taking it is the job |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Jump(owner, spec, warn)`, `Jump(owner, at, r, warn)` | A sweep that hits who is on the ground (Stratholme X3) |
-| `ConeFront`, `LineFront`, `FrontSafe` | Rolling fronts, their safe slot for the bot tank ([below](#rolling-fronts-blackrock-spire-wp-rf)) |
+| `ConeFront`, `LineFront`, `FrontSafe` | Rolling fronts + tank slot ([below](#rolling-fronts-blackrock-spire-wp-rf)) |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
 | `RefFlat(owner, pct, tank)` | Script spells: `pct`% of the owner's reference row ([below](#reference-health)) |
@@ -563,6 +563,14 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   aims a line from its source at that end, frozen at registration like `fix=1` (`reach=1` ends it there); such a line
   records no end of its own, so two hauls along two chains read `to=last:1` and `to=last`. An index past the recorded
   ends lands on the selected unit. Not with `exempt=` or `follow=1`.
+- Blackrock Spire build (WP-G2 §3.9, `blackrock-spire-followups` rows 18-30): `next=<deg>` (conefront) is the
+  clockwise turn to the next ring's slice (`ConeFrontSpec::nextTurnDeg`, the hint the kit sets and the bots' ring
+  orbit reads); `edge=<yd>` (linefront) keeps the gap's whole width that far inside the wall's ends; `inside=<yd>`
+  (any shape but a decoy) gives the bots hard bounds (`Within`) of a circle round the selected unit where it stands as
+  the shape registers; `lethal=1` (circle, donut, cone, line; not a decoy) marks the shape `Lethal()`; `only=member`
+  makes the shape eligible to one player only (players only), drawn with `pick=` (`pick=same`: the member of the last
+  pick; not with `at=each`). A cone takes `fix=1` with `to=`: aimed once, at registration, not turning after the unit.
+  Drill steps take the plan key `cycle=<k>/<m>` (runs in cycles k, k + m, ...; m 2-12) beside `cycle=even|odd`.
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -690,20 +698,37 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     (`Jump/<tag>`, `RunOut/2`): 1 rope, 2 the RunOut, 3 Double Dutch's 2 s skips, 4 its 1.5 s skips. The bar: no
     `Jump` hit at all (each one is a bot that did not hop: `.mech bots` "x3 jumps" says why). The sweep runs
     `stratholme-jump:6`.
-  - `blackrock-spire-followups` (Blackrock Spire build §3.9, WP-G1 wave 1 rows 0-12; 24 s, five cycles by default = 120
-    s, heroic numbers in `pct=`): 0 s, Omokk OM2's one-two, a 5 x 30 yd line from the creature toward a non-tank's spot
-    (2.5 s, `fix=1`), then one toward where that player stands as it lands (1.5 s, `pick=same`). 6 s, Gizrul and Halycon
-    HG2 + HG3, two 5 x 30 yd charges 1 s apart through the farthest non-tanks (3 s, `min=15 reach=1`), and an 8 yd
-    pounce at each line's far end, shown with its line as B7 builds HG3 and landing 1.5 s after its charge (4.5 s,
-    `at=last` right after its charge). 12 s, the axe chains (WT11 hard mode, Voone's VO11), a 2 yd chain from the
-    creature to each of two non-tanks' spots, 8 s (a 10% crossing every 2 s); as they end a 1.5 s warning and a line
-    along each (`to=last:1`, `to=last`): even cycles WT11's haul (3 yd, 35%), odd cycles Voone's War Cry recall (VO12 ->
-    VO7: 4 yd, 5 yd at the creature excluded, 40%). Weakened on all but OM2. Tags (`Zone/<tag>`): 1 punch, 2 second
-    punch, 3 charges, 4 pounces, 5 chains, 6 hauls, 7 recall lanes; 1, 3 and 5 are reported, 2, 4, 6 and 7 are under the
-    sweep's bar (`Drill::kBrsBarTags`: at most 1 hit per tag per spec run, no tag on more than 3 specs). It gates the
-    heroic sign-off of B1 (2), B7 (4), B9 (6) and B3 (7) only. The sweep runs `blackrock-spire-followups:5`, one sweep
-    for this drill alone (never `;`-joined with another):
-    `mechanics_sweep.py run --programs blackrock-spire-followups:5 --duration 120 --iterations 5 --step 100 --jobs 6
+  - `blackrock-spire-followups` (Blackrock Spire build §3.9, WP-G1 wave 1 rows 0-12 and WP-G2 wave 2 rows 18-30; 40
+    s, three cycles by default = 120 s, heroic numbers in `pct=`): 0 s, Omokk OM2's one-two, a 5 x 30 yd line from the
+    creature toward a non-tank's spot (2.5 s, `fix=1`), then one toward where that player stands as it lands (1.5 s,
+    `pick=same`). 6 s, Gizrul and Halycon HG2 + HG3, two 5 x 30 yd charges 1 s apart through the farthest non-tanks (3
+    s, `min=15 reach=1`), and an 8 yd pounce at each line's far end, shown with its line as B7 builds HG3 and landing
+    1.5 s after its charge (4.5 s, `at=last` right after its charge). 12 s, the axe chains (WT11 hard mode, Voone's
+    VO11), a 2 yd chain from the creature to each of two non-tanks' spots, 8 s (a 10% crossing every 2 s); as they end
+    a 1.5 s warning and a line along each (`to=last:1`, `to=last`): even cycles WT11's haul (3 yd, 35%), odd cycles
+    Voone's War Cry recall (VO12 -> VO7: 4 yd, 5 yd at the creature excluded, 40%). Weakened on all but OM2. From 22 s
+    one Upper Spire row per cycle (`cycle=<k>/3`), on the numbers B10, B12 and B15 build:
+    - cycles 0, 3: Emberseer EM2 + EM3 heroic at 16 stacks: ring 1 (a 45 degree slice, random) shown 5 s ahead from the
+      nova's edge (11.8 yd), the nova 2.5 s later (2.5 s, erupting as ring 1 launches), rings 2-4 each shown as the one
+      before launches (1.5 s), from the apex, turned 60 degrees clockwise and carrying the next turn (`next=60`); 4 yd
+      band at 8 yd/s to 45 yd, `park=1 until=23.8`, the hall as `inside=29`; 49.2% fire, Weakened;
+    - cycles 1, 4: Rend RG6 heroic: two 68 yd walls (8 yd/s over 86 yd), 3 s and 6 s, both shown at once, each with an
+      8 yd gap in the 40 yd middle strip (`edge=15`), the second on the other side within 20 yd of the first; the room's
+      width as `inside=20`; 25% frost, Weakened;
+    - cycles 2, 5: Drakkisath's Challenge (DR17 + DR18): the Call (everyone to a spot on a 7 yd ring round the
+      creature, 4 s), then on a non-tank the lethal ring (a donut 11-13 yd, `lethal=1`, armed 1.5 s after the close for
+      10.5 s, 50% for the kill) and six blows 2 s apart (1.5 s each: Thunderclap 8 yd, Ring of Flame 4-12 yd, Sweep 180
+      degrees 10 yd, Fire Blast three 4 yd circles, Overhead Cleave 60 degrees 15 yd, Ring of Flame), the ring and the
+      blows `only=member` (the challenger) and the blows `inside=10` (the kit's `RingInside`). B15 shuffles the blows;
+      the drill's order leaves out the Sweep right after the Thunderclap, which no bot can dodge inside 10 yd bounds.
+
+    Tags (`Zone/<tag>`, the Call `Spot/13`): 1 punch, 2 second punch, 3 charges, 4 pounces, 5 chains, 6 hauls, 7 recall
+    lanes, 8 nova, 9 ring 1, 10 rings 2-4, 11 first wall, 12 second wall, 13 the Call, 14 the lethal ring, 15 Sweep, 16
+    Overhead Cleave, 17 Fire Blast, 18 Ring of Flame, 19 Thunderclap. 1, 3, 5, 8, 9, 11 and 13 are reported; 2, 4, 6, 7,
+    10, 12 and 14-19 are under the sweep's bar (`Drill::kBrsBarTags`: at most 1 hit per tag per spec run, no tag on more
+    than 3 specs). It gates the heroic sign-off of B1 (2), B7 (4), B9 (6), B3 (7), B10 (10), B12 (12) and B15 (14-19).
+    The sweep runs `blackrock-spire-followups:3`, one sweep for this drill alone (never `;`-joined with another):
+    `mechanics_sweep.py run --programs blackrock-spire-followups:3 --duration 120 --iterations 5 --step 100 --jobs 6
     --sweep blackrock-spire-followups` (mod-dpssim `tools/`, after the build).
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
@@ -1360,9 +1385,12 @@ Mechanic::LineFront(me, portcullisMiddle, wall, 6000ms).Damage(25.f).School(SPEL
 - **Cost.** Four 315 degree rings and the nova in one view: a solve under 1.2 ms mean (M5's budget: 2 ms), the route
   search 0.6 ms (it finds nothing: every cell is hot at some moment).
 
-Drill `rolling-fronts` (`MechanicDrill.h`, three 40 s cycles: Emberseer normal and heroic pulses with the dummy parked
-in each slice, Rend's wall and its heroic second wall; ledger tags 1-8, the later rings and the second wall under the
-bar, `Drill::FrontBarTag`). `.mech test` grammar:
+Drill `rolling-fronts` (`MechanicDrill.h`, three 40 s cycles: Emberseer normal (7 stacks, 2 rings) and heroic
+(14 stacks, 4 rings) pulses on the rolling front rulings, with the dummy parked in each slice: ring 1 from the nova's
+edge shown 5 s ahead, the nova 2.5 s later, the later rings from the apex at the nova (`at=prev`, `start=0`) with the
+`next=` hint; then Rend's wall and its heroic second wall, its gap within 20 yd of the first. Ledger tags 1-8: the
+later rings (3, 6) and the second wall (8) are gated by the sweep's bar (`Drill::FrontBarTag`, `DRILL_BARS`), the
+novas, first rings and first wall reported). `.mech test` grammar:
 
 ```
 .mech test conefront <end> <ms> [slice=60] [bearing=<deg>|turn=<deg>] [start=0] [band=4] [speed=8] [park=1 until=<yd>]
@@ -1375,6 +1403,14 @@ A `conefront` rolls from the anchor point (`at=prev`: the last point circle's ce
 run. `park=1` (a selected creature): `FrontSafe` for it, `until=` its end. A `linefront` is a wall across the anchor
 point (the middle of the swept area) along your facing turned by `facing=`; `side=other` puts its gap across the
 centreline from the previous `linefront`'s, `apart=` at most that far from it. The damage keys as a circle.
+
+**Ring orbit (Blackrock Spire WP-SF).** When a bot's view holds a sequence of cone fronts that start at the apex
+(Emberseer's rings 2-4), the solver's `Detail::RingOrbit` step moves the bot to the side of its current slice nearest
+the next ring's slice, close to the boss, and picks the earliest clean departure once the current band has passed.
+Bots with hard regions, carried shapes or a park (the parked tank) skip it, and without such a sequence the solver
+behaves as before. A ring of a sequence that has a next ring sets `ConeFrontSpec::nextTurnDeg` (that ring's turn,
+clockwise degrees; 0 on the last): the hint tells the orbit which way the next slice turns. The dungeon kit's
+`FrontDirector` sets it.
 
 ### Taunt swap (Blackrock Spire WP-TS)
 
@@ -1828,7 +1864,7 @@ same rule).
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
 | 300402 | Mechanics Training Dummy (`npc_boss_mechanics_dummy`, M4) |
-| 91000-91833 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
+| 91000-91893 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
 | | offsets: disc 0, ring 1, timer ring 2, donut 3+j, donut outline 10+j, cone 17+j, cone outline 25+j, |
 | | dashed ring 33 (34 per color; +34..+99 spare) |
 | 92000-92856 | Line (fill) displays: 92000 + 100c + i, i = 0..56 (+57..+99 spare) |

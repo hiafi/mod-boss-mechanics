@@ -290,8 +290,10 @@ namespace Mechanic
     //     Mechanic::FrontSafe(me, h, me, novaRadius + 12.f);       // the tank leads him into the slice
     //
     // ConeFront: `apex` is a point (its orientation is ignored); the band starts with its inner edge on startYd and the
-    // front is over once that edge passes endYd. LineFront: `start` is the middle of the wall's start line; the wall
-    // is widthYd across, travels along spec.facing, and is over once its back edge passes travelYd.
+    // front is over once that edge passes endYd. A ring of a sequence with a next ring sets nextTurnDeg (that ring's
+    // turn, clockwise degrees): the bots' ring orbit waits at the side of the slice it turns to (WP-SF). LineFront:
+    // `start` is the middle of the wall's start line; the wall is widthYd across, travels along spec.facing, and is
+    // over once its back edge passes travelYd.
     MechanicRef ConeFront(Unit* owner, Position const& apex, BossMechanics::ConeFrontSpec const& spec,
         Milliseconds warn);
     MechanicRef LineFront(Unit* owner, Position const& start, BossMechanics::LineFrontSpec const& spec,

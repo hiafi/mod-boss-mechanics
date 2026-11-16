@@ -82,6 +82,11 @@ namespace BossMechanics::Solver
         // Blackrock Spire WP-RF: a rolling front (Mechanic::ConeFront / LineFront): a cone front's slice candidates
         // (Exits) and its pull toward the band's start (Detail::FrontPull) read it.
         bool front = false;
+        // Blackrock Spire WP-SF: a cone front of a ring sequence whose next ring is coming (ConeFrontSpec::
+        // nextTurnDeg): that ring's slice turned this far from this one's (radians, counterclockwise positive; 0: not
+        // known). What a player learns of the sequence, for the bots before the next ring is shown (Detail::
+        // PredictSlot).
+        float nextTurn = 0.f;
     };
 
     struct LaneFrame
@@ -2686,6 +2691,263 @@ namespace BossMechanics::Solver
             return out;
         }
 
+        // Blackrock Spire WP-SF: a rolling ring sequence (Emberseer's rings: cone fronts from one apex with one slice
+        // width, a fixed spacing apart, each slice turned by the same angle, each shown as the one before it
+        // launches). RingFront: a cone front with a slice.
+        inline bool RingFront(Hazard const& h)
+        {
+            return h.front && h.shape.type == ShapeType::Cone && h.shape.angleDeg < 360.f
+                && h.timing.type == TimingType::Projectile && !h.poses.empty();
+        }
+
+        // The slot of the ring after the newest one: its own hint (Hazard::nextTurn), else the turn of the last two
+        // rings of the sequence repeated (the newest earlier ring from the same apex with the same width, at most
+        // kNextSlotSpacingMs before it).
+        constexpr Ms kNextSlotSpacingMs{ 5000 };
+
+        struct NextSlot
+        {
+            bool present = false;
+            float bearing = 0.f;        // the slice's middle seen from the apex (radians)
+        };
+
+        inline NextSlot PredictSlot(Input const& in)
+        {
+            NextSlot out;
+            Hazard const* last = nullptr;
+            for (Hazard const& h : in.hazards)
+                if (RingFront(h) && (!last || h.timing.from > last->timing.from))
+                    last = &h;
+            if (!last)
+                return out;
+            Geo::Pose const& a = last->poses.front();
+            float const facing = Geo::ShapeFacing(last->shape, a);
+            if (last->nextTurn != 0.f)
+            {
+                out.present = true;
+                out.bearing = Geo::WrapPi(facing + last->nextTurn + Geo::kPi);
+                return out;
+            }
+            Hazard const* prev = nullptr;
+            for (Hazard const& h : in.hazards)
+            {
+                if (!RingFront(h) || h.timing.from >= last->timing.from
+                    || std::fabs(h.shape.angleDeg - last->shape.angleDeg) > 0.5f
+                    || Geo::Dist2d(a.x, a.y, h.poses.front().x, h.poses.front().y) > 0.5f)
+                    continue;
+                if (!prev || h.timing.from > prev->timing.from)
+                    prev = &h;
+            }
+            if (!prev || last->timing.from - prev->timing.from > kNextSlotSpacingMs)
+                return out;
+            out.present = true;
+            out.bearing = Geo::WrapPi(2.f * facing - Geo::ShapeFacing(prev->shape, prev->poses.front()) + Geo::kPi);
+            return out;
+        }
+
+        // The ring orbit. Out in the hall a bot cannot follow such a sequence (heroic Emberseer: 60 degrees every
+        // 1.5 s, 12.6 yd at 12 yd from the apex), and each slot is reachable only in the 1.0 s between one band
+        // passing and the next arriving. Near the apex both are easy: walk inside the coming slot to its side nearest
+        // the slot after (known, or predicted), cross behind the passing band, repeat. RingOrbit plans that step: the
+        // furthest ring of the sequence whose band has not passed the orbit radius (its gate) that the bot can reach,
+        // at a spot in its slot at the side toward the next slot (the smallest radius that works), else at the side
+        // toward the bot (the way in from out in the hall: the bot's own distance and just outside a ring's start
+        // too; the earliest arrival), with the earliest departure from which the straight way there is clean and the
+        // spot stays clean until the gate has passed, standing where the bot is until then (window algebra over the
+        // hot windows of every hazard in the view). Orbit margins: each hazard's drift plus at most
+        // Params::tightMarginYd, and kOrbitMarginMs (the full margins leave nothing of the 1.0 s); a lethal hazard
+        // keeps its full margin.
+        constexpr std::array<float, 4> kOrbitRadii{ 4.f, 5.5f, 7.f, 8.5f };
+        constexpr Ms kOrbitMarginMs{ 150 };
+        constexpr Ms kOrbitGoMs{ 100 };             // a departure this soon is now; a later one is a hold
+        constexpr float kOrbitMaxYd = 20.f;         // a bot this far from the apex or nearer is also tried at its own
+        constexpr float kOrbitDetourYd = 1.f;       // Solve: the oracle's way to the step may be this much longer
+
+        struct Orbit
+        {
+            bool ok = false;
+            Geo::Vec3 target;
+            Ms depart{ 0 }, arrive{ 0 }, gateEnd{ 0 };
+        };
+
+        inline Orbit RingOrbit(Input const& in)
+        {
+            Orbit best;
+            std::size_t newest = in.hazards.size();
+            for (std::size_t i = 0; i < in.hazards.size(); ++i)
+                if (RingFront(in.hazards[i])
+                    && (newest == in.hazards.size() || in.hazards[i].timing.from > in.hazards[newest].timing.from))
+                    newest = i;
+            if (newest == in.hazards.size())
+                return best;
+            Hazard const& last = in.hazards[newest];
+            Geo::Pose const apex = last.poses.front();
+            std::vector<std::size_t> rings;
+            for (std::size_t i = 0; i < in.hazards.size(); ++i)
+            {
+                Hazard const& h = in.hazards[i];
+                if (RingFront(h) && std::fabs(h.shape.angleDeg - last.shape.angleDeg) <= 0.5f
+                    && Geo::Dist2d(apex.x, apex.y, h.poses.front().x, h.poses.front().y) <= 0.5f)
+                    rings.push_back(i);
+            }
+            // Only a sequence the orbit is for: one ring of it starting inside the orbit (rings that all start farther
+            // out leave the disc inside them clean once they are past: the haven the generic solver finds), or a ring
+            // that says where the next one turns (ConeFrontSpec::nextTurnDeg).
+            bool reaches = false;
+            for (std::size_t i : rings)
+            {
+                ProjectileParams const& p = in.hazards[i].timing.projectile;
+                reaches = reaches || p.start - p.halfLength < kOrbitRadii.front();
+            }
+            if (last.nextTurn == 0.f && (rings.size() < 2 || !reaches))
+                return best;
+            std::sort(rings.begin(), rings.end(), [&in](std::size_t a, std::size_t b)
+            {
+                return in.hazards[a].timing.from < in.hazards[b].timing.from;
+            });
+            NextSlot const next = PredictSlot(in);
+            Input m;
+            m.bot = in.bot;
+            m.speed = in.speed;
+            m.now = in.now;
+            m.params = in.params;
+            m.params.marginMs = kOrbitMarginMs;
+            m.hazards = in.hazards;
+            for (Hazard& h : m.hazards)
+                if (!h.lethal)
+                    h.marginYd = std::max(h.driftYd, std::min(h.marginYd, h.driftYd + in.params.tightMarginYd));
+            auto windows = [&](Geo::Vec3 const& p, auto&& f)
+            {
+                for (Hazard const& h : m.hazards)
+                    ForEachWindow(h, p, f);
+            };
+            float const speed = Speed(in);
+            Ms const stepMs = TravelMs(kStepYd, speed);
+            Ms const widen = kOrbitMarginMs + stepMs;
+            Ms const delay = in.params.startDelay;
+            // Standing where it is until the departure: clean until its first window there.
+            Ms spotFirst = kForever;
+            windows(in.bot, [&](HotWindow const& w)
+            {
+                if (w.to + widen >= in.now)
+                    spotFirst = std::min(spotFirst, w.from);
+            });
+            Ms const lastDepart = spotFirst >= kForever ? kForever : spotFirst - widen - delay - stepMs;
+            if (lastDepart < in.now)
+                return best;
+            std::vector<std::pair<Ms, Ms>> bad;
+            // One step toward ring k (an index into `rings`) at radius rho: false when it does not fit.
+            float const botBearing = std::atan2(in.bot.y - apex.y, in.bot.x - apex.x);
+            auto step = [&](float rho, std::size_t k, bool far, Orbit& out)
+            {
+                Hazard const& g = m.hazards[rings[k]];
+                float const f = Geo::ShapeFacing(g.shape, g.poses.front());
+                Geo::Vec3 const probe{ apex.x + std::cos(f) * rho, apex.y + std::sin(f) * rho, in.bot.z };
+                bool got = false;
+                HotWindow gw;
+                ForEachWindow(g, probe, [&](HotWindow const& w)
+                {
+                    if (!got || w.to > gw.to)
+                        gw = w;
+                    got = true;
+                });
+                if (!got || gw.to + widen < in.now)
+                    return false;
+                float const mid = Geo::WrapPi(f + Geo::kPi);
+                float const half = Geo::DegToRad(360.f - g.shape.angleDeg) * 0.5f;
+                // The far side: toward the next slot (the next ring of the sequence, else the predicted one); the near
+                // side: toward the bot.
+                float side = 0.f;
+                if (!far)
+                    side = Geo::WrapPi(botBearing - mid);
+                else if (k + 1 < rings.size())
+                {
+                    Hazard const& n = m.hazards[rings[k + 1]];
+                    side = Geo::WrapPi(Geo::ShapeFacing(n.shape, n.poses.front()) + Geo::kPi - mid);
+                }
+                else if (next.present)
+                    side = Geo::WrapPi(next.bearing - mid);
+                float const inset = (g.marginYd + kExitPushYd) / rho;
+                float const theta = side != 0.f && half > inset ? mid + (side > 0.f ? 1.f : -1.f) * (half - inset)
+                    : mid;
+                Geo::Vec3 const t{ apex.x + std::cos(theta) * rho, apex.y + std::sin(theta) * rho, in.bot.z };
+                if (!BossMechanics::DropSpot::InBounds(in.bounds, t))
+                    return false;
+                float const len = Dist3(in.bot, t);
+                Ms const legMs = delay + TravelMs(len, speed);
+                Ms const gateEnd = gw.to + widen;
+                bad.clear();
+                std::uint32_t const steps = std::max<std::uint32_t>(1,
+                    static_cast<std::uint32_t>(std::ceil(len / kStepYd)));
+                for (std::uint32_t j = 1; j <= steps; ++j)
+                {
+                    float const u = static_cast<float>(j) / static_cast<float>(steps);
+                    Geo::Vec3 const p{ in.bot.x + (t.x - in.bot.x) * u, in.bot.y + (t.y - in.bot.y) * u,
+                        in.bot.z + (t.z - in.bot.z) * u };
+                    Ms const off = delay + TravelMs(len * u, speed);
+                    windows(p, [&](HotWindow const& w)
+                    {
+                        bad.emplace_back(w.from - widen - off, w.to + widen - off);
+                    });
+                }
+                // The spot stays clean from the arrival until the gate has passed.
+                windows(t, [&](HotWindow const& w)
+                {
+                    if (w.from - widen <= gateEnd)
+                        bad.emplace_back(-kForever, w.to + widen - legMs);
+                });
+                std::sort(bad.begin(), bad.end());
+                Ms depart = in.now;
+                for (auto const& [from, to] : bad)
+                {
+                    if (from > depart)
+                        break;
+                    depart = std::max(depart, to + Ms(1));
+                }
+                if (depart > lastDepart)
+                    return false;
+                out.ok = true;
+                out.target = t;
+                out.depart = depart;
+                out.arrive = depart + legMs;
+                out.gateEnd = gateEnd;
+                return true;
+            };
+            // The furthest ring a step reaches (a later slot is clean of the earlier rings by construction): its far
+            // side at the smallest radius, else its near side (the way in from out in the hall: the bot's own
+            // distance too) at the earliest arrival.
+            std::vector<float> radii(kOrbitRadii.begin(), kOrbitRadii.end());
+            float const botRho = Geo::Dist2d(apex.x, apex.y, in.bot.x, in.bot.y);
+            if (botRho > radii.back() && botRho <= kOrbitMaxYd)
+                radii.push_back(botRho);
+            // Just outside a ring's start beyond the orbit (Emberseer's first ring starts at the nova's edge).
+            for (std::size_t i : rings)
+            {
+                ProjectileParams const& p = m.hazards[i].timing.projectile;
+                float const r = std::max(0.f, p.start - p.halfLength) + m.hazards[i].marginYd + 2.f * kExitPushYd;
+                if (r > kOrbitRadii.back() && r <= kOrbitMaxYd)
+                    radii.push_back(r);
+            }
+            std::sort(radii.begin(), radii.end());
+            auto const same = [](float a, float b) { return std::fabs(a - b) < 0.25f; };
+            radii.erase(std::unique(radii.begin(), radii.end(), same), radii.end());
+            for (std::size_t k = rings.size(); k-- > 0;)
+            {
+                for (float rho : radii)
+                    if (step(rho, k, true, best))
+                        return best;
+                for (float rho : radii)
+                {
+                    Orbit o;
+                    if (step(rho, k, false, o) && (!best.ok || o.arrive < best.arrive))
+                        best = o;
+                }
+                if (best.ok)
+                    return best;
+            }
+            return best;
+        }
+
         // The input of the reduced-margin pass: every margin cut to its drift + tightMarginYd. false = no margin
         // changes (the pass would repeat the first one).
         inline bool ReducedMargins(Input const& in, Input& out)
@@ -2822,6 +3084,47 @@ namespace BossMechanics::Solver
         };
         if (spotOk && !in.roleSolve)
             return safeHere(plan);
+
+        // Blackrock Spire WP-SF: a rolling ring sequence in the view (Detail::RingOrbit): the orbit's step, for a bot
+        // with no player kind to keep (a hard region, a carried shape, a park). A Fallback: it is planned at the orbit
+        // margins, and its end is never clean over the horizon (the next ring comes). A later departure holds the bot
+        // where it is until then; the step itself needs walkable ground and an oracle path that keeps to the straight
+        // line the orbit planned (within kOrbitDetourYd), else the solve goes on as before.
+        if (!in.reroute && !Detail::HasPlayerKinds(in))
+            if (Detail::Orbit const orbit = Detail::RingOrbit(in); orbit.ok)
+            {
+                bool const go = orbit.depart <= in.now + Detail::kOrbitGoMs;
+                std::vector<Geo::Vec3> path{ in.bot };
+                bool walkable = true;
+                if (go)
+                {
+                    Geo::Vec3 q = orbit.target;
+                    plan.pathChecks = 1;
+                    walkable = oracle.Walkable(q) && oracle.Find(in.bot, q, path) && !path.empty();
+                    if (walkable)
+                    {
+                        Detail::AnchorPath(in.bot, path);
+                        walkable = Detail::Dist3(path.back(), orbit.target) <= Detail::kOrbitDetourYd
+                            && Detail::PathLength(path) <= Detail::Dist3(in.bot, orbit.target) + Detail::kOrbitDetourYd;
+                    }
+                }
+                if (walkable)
+                {
+                    plan.outcome = Outcome::Fallback;
+                    plan.path = std::move(path);
+                    plan.target = plan.path.back();
+                    plan.arriveAt = go ? orbit.arrive : in.now;
+                    Input exact = in;
+                    exact.params.marginMs = Ms(0);
+                    for (Hazard& h : exact.hazards)
+                        h.marginYd = std::max(0.f, h.driftYd);
+                    plan.exposure = Detail::WalkPath(exact, plan.path, in.now, true, true).timeInsideHot;
+                    plan.clearUntil = go ? orbit.gateEnd : orbit.depart;
+                    plan.answers = Detail::Answers(in, plan.path);
+                    plan.holdUntil = std::max(plan.arriveAt, plan.clearUntil);
+                    return plan;
+                }
+            }
 
         // M4 cost (D9): which candidates the lane frames made (only asked when there is a lane frame).
         std::vector<std::uint8_t> fromLanes;

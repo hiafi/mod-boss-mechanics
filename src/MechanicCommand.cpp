@@ -78,6 +78,13 @@
  * <travel> <ms>` a rolling line front across the anchor point (Mechanic::LineFront; width=, band=, speed=, gap=,
  * side=, apart=, facing=); `turn=` and `side=other` read the previous front of the command or drill run (Dice).
  *
+ * Blackrock Spire build (WP-G2 §3.9, drill `blackrock-spire-followups` rows 18-30): `next=<deg>` on a conefront is
+ * the turn hint to the next ring (ConeFrontSpec::nextTurnDeg), `edge=<yd>` on a linefront keeps the gap that far
+ * inside the wall's ends; on the shapes, `inside=<yd>` gives the bots hard bounds (Within) of a circle round the
+ * selected unit where it stands at registration, `lethal=1` marks a circle, donut, cone or line Lethal(), and
+ * `only=member` makes the shape eligible to one player, drawn with pick= (the challenger of Drakkisath's ring). A
+ * cone takes `fix=1` with to= (aimed once, at registration).
+ *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
 
@@ -534,6 +541,13 @@ namespace
         float gapApart = -1.f;          // linefront apart=: at most this far from the previous gap (< 0: anywhere)
         float frontFacing = 0.f;        // linefront facing=: degrees from the GM's facing
         float gapCentre = 0.f;          // linefront: the gap's centre, set when the repeat registers
+        // Blackrock Spire build WP-G2 (drill `blackrock-spire-followups` rows 18-30)
+        float nextTurn = 0.f;           // conefront next=: ConeFrontSpec::nextTurnDeg (the turn to the next ring)
+        float gapEdge = 0.f;            // linefront edge=: the gap's whole width this far inside the wall's ends
+        float insideYd = 0.f;           // inside=: Within a circle of this round the selected unit (0: none)
+        Position insideCentre;          // inside=: the selected unit's spot, set when the repeat registers
+        bool lethal = false;            // lethal=1: MechanicRef::Lethal()
+        bool onlyMember = false;        // only=member: eligible to one member (pick=), players only
     };
 
     bool IsShapeName(std::string const& s)
@@ -571,6 +585,11 @@ namespace
             ref.Persistent(spec.persist, spec.tick);
         if (spec.eligibility)
             ref.Eligible(*spec.eligibility);
+        // WP-G2: lethal=1 in the registering statement (Lethal is refused after the commit), inside= as hard bounds.
+        if (spec.lethal)
+            ref.Lethal();
+        if (spec.insideYd > 0.f)
+            ref.Within(SpotBounds().Circle(spec.insideCentre, spec.insideYd));
         if (spec.ordering)
             ref.Order(*spec.ordering);
         if (spec.color)
@@ -893,6 +912,7 @@ namespace
             front.endYd = spec.size;
             front.bandYd = spec.band;
             front.speed = spec.frontSpeed;
+            front.nextTurnDeg = spec.nextTurn;
             MechanicRef ref = Mechanic::ConeFront(owner, here, front, spec.warn);
             ApplyCommon(ref, spec, true, false);
             keep(ref);
@@ -1398,6 +1418,28 @@ namespace
             case TestSpec::To::None:
                 break;
         }
+        if (spec.onlyMember)
+        {
+            // only=member (WP-G2): one member alone is eligible (players only), drawn with pick= now (pick=same: the
+            // member of the last pick, after this step's own at= or to= pick).
+            Player* member = PickMember(owner, spec, dice);
+            if (!member)
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            Eligibility elig = spec.eligibility.value_or(Eligibility());
+            elig.carriers = { member->GetGUID() };
+            elig.playersOnly = true;
+            spec.eligibility = elig;
+        }
+        if (spec.insideYd > 0.f)
+        {
+            // inside= (WP-G2): the bounds' centre is the selected unit where it stands now (else the parsed point).
+            spec.insideCentre = spec.point;
+            if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+                spec.insideCentre = selected->GetPosition();
+        }
         if (spec.exemptTo && !spec.toUnit.IsEmpty())
         {
             // exempt=target: every scope member but the aimed one is eligible (the GM too, as for any zone), so the
@@ -1498,7 +1540,7 @@ namespace
             int side = spec.gapSide == 2 ? (dice.lastGap ? -Front::SideOf(*dice.lastGap) : 0) : spec.gapSide;
             bool const near = spec.gapApart >= 0.f && dice.lastGap;
             std::optional<float> const c = Front::PlaceGap(spec.frontWidth, spec.gapWidth, {}, rng.Float(0.f, 1.f),
-                side, 0.f, near ? *dice.lastGap : 0.f, near ? spec.gapApart : -1.f);
+                side, spec.gapEdge, near ? *dice.lastGap : 0.f, near ? spec.gapApart : -1.f);
             if (!c)
             {
                 err = "linefront: no place for the gap (side=, apart= and gap= against width=)";
@@ -1693,7 +1735,11 @@ namespace
                 opt.MarkBad("to");
         };
         if (s == "cone")
+        {
             readTo(false);
+            // fix=1 (WP-G2): aimed at the to= unit once, at registration (Drakkisath's blows), not turning live.
+            spec.fix = opt.Bool("fix", false);
+        }
         if (s == "line" || s == "projectile")
         {
             spec.width = opt.Float("width", s == "projectile" ? 3.f : 4.f);
@@ -1861,6 +1907,9 @@ namespace
             if (spec.frontStart < 0.f || spec.frontStart >= spec.size)
                 opt.MarkBad("start");
             spec.untilYd = opt.Float("until", 0.f);
+            spec.nextTurn = opt.Float("next", 0.f);
+            if (!std::isfinite(spec.nextTurn))
+                opt.MarkBad("next");
         }
         if (s == "linefront")
         {
@@ -1868,8 +1917,11 @@ namespace
             spec.gapWidth = opt.Float("gap", 8.f);
             spec.gapApart = opt.Float("apart", -1.f);
             spec.frontFacing = opt.Float("facing", 0.f);
+            spec.gapEdge = opt.Float("edge", 0.f);
             if (spec.frontWidth <= 0.f)
                 opt.MarkBad("width");
+            if (spec.gapEdge < 0.f || spec.gapEdge * 2.f + spec.gapWidth > spec.frontWidth)
+                opt.MarkBad("edge");
             if (spec.gapWidth < 0.f || spec.gapWidth >= spec.frontWidth)
                 opt.MarkBad("gap");
             std::string const side = opt.Str("side", "any");
@@ -1950,6 +2002,26 @@ namespace
         }
         if (hasElig)
             spec.eligibility = elig;
+        // WP-G2: only=member (one member eligible), inside=<yd> (the bots' hard bounds), lethal=1.
+        if (opt.Has("only"))
+        {
+            if (opt.Str("only", "") == "member")
+                spec.onlyMember = true;
+            else
+                opt.MarkBad("only");
+        }
+        if (opt.Has("inside"))
+        {
+            spec.insideYd = opt.Float("inside", 0.f);
+            if (spec.insideYd <= 0.f)
+                opt.MarkBad("inside");
+        }
+        if (opt.Has("lethal"))
+        {
+            spec.lethal = opt.Bool("lethal", false);
+            if (spec.lethal && s != "circle" && s != "donut" && s != "cone" && s != "rearcone" && s != "line")
+                opt.MarkBad("lethal");
+        }
         if ((s == "soak" || s == "bait") && opt.Has("order"))
         {
             Ordering order;
@@ -2133,6 +2205,10 @@ namespace
             return "away= moves a point anchor; leave anchor= out";
         if (spec.decoy && s == "lanes" && !spec.safe)
             return "decoy=1 on lanes draws the safe=1 lane as a decoy: add safe=1";
+        if (spec.decoy && (spec.lethal || spec.insideYd > 0.f))
+            return "a decoy is never seen by the bots: no lethal=1 or inside=";
+        if (spec.onlyMember && spec.atEach)
+            return "only=member makes one member eligible: not with at=each";
         if (spec.drop && !spec.anchorMember && spec.to != TestSpec::To::Member)
             return "drop= is for a shape a member carries: a circle anchor=member, or a line to=member";
         if (spec.grid)
@@ -2286,8 +2362,8 @@ namespace
         {
             if (!Drill::PlanKeysOk(step.line))
             {
-                err = Acore::StringFormat("Drill {}: step '{}': bad after= (resolve, with) or cycle= (even, odd)",
-                    def.name, step.line);
+                err = Acore::StringFormat("Drill {}: step '{}': bad after= (resolve, with) or cycle= (even, odd, "
+                    "<k>/<m>)", def.name, step.line);
                 return false;
             }
             // after= and cycle= are the plan's (StepSchedule); the `.mech test` parser never sees them.
