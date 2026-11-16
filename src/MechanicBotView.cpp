@@ -1318,6 +1318,10 @@ namespace BossMechanics
             h.driftYd = drift;
             h.timing = timing;
             h.lethal = m.lethal;
+            h.front = m.front.has_value();      // WP-RF: Solve's front stages
+            // WP-SF: the ring orbit's turn to the next ring (clockwise degrees -> counterclockwise radians).
+            if (m.front && m.front->type == FrontType::Cone)
+                h.nextTurn = -Geo::DegToRad(m.front->nextTurnDeg);
             h.poses.push_back(pose);
             bool const turns = m.anchor.IsUnit() && m.anchor.followFacing && !m.to && slackRad > 0.f
                 && (shape.type == ShapeType::Line || (shape.type == ShapeType::Cone && shape.angleDeg < 360.f));
@@ -1332,9 +1336,24 @@ namespace BossMechanics
             }
             info.movingAnchors = info.movingAnchors || unitAnchored;
 
+            kept.insert(h.id);
+            if (m.front && m.front->type == FrontType::Line && !m.front->gaps.empty())
+            {
+                // WP-RF: a gapped wall is one Line hazard per segment between its gaps (same id, same projectile
+                // timing: the segments share the wall's s), so the gaps are plain safe floor to the solver.
+                for (Front::Segment const& seg : Front::Segments(shape, pose, m.front->gaps))
+                {
+                    Solver::Hazard part = h;
+                    part.shape = seg.shape;
+                    part.poses = { seg.pose };
+                    if (opt.debug)
+                        info.selfCheckMismatches += SelfCheck(reg, m, part, opt.postResolveHold);
+                    out.hazards.push_back(std::move(part));
+                }
+                return;
+            }
             if (opt.debug)
                 info.selfCheckMismatches += SelfCheck(reg, m, h, opt.postResolveHold);
-            kept.insert(h.id);
             out.hazards.push_back(std::move(h));
         });
 

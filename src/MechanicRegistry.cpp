@@ -93,6 +93,7 @@ namespace BossMechanics
         p.halfLength = m.projectile->halfLength > 0.f ? m.projectile->halfLength : m.shape.width * 0.5f;
         p.outAndBack = m.projectile->outAndBack;
         p.pause = m.projectile->returnPause;
+        p.start = m.projectile->start;
         return p;
     }
 
@@ -1102,6 +1103,8 @@ namespace BossMechanics
                     return false;
                 Geo::Pose pose;
                 Shape const shape = EffectiveShape(m, pose);
+                if (m.front)
+                    return Front::Contains(shape, pose, m.front->gaps, v);    // WP-RF: a line front's gaps
                 return Geo::Contains(shape, pose, v);
             }
             case Kind::Stack:
@@ -1177,7 +1180,7 @@ namespace BossMechanics
         {
             Geo::Pose pose;
             Shape const shape = EffectiveShape(m, pose);
-            float const s = Geo::ToLineCoords(shape, pose, ToVec(p)).s;
+            float const s = ProjectileS(shape, pose, ToVec(p));     // WP-RF: a cone front's s is radial
             out = ProjectileHotWindows(ProjectileParamsOf(m), s);
             for (HotWindow& w : out)
             {
@@ -1229,8 +1232,7 @@ namespace BossMechanics
             return false;
         if (e.auraSpell)
         {
-            uint32 const stacks = p->GetAuraCount(e.auraSpell);
-            if (stacks < e.minStacks || stacks > e.maxStacks)
+            if (!Judge::StacksEligible(p->GetAuraCount(e.auraSpell), e.minStacks, e.maxStacks))
                 return false;
         }
         return true;
@@ -1304,9 +1306,11 @@ namespace BossMechanics
         Geo::Vec3 const p = ToVec(u->GetPosition());
         if (!Geo::Contains(ctx.shape, ctx.pose, p))
             return false;
+        if (m.front && !Front::Contains(ctx.shape, ctx.pose, m.front->gaps, p))
+            return false;       // WP-RF: inside a line front's gap
         if (ctx.swept)
         {
-            float const s = Geo::ToLineCoords(ctx.shape, ctx.pose, p).s;
+            float const s = ProjectileS(ctx.shape, ctx.pose, p);   // WP-RF: radial for a cone front
             return s >= ctx.sweepLo && s <= ctx.sweepHi;
         }
         return true;

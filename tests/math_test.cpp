@@ -565,14 +565,21 @@ namespace
         CHECK(v.pieces[0].display == D(0, MarkerShape::Cone));
         v = PickVisual(Shape::Cone(270.f, 20.f), 0, MarkerLayer::Fill);   // the widest cone on the ladder
         CHECK(v.pieces[0].display == D(0, MarkerShape::Cone, 7) && !v.clamped && !v.filled);
-        v = PickVisual(Shape::Cone(300.f, 20.f), 1, MarkerLayer::Fill);   // wider: a full disc of the length
+        // Blackrock Spire WP-RF: wider, the wide cones up to 330 degrees; past them a full disc of the length.
+        v = PickVisual(Shape::Cone(300.f, 20.f), 1, MarkerLayer::Fill);
+        CHECK(v.pieces.size() == 1 && v.pieces[0].display == D(1, MarkerShape::WideCone, 0) && !v.clamped
+            && !v.filled);
+        v = PickVisual(Shape::Cone(340.f, 20.f), 1, MarkerLayer::Fill);
         CHECK(v.pieces.size() == 1 && v.pieces[0].display == D(1, MarkerShape::Disc) && v.clamped && v.filled);
         CHECK(v.pieces[0].scale == 20.f && v.pieces[0].facingOffset == 0.f && v.pieces[0].forward == 0.f);
         for (float a = 1.f; a <= 360.f; a += 1.f)                         // drawn cone angle >= hitbox angle, or disc
         {
             v = PickVisual(Shape::Cone(a, 20.f), 0, MarkerLayer::Fill);
+            Ids::MarkerDisplayParts const parts = Ids::DecodeMarkerDisplay(v.pieces[0].display);
             if (v.filled)
-                CHECK(a > 270.f && v.pieces[0].display == D(0, MarkerShape::Disc));
+                CHECK(a > 330.f && v.pieces[0].display == D(0, MarkerShape::Disc));
+            else if (parts.shape == MarkerShape::WideCone)
+                CHECK(a > 270.f && Ids::kWideConeAngles[parts.step] >= a - 1e-4f);
             else
                 CHECK(Ids::kConeAngles[Step(v.pieces[0].display)] >= a - 1e-4f);
         }
@@ -694,7 +701,8 @@ namespace
             }
         }
         CHECK(roundTrip);
-        for (std::uint32_t bad : { 0u, 90500u, 90669u, 90999u, 91034u, 91066u, 91098u, 91099u, 91199u, 91834u,
+        // WP-RF: +34..+93 of each color block are the wide cones and the arc band (front_test pins them).
+        for (std::uint32_t bad : { 0u, 90500u, 90669u, 90999u, 91094u, 91098u, 91099u, 91199u, 91894u,
                  91899u, 91990u, 91996u, 91999u, 92057u, 92099u, 92857u, 92900u, 93057u, 93857u, 93900u, 94000u })
             CHECK(!Ids::DecodeMarkerDisplay(bad).valid);
         // Out-of-range color or step clamps to a shipped display.
@@ -947,7 +955,8 @@ namespace
         CHECK(outlineId(Shape::Donut(4.f, 12.f), 1) == D(1, MarkerShape::DonutOutline, 1));
         CHECK(outlineId(Shape::Donut(1.f, 12.f), 0) == D(0, MarkerShape::Ring));              // drawn as a disc
         CHECK(outlineId(Shape::Cone(90.f, 20.f), 6) == D(6, MarkerShape::ConeOutline, 3));
-        CHECK(outlineId(Shape::Cone(300.f, 20.f), 1) == D(1, MarkerShape::Ring));             // drawn as a disc
+        CHECK(outlineId(Shape::Cone(300.f, 20.f), 1) == D(1, MarkerShape::WideConeOutline, 0));  // WP-RF
+        CHECK(outlineId(Shape::Cone(350.f, 20.f), 1) == D(1, MarkerShape::Ring));             // drawn as a disc
         CHECK(outlineId(Shape::Line(12.f, 3.f), 8) == D(8, MarkerShape::LineOutline, 24));
         // Outline rounding promises: a get-out outline is never smaller than its hitbox; a donut hole never bigger.
         for (float len = 0.5f; len <= 200.f; len += 0.73f)

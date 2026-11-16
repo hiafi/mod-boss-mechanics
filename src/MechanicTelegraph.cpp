@@ -114,7 +114,7 @@ namespace BossMechanics::Telegraph
         char const* MarkerShapeName(Ids::MarkerShape shape)
         {
             static char const* const names[] = { "disc", "ring", "timer-ring", "donut", "donut-outline", "cone",
-                "cone-outline", "dashed-ring", "line", "line-outline" };
+                "cone-outline", "dashed-ring", "line", "line-outline", "wide-cone", "wide-cone-outline", "arc-band" };
             std::size_t const i = static_cast<std::size_t>(shape);
             return i < std::size(names) ? names[i] : "?";
         }
@@ -187,11 +187,14 @@ namespace BossMechanics::Telegraph
             Shape,
             Carriers,
             GetIn,
-            None
+            None,
+            Front       // WP-RF: a rolling front draws its own pieces (MechanicFront.h ConePieces / LinePieces)
         };
 
         DrawPath DrawPathOf(ActiveMechanic const& m)
         {
+            if (m.front)
+                return DrawPath::Front;
             if (m.IsShapeKind())
                 return DrawPath::Shape;
             if (IsCarrierKind(m))
@@ -230,6 +233,8 @@ namespace BossMechanics::Telegraph
         // Markers that may need moving after the spawn.
         bool IsDynamic(ActiveMechanic const& m)
         {
+            if (m.front)
+                return true;        // WP-RF: the band moves
             if (IsCarrierKind(m))
                 return true;
             if (m.anchor.IsUnit() || (m.to && m.to->IsUnit()))
@@ -966,6 +971,7 @@ namespace BossMechanics::Telegraph
                     break;
                 }
                 case DrawPath::None:
+                case DrawPath::Front:       // WP-RF: no fill timer (SyncFront draws the band)
                     break;
             }
 
@@ -973,6 +979,77 @@ namespace BossMechanics::Telegraph
             // A static mechanic is done once its live state is drawn (or there is nothing to time: timer off); a
             // moving or reshaping one keeps stepping (cheap: an unchanged piece sends nothing).
             ms.fillFinal = !IsDynamic(m) && (live || !timer);
+        }
+    }
+
+    namespace
+    {
+        // WP-RF: how often a front's markers step (the band moves Front::kStepYd per step).
+        uint32 FrontStepMs(ActiveMechanic const& m)
+        {
+            return Front::MarkerStepMs(m.projectile ? m.projectile->speed : 0.f, GetConfig().followIntervalMs);
+        }
+
+        // WP-RF: a rolling front's pieces (MechanicFront.h), one marker per slot in MechanicState::fill (slot k is
+        // piece k; an empty guid while the piece draws nothing), m.markers the live ones in slot order (the resolve
+        // casts from the first: the cone's outline, or the line's first lane). The moving pieces (the band, the wall)
+        // aim one step ahead: the wall's spline and the band's scale blend land them as the next step starts. No ground
+        // snap: the pieces stand Telegraph.Lift above the anchor (the halls the fronts run in are flat).
+        void SyncFront(Map* map, TelegraphState& state, Registry const& reg, ActiveMechanic& m, Milliseconds now)
+        {
+            if (!m.front || !m.projectile)
+                return;
+            MechanicState& ms = state.mechanics[m.id];
+            uint32 const stepMs = FrontStepMs(m);
+            float const e = SecondsOf(now + Milliseconds(stepMs) - m.resolveAt);
+            Geo::Pose pose;
+            Shape const shape = reg.EffectiveShape(m, pose);
+            Front::Colors colors;
+            colors.danger = ColorIndex(m);
+            Encounter const* enc = reg.FindEncounter(m.owner);
+            colors.safe = static_cast<uint8>(enc ? enc->getIn : Color::Blue);
+            ProjectileParams const params = ProjectileParamsOf(m);
+            std::vector<Front::Piece> const pieces = m.front->type == FrontType::Cone
+                ? Front::ConePieces(*m.front, shape, params, pose, e, colors)
+                : Front::LinePieces(*m.front, shape, params, pose, e, colors);
+            Unit* owner = FindUnit(map, m.owner);
+            ResizeFillSlots(map, state, ms, pieces.size());
+            for (std::size_t k = 0; k < pieces.size(); ++k)
+            {
+                Front::Piece const& p = pieces[k];
+                ObjectGuid& slot = ms.fill[k];
+                VisualPiece piece;
+                piece.display = p.display;
+                piece.scale = p.scale;
+                Creature* marker = slot.IsEmpty() ? nullptr : map->GetCreature(slot);
+                auto it = slot.IsEmpty() ? state.markers.end() : state.markers.find(slot);
+                if (!p.display || !marker || it == state.markers.end())
+                {
+                    if (!slot.IsEmpty())
+                        DespawnMarker(map, state, slot);
+                    slot.Clear();
+                    if (!p.display)
+                        continue;
+                    if (Creature* spawned = SpawnMarkerAt(map, state, m, owner, p.pose, piece, true, ObjectGuid::Empty))
+                        slot = spawned->GetGUID();
+                    continue;
+                }
+                bool const swapped = piece.display != it->second.piece.display;
+                ApplyPiece(marker, it->second, piece);
+                Geo::Pose const target = PiecePose(p.pose, piece);
+                if (swapped && !p.moving)
+                {
+                    // A lane's shrink step: its new start goes out with the new model (as SyncShapePieces does).
+                    marker->NearTeleportTo(target.x, target.y, target.z, Geo::Wrap2Pi(target.o));
+                    it->second.sent = target;
+                }
+                else
+                    MoveMarker(marker, it->second, target, nullptr, p.moving ? stepMs : 0);
+            }
+            m.markers.clear();
+            for (ObjectGuid const& g : ms.fill)
+                if (!g.IsEmpty())
+                    m.markers.push_back(g);
         }
     }
 
@@ -1079,6 +1156,10 @@ namespace BossMechanics::Telegraph
             case DrawPath::GetIn:
                 SpawnGetIn(map, state, *reg, m);
                 break;
+            case DrawPath::Front:
+                SyncFront(map, state, *reg, m, now);
+                ms.nextFollowAt = now + Milliseconds(FrontStepMs(m));
+                break;
             case DrawPath::None:
                 break;
         }
@@ -1104,7 +1185,7 @@ namespace BossMechanics::Telegraph
         ModuleConfig const& cfg = GetConfig();
         if (IsDynamic(m) && now >= state.mechanics[m.id].nextFollowAt)
         {
-            state.mechanics[m.id].nextFollowAt = now + Milliseconds(cfg.followIntervalMs);
+            state.mechanics[m.id].nextFollowAt = now + Milliseconds(m.front ? FrontStepMs(m) : cfg.followIntervalMs);
             switch (DrawPathOf(m))
             {
                 case DrawPath::Shape:
@@ -1115,6 +1196,9 @@ namespace BossMechanics::Telegraph
                     break;
                 case DrawPath::GetIn:
                     FollowGetIn(map, state, *reg, m);     // Stack/Soak on a unit; Spot never moves
+                    break;
+                case DrawPath::Front:
+                    SyncFront(map, state, *reg, m, now);
                     break;
                 case DrawPath::None:
                     break;

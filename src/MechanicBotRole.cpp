@@ -297,7 +297,11 @@ namespace BossMechanics
             return now - it->second > cap;
         };
 
-        // A Park zone whose parked unit is the bot's victim.
+        // A Park zone whose parked unit is the bot's victim: the first one, or (WP-RF) among ParkTogether zones the
+        // newest (a rolling front's next ring: its slice is the one still to come; the older ring's band has passed
+        // or is passing, and the hazards keep the tank out of it until it has).
+        ActiveMechanic const* chosen = nullptr;
+        Unit const* chosenUnit = nullptr;
         for (uint32 id : st.viewInfo.parks)
         {
             ActiveMechanic const* m = reg.Find(id);
@@ -306,11 +310,25 @@ namespace BossMechanics
             Unit const* parked = ObjectAccessor::GetUnit(*bot, m->ParkedUnit());
             if (!parked || !parked->IsAlive() || parked->GetVictim() != bot || capped(id))
                 continue;
+            if (!chosen || (chosen->parkTogether && m->parkTogether && m->resolveAt > chosen->resolveAt))
+            {
+                chosen = m;
+                chosenUnit = parked;
+            }
+            if (!chosen->parkTogether)
+                break;
+        }
+        if (chosen)
+        {
+            ActiveMechanic const* m = chosen;
+            Unit const* parked = chosenUnit;
+            uint32 const id = m->id;
             Geo::Pose pose;
             Shape const shape = reg.EffectiveShape(*m, pose);
             Solver::Park& pk = in.park;
             pk.present = true;
             pk.inside = true;
+            pk.together = m->parkTogether;      // WP-RF: a front's slice, the tank inside it with the boss
             pk.boss = PosOf(parked);
             pk.stopYd = ChaseStopYd(parked, bot);
             pk.triggerYd = parked->GetMeleeRange(bot);

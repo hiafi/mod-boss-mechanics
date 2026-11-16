@@ -25,7 +25,8 @@ namespace
     constexpr float kMarginYd = 0.5f;
 
     std::set<std::string_view> const kTestShapes = { "circle", "donut", "cone", "rearcone", "line", "projectile",
-        "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump" };
+        "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
+        "conefront", "linefront" };
 
     struct Parsed
     {
@@ -70,6 +71,7 @@ namespace
         if (p.shape == "holdstill")
             end += p.size * 1000.f;
         end += Key(step.line, "persist", 0.f);
+        end += Drill::FrontRollMs(step.line);     // WP-RF: a rolling front rolls on after its warning
         return end;
     }
 
@@ -171,7 +173,7 @@ namespace
             CHECK(d.cycleMs > 0);
             CHECK(!d.steps.empty());
             // In start order in every cycle (the after= steps follow their previous step), all below the cycle.
-            for (std::uint32_t cycle = 0; cycle < 2; ++cycle)
+            for (std::uint32_t cycle = 0; cycle < 6; ++cycle)     // even/odd and cycle=<k>/3 (WP-G2)
             {
                 std::vector<std::optional<std::uint32_t>> const at = Drill::StepOffsets(d, cycle);
                 std::uint32_t last = 0;
@@ -216,7 +218,8 @@ namespace
             }
         }
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
-            "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump" })
+            "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
+            "blackrock-spire-followups", "rolling-fronts" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -488,8 +491,8 @@ namespace
     }
 
     // STAGE-M3-R-REPORT n-11: alexei runs one cycle by default (2.6 minutes), deadmines-followups two (its alternating
-    // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s), the
-    // others three.
+    // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s),
+    // the others three (blackrock-spire-followups: 40 s cycles, 120 s, one wave 2 row a cycle).
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())
@@ -608,6 +611,20 @@ namespace
         CHECK(Drill::WarnMs("circle 5") == 0u);
         CHECK(Drill::RunsInCycle("circle 5 1 cycle=even", 2) && !Drill::RunsInCycle("circle 5 1 cycle=even", 3));
         CHECK(Drill::RunsInCycle("circle 5 1", 3) && Drill::RunsInCycle("circle 5 1 cycle=odd", 1));
+        // cycle=<k>/<m> (WP-G2): cycles k, k + m, ...; m from 2 to kMaxCycleEvery, k below m, 1-2 digits each.
+        for (char const* good : { "cycle=0/3", "cycle=2/3", "cycle=1/2", "cycle=11/12", "cycle=05/12" })
+            CHECK(Drill::PlanKeysOk(std::string("circle 5 1500 ") + good));
+        for (char const* bad : { "cycle=3/3", "cycle=0/1", "cycle=0/0", "cycle=0/13", "cycle=/3", "cycle=1/",
+            "cycle=-1/3", "cycle=1.5/3", "cycle=1/3/4", "cycle=a/3", "cycle=100/200", "cycle=0/3x" })
+            CHECK(!Drill::PlanKeysOk(std::string("circle 5 1500 ") + bad));
+        for (std::uint32_t c = 0; c < 9; ++c)
+        {
+            CHECK(Drill::RunsInCycle("circle 5 1 cycle=0/3", c) == (c % 3 == 0));
+            CHECK(Drill::RunsInCycle("circle 5 1 cycle=2/3", c) == (c % 3 == 2));
+            CHECK(Drill::RunsInCycle("circle 5 1 cycle=1/2", c) == Drill::RunsInCycle("circle 5 1 cycle=odd", c));
+            CHECK(Drill::RunsInCycle("circle 5 1 cycle=0/2", c) == Drill::RunsInCycle("circle 5 1 cycle=even", c));
+        }
+        CHECK(Drill::StripPlanKeys("circle 5 1500 cycle=2/3 tag=1") == "circle 5 1500 tag=1");
     }
 
     // pick=other, pick=nontank, pick=any and min= (Drill::PickPool).

@@ -73,6 +73,8 @@
 #include "MechanicBotInterrupt.h"
 #include "MechanicBotLock.h"
 #include "MechanicBotTargets.h"
+#include "MechanicBotTauntSwap.h"
+#include "MechanicBotPass.h"
 #include "MechanicLeaks.h"
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
@@ -310,6 +312,10 @@ namespace BossMechanics
             uint32 const descriptorSeen = st->descriptor.seenRevision;
             // M5 WP-T: the ignore list on the bot's attack and its minions, the target clocks (also while it casts).
             BotTargets::AfterTick(botAI, bot, *st, reg, now);
+            // Blackrock Spire WP-TS: a tank keeps off the swap bosses another tank holds (also while it casts).
+            BotTauntSwap::AfterTick(botAI, bot, *st, now);
+            // Blackrock Spire WP-PS: a holder's due throw breaks its cast; a due throw or a catcher's walk wakes it.
+            BotPass::AfterTick(botAI, bot, *st, now);
 
             // M4: mode clocks and leak detectors, from the state the bot's update left (before the waker acts).
             bool const released = BotBrain::Released(botAI, *st, now);

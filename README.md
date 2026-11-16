@@ -33,6 +33,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicRoute.h` | Pure route search around hazards (grid A*, string-pulled legs): `Route`, `RouteHandoff` |
 | `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
 | `src/MechanicJump.h` | Pure Jump kind rules (Stratholme X3): the hop's timing and speeds, who counts as in the air |
+| `src/MechanicFront.h` | Pure rolling fronts (Blackrock Spire WP-RF): specs, gaps, wall segments, placement, markers |
 | `src/MechanicBotView.h/.cpp` | Registry -> solver input and tasks for one bot; reservations; navmesh, sight oracle |
 | `src/MechanicViewRules.h` | Pure player-kind rules of the view: planned spots, margins, separation (host-tested) |
 | `src/MechanicBotGuard.h` | `BOSS_MECHANICS_WITH_BOTS`: 1 only with mod-playerbots enabled |
@@ -98,6 +99,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player; that player taking it is the job |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Jump(owner, spec, warn)`, `Jump(owner, at, r, warn)` | A sweep that hits who is on the ground (Stratholme X3) |
+| `ConeFront`, `LineFront`, `FrontSafe` | Rolling fronts + tank slot ([below](#rolling-fronts-blackrock-spire-wp-rf)) |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
 | `RefFlat(owner, pct, tank)` | Script spells: `pct`% of the owner's reference row ([below](#reference-health)) |
@@ -121,6 +123,7 @@ M3 options:
 | `Radius(yd)` | Bait | the landing circle (Fenrus 6 yd); default: only the picked player |
 | `Tolerance(yd)` | HoldStill | movement allowed in the window (default 0.3 yd; Alexei 1 yd) |
 | `Park(unit)` | shape kinds | the tank holds `unit` (default the owner) inside this shape; bots only |
+| `ParkTogether(unit)` | shape kinds, no front | as Park, the tank inside the shape too (a front's safe slice, WP-RF) |
 | `DropSpot(rule)` | shape kinds on a player | where its carrier bot takes it before it lands; bots only |
 | `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
 | `Lethal()` | Zone/Frontal, no mine or decoy | bots never plan a way across it ([below](#lethal-stratholme-x4)) |
@@ -340,7 +343,8 @@ Spread on 5 players 10, an n-piece line 2n; projectile lines and the RunOut poin
 `MaxActivePerMap` (256) caps mechanics, not markers: 256 one-piece mechanics are about 512 marker creatures. Fill
 resizes send one value update per fill marker per step (~7 per second), like a moving creature.
 
-- Cone angles round up to the ladder (30, 45, 60, 90, 120, 150, 180, 270); a cone wider than 270 degrees draws a full
+- Cone angles round up to the ladder (30, 45, 60, 90, 120, 150, 180, 270, and since WP-RF the wide cones 300, 315,
+  330 at +34..+39 of each color block); a cone wider than 330 degrees draws a full
   disc of its length (the hitbox stays the cone; a WARN names it).
 - Donut ratios round **down** to the ladder (0.25, 0.33, 0.40, 0.50, 0.60, 0.67, 0.75): the drawn safe hole is never
   bigger than the real one (`Rules::kDonutRatioRoundUp = false`, harness ruling 2026-11-02). A ratio below 0.25 draws
@@ -427,7 +431,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
-            |stratholme-followups|stratholme-drops|stratholme-jump> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups> [cycles=3 (alexei 1)]
+            [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -552,6 +557,20 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   group's travel direction, `prefer` makes every live persistent circle of the test owner on a point an enterable
   preferred spot, `avoid` makes each one an avoid point, and `dwell=<ms>` (default 800) is how long before the
   landing such a spot opens.
+- Blackrock Spire build (WP-G1 §3.9, drill `blackrock-spire-followups`): the command (or drill run) keeps the far
+  ends of its last 8 fixed lines (`Drill::LineEnds`). `at=last:<n>` lands on the end of the line n before the last
+  (`at=last` = `at=last:0`; a shape placed after a later line still reads an earlier one). `to=last[:<n>]` (line)
+  aims a line from its source at that end, frozen at registration like `fix=1` (`reach=1` ends it there); such a line
+  records no end of its own, so two hauls along two chains read `to=last:1` and `to=last`. An index past the recorded
+  ends lands on the selected unit. Not with `exempt=` or `follow=1`.
+- Blackrock Spire build (WP-G2 §3.9, `blackrock-spire-followups` rows 18-30): `next=<deg>` (conefront) is the
+  clockwise turn to the next ring's slice (`ConeFrontSpec::nextTurnDeg`, the hint the kit sets and the bots' ring
+  orbit reads); `edge=<yd>` (linefront) keeps the gap's whole width that far inside the wall's ends; `inside=<yd>`
+  (any shape but a decoy) gives the bots hard bounds (`Within`) of a circle round the selected unit where it stands as
+  the shape registers; `lethal=1` (circle, donut, cone, line; not a decoy) marks the shape `Lethal()`; `only=member`
+  makes the shape eligible to one player only (players only), drawn with `pick=` (`pick=same`: the member of the last
+  pick; not with `at=each`). A cone takes `fix=1` with `to=`: aimed once, at registration, not turning after the unit.
+  Drill steps take the plan key `cycle=<k>/<m>` (runs in cycles k, k + m, ...; m 2-12) beside `cycle=even|odd`.
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -679,6 +698,38 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     (`Jump/<tag>`, `RunOut/2`): 1 rope, 2 the RunOut, 3 Double Dutch's 2 s skips, 4 its 1.5 s skips. The bar: no
     `Jump` hit at all (each one is a bot that did not hop: `.mech bots` "x3 jumps" says why). The sweep runs
     `stratholme-jump:6`.
+  - `blackrock-spire-followups` (Blackrock Spire build §3.9, WP-G1 wave 1 rows 0-12 and WP-G2 wave 2 rows 18-30; 40
+    s, three cycles by default = 120 s, heroic numbers in `pct=`): 0 s, Omokk OM2's one-two, a 5 x 30 yd line from the
+    creature toward a non-tank's spot (2.5 s, `fix=1`), then one toward where that player stands as it lands (1.5 s,
+    `pick=same`). 6 s, Gizrul and Halycon HG2 + HG3, two 5 x 30 yd charges 1 s apart through the farthest non-tanks (3
+    s, `min=15 reach=1`), and an 8 yd pounce at each line's far end, shown with its line as B7 builds HG3 and landing
+    1.5 s after its charge (4.5 s, `at=last` right after its charge). 12 s, the axe chains (WT11 hard mode, Voone's
+    VO11), a 2 yd chain from the creature to each of two non-tanks' spots, 8 s (a 10% crossing every 2 s); as they end
+    a 1.5 s warning and a line along each (`to=last:1`, `to=last`): even cycles WT11's haul (3 yd, 35%), odd cycles
+    Voone's War Cry recall (VO12 -> VO7: 4 yd, 5 yd at the creature excluded, 40%). Weakened on all but OM2. From 22 s
+    one Upper Spire row per cycle (`cycle=<k>/3`), on the numbers B10, B12 and B15 build:
+    - cycles 0, 3: Emberseer EM2 + EM3 heroic at 16 stacks: ring 1 (a 45 degree slice, random) shown 5 s ahead from the
+      nova's edge (11.8 yd), the nova 2.5 s later (2.5 s, erupting as ring 1 launches), rings 2-4 each shown as the one
+      before launches (1.5 s), from the apex, turned 60 degrees clockwise and carrying the next turn (`next=60`); 4 yd
+      band at 8 yd/s to 45 yd, `park=1 until=23.8`, the hall as `inside=29`; 49.2% fire, Weakened;
+    - cycles 1, 4: Rend RG6 heroic: two 68 yd walls (8 yd/s over 86 yd), 3 s and 6 s, both shown at once, each with an
+      8 yd gap in the 40 yd middle strip (`edge=15`), the second on the other side within 20 yd of the first; the room's
+      width as `inside=20`; 25% frost, Weakened;
+    - cycles 2, 5: Drakkisath's Challenge (DR17 + DR18): the Call (everyone to a spot on a 7 yd ring round the
+      creature, 4 s), then on a non-tank the lethal ring (a donut 11-13 yd, `lethal=1`, armed 1.5 s after the close for
+      10.5 s, 50% for the kill) and six blows 2 s apart (1.5 s each: Thunderclap 8 yd, Ring of Flame 4-12 yd, Sweep 180
+      degrees 10 yd, Fire Blast three 4 yd circles, Overhead Cleave 60 degrees 15 yd, Ring of Flame), the ring and the
+      blows `only=member` (the challenger) and the blows `inside=10` (the kit's `RingInside`). B15 shuffles the blows;
+      the drill's order leaves out the Sweep right after the Thunderclap, which no bot can dodge inside 10 yd bounds.
+
+    Tags (`Zone/<tag>`, the Call `Spot/13`): 1 punch, 2 second punch, 3 charges, 4 pounces, 5 chains, 6 hauls, 7 recall
+    lanes, 8 nova, 9 ring 1, 10 rings 2-4, 11 first wall, 12 second wall, 13 the Call, 14 the lethal ring, 15 Sweep, 16
+    Overhead Cleave, 17 Fire Blast, 18 Ring of Flame, 19 Thunderclap. 1, 3, 5, 8, 9, 11 and 13 are reported; 2, 4, 6, 7,
+    10, 12 and 14-19 are under the sweep's bar (`Drill::kBrsBarTags`: at most 1 hit per tag per spec run, no tag on more
+    than 3 specs). It gates the heroic sign-off of B1 (2), B7 (4), B9 (6), B3 (7), B10 (10), B12 (12) and B15 (14-19).
+    The sweep runs `blackrock-spire-followups:3`, one sweep for this drill alone (never `;`-joined with another):
+    `mechanics_sweep.py run --programs blackrock-spire-followups:3 --duration 120 --iterations 5 --step 100 --jobs 6
+    --sweep blackrock-spire-followups` (mod-dpssim `tools/`, after the build).
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -1238,6 +1289,310 @@ who counts as in the air, a 400 ms late resolve tick, the hop along a walk under
 RunOut, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range, and the drill's
 rows).
 
+### Rolling fronts (Blackrock Spire WP-RF)
+
+Shared doc BS5 and library L25 (designer ruling 54): a band that rolls over the floor at a set speed and hits whoever
+it passes over; the safe slot is marked. Two shapes, both Zones (`Kind::Zone`) with a single-pass projectile timing, so
+the resolve, the hot windows, the solver, the route search and `.mech` reuse the projectile code (`src/MechanicFront.h`
+holds what is front-specific; host tests `tests/front_test.cpp`):
+
+- **Rolling cone front**, `ConeFront(owner, apex, ConeFrontSpec, warn)`: the hitbox is `Cone(360 - sliceDeg, endYd)`
+  on the apex, facing away from the slice; the projectile's s is the radial distance from the apex.
+- **Rolling line front**, `LineFront(owner, start, LineFrontSpec, warn)`: the hitbox is `Line(travelYd, widthYd)` from
+  the start line's middle along `facing`, minus the gaps; s runs along `facing`.
+
+```cpp
+// Emberseer EM2 + EM3 (normal, 7 stacks): the nova, then ring 1 with it and ring 2 two seconds later, its slice
+// turned 45 degrees clockwise and shown as ring 1 launches; the tank leads him into each slice.
+float const nova = 7.f + 0.3f * stacks;
+Position const spot = me->GetPosition();                         // where he stood as the warning began
+Mechanic::Circle(me, spot, nova, 2500ms).Damage(30.f).School(SPELL_SCHOOL_FIRE).Weakened().Tag(EM2);
+ConeFrontSpec ring{ firstSlice, 60.f, nova, 45.f, 4.f, 8.f };   // slice bearing, slice, start, end, band, speed
+MechanicHandle r1 = Mechanic::ConeFront(me, spot, ring, 2500ms).Damage(30.f).School(SPELL_SCHOOL_FIRE).Weakened()
+    .Tag(EM3);
+Mechanic::FrontSafe(me, r1, me, nova + 12.f);
+// ... at ring 1's launch (2.5 s later):
+ring.sliceBearing = Front::SliceBearing(firstSlice, 1, 45.f);
+MechanicHandle r2 = Mechanic::ConeFront(me, spot, ring, 2000ms).Damage(30.f).School(SPELL_SCHOOL_FIRE).Weakened()
+    .Tag(EM3);
+Mechanic::FrontSafe(me, r2, me, nova + 12.f);
+
+// Rend RG6 heroic: two walls from the portcullis (x 194) to the way-in door, 3 s apart, gaps on opposite sides, off
+// the live pools, the second within 20 yd of the first.
+LineFrontSpec wall{ Geo::kPi, 86.f, 40.f, 4.f, 8.f, {} };        // facing, travel, width, band, speed
+float const g1 = *Front::PlaceGap(40.f, 8.f, pools, frand(0.f, 1.f));
+wall.gaps = { { g1, 8.f } };
+Mechanic::LineFront(me, portcullisMiddle, wall, 3000ms).Damage(25.f).School(SPELL_SCHOOL_FROST).Weakened()
+    .Rider(SPELL_FROZEN_2S).Within(arena).Tag(RG6);
+wall.gaps = { { *Front::PlaceGap(40.f, 8.f, pools, frand(0.f, 1.f), -Front::SideOf(g1), 0.f, g1, 20.f), 8.f } };
+Mechanic::LineFront(me, portcullisMiddle, wall, 6000ms).Damage(25.f).School(SPELL_SCHOOL_FROST).Weakened()
+    .Rider(SPELL_FROZEN_2S).Within(arena).Tag(RG6);
+```
+
+- **Timing.** The band (`bandYd` thick) launches at `now + warn`: a cone front's band has its inner edge on `startYd`
+  then (the nova's edge) and the front is over once that edge passes `endYd`, after `(endYd - startYd) / speed`; a line
+  front's band has its back edge on the start line and is over once that edge passes `travelYd`. Ground behind the
+  launched band is never hot (`ProjectileParams::start`, `src/MechanicMath.h`): **the disc inside a cone front's start
+  radius is clean for every ring of the pulse once the nova has gone off** (a designer question in the WP-RF report).
+- **Hits.** Everyone eligible the band passes over, once (the projectile sweep: a slow map tick never skips a player);
+  the options of any Zone (`Damage`, `TankDamage`, `School`, `Spell`, `Rider`, `Weakened`, `OnHit`, `OnResolve` once
+  after the band passed everything, `Eligible`, `TankExempt`, `Within`, `Tag`, `Color`, `NoTelegraph`, `Decoy`).
+  Refused on a front: `Persistent`, `Projectile`, `ProjectileUnit`, `OutAndBack`, `FacingOffset`, `Rear`,
+  `ExcludeSourceEnd`, `AnchorOn`, `Park`, `DropSpot` (a WARN). The apex or start is a point (`Anchor` orientation
+  ignored). A line front with no gap warns (it cannot be dodged).
+- **The safe slot for the bot tank.** `FrontSafe(owner, front, parked, untilYd, gap)` registers a bots-only Zone on the
+  front's slice (a cone on the apex) or gap `gap` (a lane along the facing): nobody is eligible, nothing draws, and
+  `ParkTogether(parked)` sends the bot tank of `parked` (default the owner) into it with the boss (the boss's chase stop
+  `Park.DepthYd` inside it, the tank inside too: `Solver::Park::together`, unlike `Park` whose tank stands outside the
+  zone). It lives from now until the band's back edge passes `untilYd` from the apex or start (0: the whole front);
+  among several live `ParkTogether` zones the tank takes the newest (the next ring's slice). The tank's own safety is
+  the front itself (it is in its view like for anyone).
+- **Placement rules** (pure, for the scripts, KT-B2 and the drill): `Front::SliceBearing(first, ring, turnDeg)` (each
+  ring turned clockwise), `Front::PlaceGap(wallWidth, gapWidth, blocked, u, side, edgeYd, near, within)` (a gap clear of
+  blocked lateral intervals, on a side, within `within` of `near`), `Front::BlockedBy(line, pose, centre, r)` (a pool's
+  lateral extent on the wall), `Front::GapClear`, `Front::SideOf`.
+- **Telegraph** (`DrawPath::Front`, `Front::ConePieces` / `LinePieces`): a cone front draws its hitbox's outline (a wide
+  cone: 300, 315, 330), its slice in the get-in color (a cone, its angle rounded **down** so the drawn slice is never
+  wider than the real one; none below 30 degrees) from the registration, and from the launch the band itself, an **arc
+  band** (an annular sector of the front's angle, rounded up, its hole's ratio rounded down to the ladder 0.5-0.925 so
+  the drawn band is never thinner than the hitbox's; scale = the band's outer radius; a band thicker than half its
+  radius draws the filled cone). A line front draws, per wall segment, the lane it still has to sweep (outline, its
+  start following the wall's back edge in steps of the segment's width), each gap's lane in the get-in color, and the
+  wall itself (a line across, `bandYd` wide, moved by a spline every step). Moving pieces step every
+  `Front::MarkerStepMs` (the band moves 0.8 yd a step: 100 ms at 8 yd/s, within 50 ms and FollowIntervalMs) and aim one
+  step ahead. No fill timer (the band is the timer), no ground snap. The wide cones and the arc band are new marker
+  displays (+34..+93 of each color block, `BossMechanicsIds.h`; core `apps/dbc-tools/patch_bossmechanics_markers.py`):
+  **the BM build and the patch-M with them deploy together** (a 300 degree Zone cone drew a disc before; it now names a
+  wide cone display). Every look is unconfirmed until seen in game.
+- **Bots.** The view gives a gapped wall to the solver as one Line hazard per segment between its gaps
+  (`Front::Segments`; same id, same timing), so a gap is plain safe floor; a cone front's hazard reads s radially
+  (`ProjectileS` in `ForEachWindow` and the route raster). The solver adds slice candidates for a cone front (the
+  slice's middle and edges at the bot's distance, 3 yd nearer, and just outside the band's start) and pulls spots in a
+  cone front's reach toward the band's start (`Detail::FrontPull`, half a yard of walking per yard past 2 yd beyond
+  it: the rings of a pulse start at the nova's edge, so a spot near it can duck into the nova's disc behind the first
+  ring). With a front in the view the Fallback (nothing clean over the horizon: two fronts whose slots do not
+  overlap) ranks, after the time inside on the way, the target whose first window opens latest first, keeps a front
+  Fallback while its end stays clear until that window (`Plan::clearUntil`, `FallbackHolds`), and never lets a spot
+  outside the hard bounds (`Within`) set its floor: the bot stands in the first slot as the first front passes and
+  crosses behind it to the next one. Give a line front `Within(arena)`: outside the room every spot is "safe".
+- **What the bots can and cannot do** (`tests/front_test.cpp`, the brain model with the room's walls): Rend's normal
+  wall, 0 hits; heroic two walls with the second gap within 20 yd of the first, 4 hits in 360 wall passes; with the gap
+  anywhere on the other side (up to 32 yd apart), 38 in 360 (a crossing of more than about 20 yd behind the first wall
+  does not fit in 3 s). Emberseer with the group close (within 9 yd): no ring hits in 2,000 ring passes; the nova and
+  the first ring together are out of reach for a bot (or a player) across the boss from a random slice beyond a few
+  yards, or inside a nova of 10 yd or more (13+ stacks): 57 nova hits in 700 nova passes there; with the ranged at
+  15 yd, 65 ring hits in 900. Both are design questions (the WP-RF report), not solver work.
+- **Cost.** Four 315 degree rings and the nova in one view: a solve under 1.2 ms mean (M5's budget: 2 ms), the route
+  search 0.6 ms (it finds nothing: every cell is hot at some moment).
+
+Drill `rolling-fronts` (`MechanicDrill.h`, three 40 s cycles: Emberseer normal (7 stacks, 2 rings) and heroic
+(14 stacks, 4 rings) pulses on the rolling front rulings, with the dummy parked in each slice: ring 1 from the nova's
+edge shown 5 s ahead, the nova 2.5 s later, the later rings from the apex at the nova (`at=prev`, `start=0`) with the
+`next=` hint; then Rend's wall and its heroic second wall, its gap within 20 yd of the first. Ledger tags 1-8: the
+later rings (3, 6) and the second wall (8) are gated by the sweep's bar (`Drill::FrontBarTag`, `DRILL_BARS`), the
+novas, first rings and first wall reported). `.mech test` grammar:
+
+```
+.mech test conefront <end> <ms> [slice=60] [bearing=<deg>|turn=<deg>] [start=0] [band=4] [speed=8] [park=1 until=<yd>]
+.mech test linefront <travel> <ms> [width=40] [gap=8] [side=any|left|right|other] [apart=<yd>] [band=4] [speed=8]
+    [facing=<deg>]
+```
+
+A `conefront` rolls from the anchor point (`at=prev`: the last point circle's centre, the nova); its slice is random,
+`bearing=` degrees from your facing, or `turn=` degrees clockwise from the previous `conefront` of the command or drill
+run. `park=1` (a selected creature): `FrontSafe` for it, `until=` its end. A `linefront` is a wall across the anchor
+point (the middle of the swept area) along your facing turned by `facing=`; `side=other` puts its gap across the
+centreline from the previous `linefront`'s, `apart=` at most that far from it. The damage keys as a circle.
+
+**Ring orbit (Blackrock Spire WP-SF).** When a bot's view holds a sequence of cone fronts that start at the apex
+(Emberseer's rings 2-4), the solver's `Detail::RingOrbit` step moves the bot to the side of its current slice nearest
+the next ring's slice, close to the boss, and picks the earliest clean departure once the current band has passed.
+Bots with hard regions, carried shapes or a park (the parked tank) skip it, and without such a sequence the solver
+behaves as before. A ring of a sequence that has a next ring sets `ConeFrontSpec::nextTurnDeg` (that ring's turn,
+clockwise degrees; 0 on the last): the hint tells the orbit which way the next slice turns. The dungeon kit's
+`FrontDirector` sets it.
+
+### Taunt swap (Blackrock Spire WP-TS)
+
+Designer rulings 62-64 and shared doc BS7: at exactly 10 players a flex dungeon boss may stack a debuff on its tank,
+and the other tank takes it over at a stack count. Files: `src/MechanicTauntSwap.h` (pure rules, the taunt table;
+`tests/taunt_swap_test.cpp`), `src/MechanicBotTauntSwap.h/.cpp` (the glue). No mod-playerbots edit.
+
+**Boss data.** A `TauntSwapEntry` in the descriptor: the boss (`bossEntry`, or `TauntSwapEntry::ForUnit(guid, ...)`,
+or neither for the encounter owner), the debuff, the stack count (default 3) and a `when` judged on the boss. Stacks
+are those the boss itself put on the tank (`GetAura(spell, boss)`), so two wolves with one debuff id count apart;
+`.AnyCaster()` counts every caster's. The boss registers the entry only where the swap applies: in a flex dungeon only
+when the pull's held count is exactly 10 (ruling 63, the kit's `TankSwapOn(n)`), never by counting tanks.
+
+```cpp
+if (DungeonKit::Flex::TankSwapOn(n))
+    d.tauntSwaps.emplace_back(NPC_MOTHER_SMOLDERWEB, SPELL_WIDOWS_BITE, 3);
+// Halycon and Gizrul: one entry per wolf; the tanks trade them.
+d.tauntSwaps.emplace_back(NPC_HALYCON, SPELL_TORN_HIDE, 3);
+d.tauntSwaps.emplace_back(NPC_GIZRUL, SPELL_TORN_HIDE, 3);
+// "The second tank picks up Gizrul on arrival" (a target entry, not part of the swap).
+d.targets.emplace_back(NPC_GIZRUL, 1, Who::AssistTank);
+```
+
+**Rules** (each tank decides on its own, from the same facts; `TauntSwap::Decide`). A swap boss is a live encounter
+unit in combat that an entry names, its `when` holding. The tanks are the bot's group members on its map with a tank
+spec (`PlayerbotAI::IsTank`), humans included.
+
+- The boss's victim holds it. The victim is the caster of the last taunt on the boss when there is one
+  (`TauntSwap::EffectiveVictim`): the boss turns only at its next AI update, after every player's in the map update,
+  so a third tank stepping after the taunter would otherwise see no answer and taunt too.
+- When the victim is a tank with `swapAtStacks` or more, another tank whose own stacks of that boss's debuff have
+  fallen off (0) and whose taunt is ready taunts it (user ruling 2026-11-15: "they should taunt when the debuff has
+  fallen off of them"): one that holds no swap boss first, then the lower guid. One taunter per boss. A tank with 1 or
+  more stacks never taunts that boss, however high the victim's stacks; with no tank at 0 and ready, the victim keeps
+  the boss (the stacks grow: the tank's own failure).
+- A tank holding two swap bosses gives one to a tank holding none at once (the trade): among the bosses whose debuff
+  is gone from the free tank, the one where the holder has the most stacks (ties to the first entry); none, no trade.
+  Gizrul arriving on the main tank goes to a second tank still carrying Halycon stacks ("the second tank picks up
+  Gizrul"); a swap that left one tank with both wolves ends in one wolf each.
+- **Hold-off**: every other tank keeps off a boss another tank holds until it is picked to taunt. The `boss taunt
+  swap` multiplier zeroes its actions aimed at that boss (kicks excepted) and its area taunts; the waker stops its
+  melee, drops the boss as its current target and breaks a cast at it; the strategy's target exclusions (tank, dps
+  and debuff targets) keep the stock pickers off it, and the `boss kill target` focus leaves it out. Without this the
+  debuffed tank would pull the boss back with threat once the 3 s taunt ends (or taunt it back on the stock "lose
+  aggro" trigger: an explicit main tank does), and the waiting tank could rip it early.
+- A boss on a non-tank, or on nobody, is not judged: the stock taunts take it back as before.
+- A tank keeps the swap boss it holds as its focus over the list's picks (`Focus::swapHold`), so the assist tank's add
+  entry does not walk it off a wolf it took in a trade.
+
+With the designed 15 s debuff and a hit every 6 s the waiting tank is at 0 again when the other reaches 3
+(`taunt_swap_test` runs the timelines: Smolderweb and the wolves peak at 3 with no wait past the count; under Call of
+the Pack's 4 s bites a holder at 3 sometimes waits for the other tank's debuff to fall off, still peaking at 3).
+
+**Taunts** (`TauntSwap::kTable`, by spell id: playerbots' `IsTauntAction` knows only the stock action classes): Taunt
+355, Hand of Reckoning 62124, Growl 6795, Dark Command 56222, Insult 203722 (rogue tank), Demonic Taunt 200839 (Dark
+Apotheosis), Earth Shock (the highest rank known; a tank only: it taunts under Rockbiter), Mocking Blow 694, then
+Righteous Defense 31789 at the victim, never while the victim holds two swap bosses (it taunts up to 3 of the victim's
+attackers and would hand both wolves to the taker; `TauntSwap::FriendTauntAllowed`). Never cast by the swap: the area
+taunts (Challenging Shout 1161, Challenging Roar 5209, Challenging Howl 59671; blocked while the tank keeps off a boss)
+and Death Grip 49576 (it moves the boss). The swap is the `boss taunt swap` trigger and action at `ACTION_RAID + 3`
+(above the focus): the taunt when in reach and line of sight, else an attack on the boss to walk in; then the boss as
+the target.
+
+**Assist tank** (`Who::MainTank`, `Who::AssistTank`): the main tank is playerbots' `IsMainTank` (the group's main
+tank flag, else its first live tank); every other tank is an assist tank. `Who::Tank` still means both.
+
+**Drill** `taunt-swap` (Descriptor Training Dummy 300403, which is tauntable; not in the descriptor loops): two tanks;
+the dummy stacks Taunt Swap (drill) 205024 (15 s from the last stack, up to 10) on its victim every 6 s and the tanks
+trade at 3; an add for the first 12 s that the assist tank picks up. A tank taunts only once its own stacks have
+fallen off, and 15 s at a stack every 6 s clears the giver by the taker's third stack, so a 60 s run shows a swap every
+18 s (three), each tank peaking at 3.
+
+**Check**: `.mech desc` prints each entry and, per swap boss, its victim and the victim's stacks; `.mech bots` prints
+the `ts taunt swap` line per bot (holds, keeps off, the pending taunt and why, swaps and trades, refused casts, walks
+in, attacks stopped, actions blocked, the most stacks it held). Debug (`BossMechanics.Bots.Debug`) logs each swap.
+
+### Pass (Blackrock Spire WP-PS)
+
+Shared doc BS6, library L26 Hot Potato, designer ruling 57: the player holding something (an aura, usually with an
+item in the bags) throws it on to another player; boss data says who may catch it, the range, the pick among the
+catchers, when to throw and how long a catcher holds first. Bots throw by it, humans by hand. Solakar's Father Flame is
+the first use; Lady Vashj's Tainted Core (mod-playerbots' own chain today) is the next. Files: `src/MechanicPass.h`
+(pure rules: pick, triggers, ready spots, the per-map slot; `tests/pass_test.cpp`), `src/MechanicBotPass.h/.cpp` (the
+glue), `PassEntry` / `PassTrigger` / `PassHold` and `Condition::AnyOf` in `src/MechanicDescriptor.h`. No mod-playerbots
+or core edit.
+
+**Boss data.** A `PassEntry` in the descriptor (`d.passes`). The holder is whoever carries `holderAura`.
+
+```cpp
+Descriptor d;
+d.passes.push_back(PassEntry::WithItem(SPELL_FATHER_FLAME, ITEM_FATHER_FLAME, 30.f)
+    .CatchWhen(Condition::AnyOf({ Condition::LacksAura(SPELL_SCORCHED_HANDS),
+        Condition::HasAura(SPELL_SPEAR_WOUND) }))
+    .Prefer(Condition::HasAura(SPELL_SPEAR_WOUND))                  // heroic: the wounded first
+    .FarFrom(NPC_SOLAKAR).FarFrom(NPC_ROOKERY_HATCHER).KeepFrom(15.f)
+    .FewestZones(TAG_EGGS, 4.f)                                     // the egg clutches, registered Tag(TAG_EGGS)
+    .When(PassTrigger::UnitNear(NPC_SOLAKAR, 15.f, Condition::HasAura(SPELL_WARDENS_HUNT)))
+    .When(PassTrigger::UnitNear(NPC_ROOKERY_HATCHER, 15.f))
+    .When(PassTrigger::HeldFor(holdMs))                             // 6 / 4 s normal, 4 / 3 s heroic (5 / 6+)
+    .MinHold(2000ms, Condition::HasAura(SPELL_SPEAR_WOUND))        // sear the wound first
+    .Flight(1000ms).Room(48.5f, -338.f, 107.5f, -252.5f));
+Mechanic::Describe(me, std::move(d));
+```
+
+| Part | What |
+| --- | --- |
+| `WithItem(aura, item, range)` | the holder uses `item` on the catcher (`ImbueItem`); the item's spell moves the aura |
+| `WithSpell(aura, spell, range)` | the holder casts `spell` at the catcher (a server cast if it does not know it) |
+| `MovingAura(aura, range, after, ms)` | the module moves the aura, puts `after` on the thrower for `ms` (the drill) |
+| `CatchWhen(c)` | judged on each candidate; default anyone. `Condition::AnyOf` is new (Not of AllOf of Nots) |
+| `Prefer(c)` | ranked before everyone else (still subject to CatchWhen) |
+| `FarFrom(entry)` | catchers far from the nearest live unit of each entry (0: the encounter owner) score higher |
+| `KeepFrom(yd)` | a ready spot stays at least this far from those units |
+| `FewestZones(tag, yd, w)` | each live mechanic tagged `tag` within `yd` (edge; circles, donuts) costs `w` yd (10) |
+| `When(PassTrigger)` | `HeldFor(ms)`, `UnitNear(entry, yd, when)`, `Casting(entry, spell, yd)`, `Mechanic(tag, ms)` |
+| `PassTrigger::Urgent()` | any one trigger fires the throw; an urgent one goes through the minimum holds |
+| `MinHold(ms, when)` | a new holder keeps it `ms` from its catch while `when` holds on it |
+| `Flight(ms)` (1500) | no second throw by that holder, and the throw is not judged, for this long |
+| `ReadyCatchers(n)` (1) | the best `n` catchers walk to a ready spot (0: none moves) |
+| `NoSight()` | no line of sight needed between the holder and the catcher |
+| `Room(box)`, `RoomCircle(c, r)` | ready spots stay inside |
+| `ActiveWhen(c)` | judged on the owner: the pass idles while it fails |
+
+**Rules** (`Pass::RankThrow`, `RankReady`, `PickReady`, `ThrowTarget`, `ThrowDue`, `SpotFit`, `RankSpots`):
+
+- Catchers: the holder's group members on its map (humans too), alive, not GMs, `CatchWhen` holding. A throw goes to
+  one within `range - 0.5` (3D, edge to edge) and in the holder's line of sight (unless `NoSight`). Order: `Prefer`
+  first, then the score (the distance to the nearest FarFrom unit, capped at 40 yd, minus `w` per counted zone), then
+  the lower guid.
+- Ready catchers: the same order over every eligible catcher, out of range or sight costing (a yard per yard beyond
+  `range - 4`, 15 for no sight), so the best one walks into reach. Both picks are sticky: the one in place keeps it
+  unless another of the same preference scores 5 yd more. The throw goes to the first ready catcher when it can catch
+  now, else to the best one who can. The boss's tank never walks (it keeps the boss where it is); humans never walk.
+- The throw is due when a trigger fires, unless a minimum hold whose condition holds on the holder has not run out (an
+  urgent trigger goes through it) or the holder's last throw still flies. `HeldFor` counts from the catch (the first
+  holder: from when the book first saw it).
+- A flight that runs out with the thrower still holding is a failed throw; two in a row at one catcher leave it out
+  for 5 s (the Vashj chain's re-plan without the catcher).
+- Ready spot: a ready catcher bot whose own spot is fit holds it (no counted zone within `yd`, `KeepFrom` met, within
+  `range - 4` of the holder on the same floor, in its sight, 4 yd from the other ready catchers' spots); else it walks
+  to the cheapest of 96 candidates (rings round it and round the holder; cost = the walk + 30 per zone + 5 per yard
+  short of KeepFrom + 20 per yard short of 4 yd from another ready spot; out of the room or the holder's reach: never),
+  probed in that order (at most 8): on the navmesh, out of the bot's hazards for 3 s, in the holder's sight, and
+  cheaper than standing still. The spot is reserved on the map's book. At it, the bot holds up to 8 s: the
+  `boss pass catch` multiplier zeroes the stock movement actions (not the brain's, not a taunt swap); the brain still
+  escapes hazards first (the lock blocks the walk in Escape, Hold and Freeze).
+
+**Bots.** `boss pass throw` (trigger and plain `Action`, `ACTION_EMERGENCY + 3`, never blocked by the lock): the item
+on the catcher (`ImbueItem`, the Vashj `ThrowCore` pattern: credit Crow, mod-playerbots #1888 / #2892), the spell, or
+the aura moved. `boss pass catch` (trigger and `MovementAction`, `ACTION_RAID + 4`): the walk to the ready spot.
+`boss pass catch` multiplier: the hold. The waker (`BotPass::AfterTick`) breaks a holder's cast in progress for a due
+throw and wakes the holder and a catcher that starts walking. The book (one per map, `Map::CustomData`
+`mod-boss-mechanics-pass`) is brought up to date by the first bot that looks in a game-time millisecond, at most every
+100 ms (at once on a change of holder or a throw).
+
+**Check**: `.mech desc` prints each pass (the throw, range, catch rule, triggers, holds) and who holds it now;
+`.mech bots` prints a `ps pass` line per bot (its role, the throw due and why, its throws, refusals, casts broken,
+walks, spots picked, no spot found, moves held) and the book (holder, first ready catcher, throws, catches, failed
+throws, other changes, drops). Debug (`BossMechanics.Bots.Debug`) logs each throw and walk.
+
+**Drill** `pass` (descriptor drill, on the Descriptor Training Dummy 300403 or the sim; not in the loops):
+`describe pass,debuff 205009 n=1,pass-eggs`. One member gets Marked (drill) 205009, the holder; the module moves it
+(`MovingAura`) and puts Baited (drill) 205008 on the thrower for 8 s (the drill's Scorched Hands); catchers far from
+the dummy (ready spots 10 yd off it) and off the eggs; the holder throws once the dummy is within 8 yd or after 5 s,
+never before 1.5 s; two ready catchers. `pass-eggs` (a `.mech drill` too) lays 40 egg circles (2 yd, within 25 yd of
+the selected unit, 50 ms apart, 16 s, `tag=60`, no marker, `pct=0`: 1 damage a tick in the dummy's flat mode) three
+times 20 s apart; the ledger's `Zone/60` counts egg contacts. About 64 s.
+
+**Cost** (`tests/pass_test`, host, `-O1`): a solve with the Rookery's 33 real clutches (live gameobject 175124) about
+0.1 ms, with 40 zones about 0.1 ms, with one zone per egg (138) about 0.2-0.45 ms; a route across the room with them
+0.35-0.45 ms; the pass's own rules per update (9 catchers ranked twice, 96 spot candidates, 40 zones) about 12 us.
+All well under M5's 2,000 us. Only 6% of the Rookery's floor is fit to catch on with the holder in the middle and
+Solakar at his spawn (no clutch within 4 yd and 15 yd from him), so the walk to a ready spot matters.
+
+**Catcher supply** (the heat table of SP SK4/SK5 as a model, throws on HeldFor alone): fewest / mean eligible catchers
+at a throw over 120 s: normal 5 (6 s holds, Scorched 15 s) 2 / 2.2; normal 10 (4 s, 25 s) 4 / 4.6; heroic 5 (4 s,
+10 s) 2 / 2.1; heroic 10 (3 s, 25 s) 3 / 3.7.
+
+**Limits**: one holder per entry (a second player with the aura is ignored while the first holds); the counted zones
+are circles and donuts by their outer radius; a human holder is never thrown for; a lost holder (nobody holds) gives
+nothing to the bots (the boss's Soak pickup is the script's, SK7).
+
 ### Gate
 
 Installed on every bot, master or not, by login, map change and a sweep every `GateSweepMs` (repairs
@@ -1503,11 +1858,13 @@ same rule).
 | 205001-205007 | Mechanic Impact per school (205001 + school), `spell_boss_mechanics_resolve` |
 | 205008 | Baited (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' bait rotation aura (`rider=`, `aura=`) |
 | 205009 | Marked (drill): harmless dummy debuff, 10 stacks, 2 min; the drills' selector (`marker` steps) |
-| 205010-205099 | spare (the module's block; `rider=` takes 205008-205099) |
+| 205010-205023 | M5 descriptor stand-ins (`BossMechanicsIds.h`) |
+| 205024 | Taunt Swap (drill): harmless tank swap debuff, 10 stacks, 15 s; the `taunt-swap` drill's debuff |
+| 205025-205099 | spare (the module's block; `rider=` takes 205008-205099) |
 | 300400 | Mechanic Marker (`npc_boss_mechanic_marker`) |
 | 300401 | Mechanic Test Owner (`npc_boss_mechanic_marker`) |
 | 300402 | Mechanics Training Dummy (`npc_boss_mechanics_dummy`, M4) |
-| 91000-91833 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
+| 91000-91893 | Marker displays: 91000 + 100c + offset + step (`Ids::MarkerDisplay`; c = color 0-8, `Color` order) |
 | | offsets: disc 0, ring 1, timer ring 2, donut 3+j, donut outline 10+j, cone 17+j, cone outline 25+j, |
 | | dashed ring 33 (34 per color; +34..+99 spare) |
 | 92000-92856 | Line (fill) displays: 92000 + 100c + i, i = 0..56 (+57..+99 spare) |

@@ -17,7 +17,9 @@
  * - dispels and purges (WP-P): IsUrgent, DispelHeld, OrderDispels, PickPurge;
  * - targets and the ignore list (WP-T): Fits, PickTarget, IsIgnored;
  * - turned teammates (SFK F1): IsHostilePlayer, read by TargetEntry::HostilePlayers and the playerbots fork's
- *   hostile-teammate hook (MechanicBotTargets.cpp).
+ *   hostile-teammate hook (MechanicBotTargets.cpp);
+ * - taunt swaps (Blackrock Spire WP-TS): TauntSwapEntry here, the rules in MechanicTauntSwap.h;
+ * - passes (Blackrock Spire WP-PS): PassEntry here, the rules in MechanicPass.h.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DESCRIPTOR_H
@@ -105,10 +107,22 @@ namespace BossMechanics
             c.fn = std::move(f);
             return c;
         }
+        // Blackrock Spire WP-PS: any of the conditions holds (none: never), written with the kinds above as
+        // Not(AllOf(Not a, Not b, ...)). Solakar's catcher: `AnyOf({ LacksAura(SCORCHED), HasAura(SPEAR_WOUND) })`.
+        static Condition AnyOf(std::vector<Condition> conditions)
+        {
+            std::vector<Condition> negated;
+            negated.reserve(conditions.size());
+            for (Condition& c : conditions)
+                negated.push_back(Not(std::move(c)));
+            return Not(AllOf(std::move(negated)));
+        }
     };
 
     // Which bots an entry concerns. Melee and Ranged are damage dealers only; Dps is every damage dealer; tanks and
-    // healers take an entry only when it names them (Tank, Healer) or Any.
+    // healers take an entry only when it names them (Tank, Healer, MainTank, AssistTank) or Any. MainTank is the
+    // group's main tank (the main tank flag, else its first live tank: playerbots' IsMainTank); AssistTank every
+    // other tank (Blackrock Spire WP-TS: "the second tank picks up Gizrul / the champions / the Guards").
     enum class Who : std::uint8_t
     {
         Any,
@@ -116,7 +130,9 @@ namespace BossMechanics
         Ranged,
         Tank,
         Healer,
-        Dps
+        Dps,
+        MainTank,
+        AssistTank
     };
 
     // The structs below take their main fields through a constructor (a brace list naming only some fields would warn
@@ -232,6 +248,46 @@ namespace BossMechanics
         std::uint64_t bot = 0;              // OnlyFor: set, the entry concerns that bot alone (raw ObjectGuid)
     };
 
+    // A taunt swap (Blackrock Spire WP-TS, designer rulings 62-64, shared doc BS7): the boss's hits stack
+    // `debuffSpell` on its victim; once the victim is a tank with `swapAtStacks` or more, another tank whose own stacks
+    // have fallen off taunts it, and the debuffed tank keeps off it until its turn comes again (MechanicTauntSwap.h;
+    // user ruling 2026-11-15). A boss scripts the entry only where the swap applies: in a flex dungeon only when the
+    // pull's held player count is exactly 10 (ruling 63; the kit's TankSwapOn(n)). `when` is judged on the boss.
+    //     d.tauntSwaps.emplace_back(NPC_SMOLDERWEB, SPELL_WIDOWS_BITE, 3);
+    //     d.tauntSwaps.push_back(TauntSwapEntry::ForUnit(gizrul.GetRawValue(), SPELL_TORN_HIDE, 3));
+    struct TauntSwapEntry
+    {
+        TauntSwapEntry(std::uint32_t bossEntry_ = 0, std::uint32_t debuffSpell_ = 0, std::uint8_t swapAtStacks_ = 3,
+            Condition when_ = {})
+            : bossEntry(bossEntry_), debuffSpell(debuffSpell_), swapAtStacks(swapAtStacks_), when(std::move(when_))
+        {
+        }
+
+        // One unit (raw ObjectGuid), whatever its entry.
+        static TauntSwapEntry ForUnit(std::uint64_t guid, std::uint32_t debuffSpell, std::uint8_t swapAtStacks,
+            Condition when = {})
+        {
+            TauntSwapEntry e(0, debuffSpell, swapAtStacks, std::move(when));
+            e.guid = guid;
+            return e;
+        }
+
+        // Count the debuff's stacks from every caster (default: only the stacks this boss put on the tank, so two
+        // wolves with one debuff id count apart).
+        TauntSwapEntry& AnyCaster()
+        {
+            anyCaster = true;
+            return *this;
+        }
+
+        std::uint32_t bossEntry = 0;        // every encounter unit of this entry; 0 (and no guid): the owner
+        std::uint64_t guid = 0;             // raw ObjectGuid; set: that unit only
+        std::uint32_t debuffSpell = 0;
+        std::uint8_t swapAtStacks = 3;      // 0: never swaps (the entry still keeps the other tank off the boss)
+        Condition when;                     // judged on the boss; while it fails the boss is not a swap boss
+        bool anyCaster = false;
+    };
+
     // Ignored while `when` holds: no damage from bots or pets, no AoE count.
     struct IgnoreEntry
     {
@@ -249,6 +305,247 @@ namespace BossMechanics
         Condition when;
     };
 
+    // When the holder of a pass throws (Blackrock Spire WP-PS, PassEntry below). Any one trigger that fires makes the
+    // throw due; a minimum hold (PassEntry::MinHold) holds it back unless the trigger is Urgent().
+    struct PassTrigger
+    {
+        enum class Kind : std::uint8_t
+        {
+            HeldFor,        // the holder has held it `ms` or longer
+            UnitNear,       // a live unit of `entry` (0: the encounter owner) is within `yd` of the holder, `when`
+                            // holding on that unit (Solakar hunting, the Hatcher chasing)
+            Casting,        // a unit of `entry` (0: the owner) casts or channels spell `id`, within `yd` of the holder
+                            // (0: any distance)
+            Mechanic        // a live registry mechanic tagged `id` resolves within `ms` (0: while it is live at all)
+        };
+
+        static PassTrigger HeldFor(std::chrono::milliseconds ms)
+        {
+            PassTrigger t;
+            t.kind = Kind::HeldFor;
+            t.ms = ms;
+            return t;
+        }
+        static PassTrigger UnitNear(std::uint32_t entry, float yd, Condition when = {})
+        {
+            PassTrigger t;
+            t.kind = Kind::UnitNear;
+            t.entry = entry;
+            t.yd = yd;
+            t.when = std::move(when);
+            return t;
+        }
+        static PassTrigger Casting(std::uint32_t entry, std::uint32_t spellId, float yd = 0.f)
+        {
+            PassTrigger t;
+            t.kind = Kind::Casting;
+            t.entry = entry;
+            t.id = spellId;
+            t.yd = yd;
+            return t;
+        }
+        static PassTrigger Mechanic(std::uint32_t tag, std::chrono::milliseconds within = std::chrono::milliseconds(0))
+        {
+            PassTrigger t;
+            t.kind = Kind::Mechanic;
+            t.id = tag;
+            t.ms = within;
+            return t;
+        }
+
+        // Fires through the minimum holds (a Hunt 4 yd away beats searing a wound).
+        PassTrigger& Urgent()
+        {
+            urgent = true;
+            return *this;
+        }
+
+        Kind kind = Kind::HeldFor;
+        std::uint32_t entry = 0;
+        std::uint32_t id = 0;
+        float yd = 0.f;
+        std::chrono::milliseconds ms{ 0 };
+        Condition when;                     // UnitNear: judged on the unit
+        bool urgent = false;
+    };
+
+    // A minimum hold: a new holder keeps it at least `ms` from its catch while `when` holds on it (a wounded catcher
+    // holds 2 s to sear the wound; the script clears the wound, the condition fails, the hold is over).
+    struct PassHold
+    {
+        PassHold(std::chrono::milliseconds ms_ = std::chrono::milliseconds(0), Condition when_ = {})
+            : ms(ms_), when(std::move(when_))
+        {
+        }
+
+        std::chrono::milliseconds ms{ 0 };
+        Condition when;
+    };
+
+    // A pass (Blackrock Spire WP-PS; shared doc BS6, library L26 Hot Potato; designer ruling 57): the player with
+    // `holderAura` holds something and throws it on to another player. Boss data names who may catch it, the range,
+    // the pick among catchers, when to throw and how long a catcher holds first; bots throw by it, humans by hand. The
+    // pure rules are MechanicPass.h, the bot glue MechanicBotPass.h; README "Pass". Solakar's Father Flame:
+    //     d.passes.push_back(PassEntry::WithItem(SPELL_FATHER_FLAME, ITEM_FATHER_FLAME, 30.f)
+    //         .CatchWhen(Condition::AnyOf({ Condition::LacksAura(SPELL_SCORCHED_HANDS),
+    //             Condition::HasAura(SPELL_SPEAR_WOUND) }))
+    //         .Prefer(Condition::HasAura(SPELL_SPEAR_WOUND))
+    //         .FarFrom(NPC_SOLAKAR).FarFrom(NPC_ROOKERY_HATCHER).KeepFrom(15.f).FewestZones(TAG_EGGS, 4.f)
+    //         .When(PassTrigger::UnitNear(NPC_SOLAKAR, 15.f, Condition::HasAura(SPELL_WARDENS_HUNT)))
+    //         .When(PassTrigger::UnitNear(NPC_ROOKERY_HATCHER, 15.f))
+    //         .When(PassTrigger::HeldFor(6000ms))
+    //         .MinHold(2000ms, Condition::HasAura(SPELL_SPEAR_WOUND)));
+    struct PassEntry
+    {
+        enum class Throw : std::uint8_t
+        {
+            Item,       // the holder uses item `item` on the catcher (playerbots' ImbueItem; a human by hand)
+            Spell,      // the holder casts spell `spell` at the catcher
+            MoveAura    // the module moves `holderAura` to the catcher itself and puts `afterAura` on the thrower
+                        // for `afterMs` (the `pass` drill; a script with no item or spell)
+        };
+
+        explicit PassEntry(std::uint32_t holderAura_ = 0, float range_ = 30.f) : holderAura(holderAura_),
+            range(range_)
+        {
+        }
+
+        static PassEntry WithItem(std::uint32_t holderAura, std::uint32_t itemEntry, float range = 30.f)
+        {
+            PassEntry e(holderAura, range);
+            e.how = Throw::Item;
+            e.item = itemEntry;
+            return e;
+        }
+        static PassEntry WithSpell(std::uint32_t holderAura, std::uint32_t spellId, float range = 30.f)
+        {
+            PassEntry e(holderAura, range);
+            e.how = Throw::Spell;
+            e.spell = spellId;
+            return e;
+        }
+        static PassEntry MovingAura(std::uint32_t holderAura, float range = 30.f, std::uint32_t afterAura_ = 0,
+            std::chrono::milliseconds afterMs_ = std::chrono::milliseconds(0))
+        {
+            PassEntry e(holderAura, range);
+            e.how = Throw::MoveAura;
+            e.afterAura = afterAura_;
+            e.afterMs = afterMs_;
+            return e;
+        }
+
+        // Who may catch it (judged on the candidate; default: anyone). Scorched Hands: LacksAura(SCORCHED).
+        PassEntry& CatchWhen(Condition c)
+        {
+            catchWhen = std::move(c);
+            return *this;
+        }
+        // Ranked before everyone else (judged on the candidate): the wounded first.
+        PassEntry& Prefer(Condition c)
+        {
+            prefer = std::move(c);
+            preferSet = true;
+            return *this;
+        }
+        // Prefer catchers far from the nearest live unit of `entry` (0: the encounter owner); call once per unit.
+        PassEntry& FarFrom(std::uint32_t entry)
+        {
+            farFrom.push_back(entry);
+            return *this;
+        }
+        // A catcher bot readying for the catch stands at least this far from the FarFrom units (0: no limit).
+        PassEntry& KeepFrom(float yd)
+        {
+            keepFromYd = yd;
+            return *this;
+        }
+        // Prefer catchers with the fewest live registry mechanics tagged `tag` within `yd` (edge distance); each one
+        // costs `weightYd` yards of FarFrom distance in the pick. Bots ready for the catch on a spot with none.
+        PassEntry& FewestZones(std::uint32_t tag, float yd, float weightYd = 10.f)
+        {
+            zoneTag = tag;
+            zoneYd = yd;
+            zoneWeightYd = weightYd;
+            return *this;
+        }
+        PassEntry& When(PassTrigger t)
+        {
+            triggers.push_back(std::move(t));
+            return *this;
+        }
+        PassEntry& MinHold(std::chrono::milliseconds ms, Condition when = {})
+        {
+            holds.emplace_back(ms, std::move(when));
+            return *this;
+        }
+        // The throw's flight: the holder does not throw again (and the target is not judged) for this long.
+        PassEntry& Flight(std::chrono::milliseconds ms)
+        {
+            flight = ms;
+            return *this;
+        }
+        // How many of the best-ranked catcher bots walk to a ready spot (0: none moves; the pick still runs).
+        PassEntry& ReadyCatchers(std::uint8_t n)
+        {
+            readyCatchers = n;
+            return *this;
+        }
+        // No line of sight needed between the holder and the catcher.
+        PassEntry& NoSight()
+        {
+            sight = false;
+            return *this;
+        }
+        // Ready spots stay inside this box (map x, y), or this circle (0 radius: no room).
+        PassEntry& Room(float minX, float minY, float maxX, float maxY)
+        {
+            roomMinX = minX;
+            roomMinY = minY;
+            roomMaxX = maxX;
+            roomMaxY = maxY;
+            roomBox = true;
+            return *this;
+        }
+        PassEntry& RoomCircle(float x, float y, float r)
+        {
+            roomX = x;
+            roomY = y;
+            roomR = r;
+            return *this;
+        }
+        // Judged on the encounter owner: while it fails the pass is idle (no throw, no ready spot).
+        PassEntry& ActiveWhen(Condition c)
+        {
+            active = std::move(c);
+            return *this;
+        }
+
+        std::uint32_t holderAura = 0;       // the holder is the player with this aura
+        Throw how = Throw::Item;
+        std::uint32_t item = 0;
+        std::uint32_t spell = 0;
+        std::uint32_t afterAura = 0;        // MoveAura: put on the thrower
+        std::chrono::milliseconds afterMs{ 0 };     // ...for this long (0: the aura's own duration)
+        float range = 30.f;
+        bool sight = true;
+        Condition catchWhen;
+        Condition prefer;
+        bool preferSet = false;
+        std::vector<std::uint32_t> farFrom;
+        float keepFromYd = 0.f;
+        std::uint32_t zoneTag = 0;          // 0: no zone count
+        float zoneYd = 4.f;
+        float zoneWeightYd = 10.f;
+        std::vector<PassTrigger> triggers;
+        std::vector<PassHold> holds;
+        std::chrono::milliseconds flight{ 1500 };
+        std::uint8_t readyCatchers = 1;
+        bool roomBox = false;
+        float roomMinX = 0.f, roomMinY = 0.f, roomMaxX = 0.f, roomMaxY = 0.f;
+        float roomX = 0.f, roomY = 0.f, roomR = 0.f;
+        Condition active;
+    };
+
     struct Descriptor
     {
         std::vector<InterruptEntry> interrupts;
@@ -256,6 +553,8 @@ namespace BossMechanics
         std::vector<PurgeEntry> purges;
         std::vector<TargetEntry> targets;
         std::vector<IgnoreEntry> ignores;
+        std::vector<TauntSwapEntry> tauntSwaps;     // Blackrock Spire WP-TS
+        std::vector<PassEntry> passes;              // Blackrock Spire WP-PS
         // Auras that mark a charmed player as turned against the group (SFK F1: Arugal's Turned). A charmed player
         // carrying one is a valid attack target for bots, and bots stop healing, buffing and curing it, until the
         // aura or the charm ends. Empty: a charmed teammate stays off limits (the playerbots default).
@@ -265,7 +564,7 @@ namespace BossMechanics
         bool Empty() const
         {
             return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty()
-                && hostilePlayerAuras.empty();
+                && tauntSwaps.empty() && passes.empty() && hostilePlayerAuras.empty();
         }
     };
 }
@@ -429,6 +728,22 @@ namespace BossMechanics::Desc
             AddReference(r, e.when);
         for (DispelEntry const& e : d.dispels)
             AddReference(r, e.when);
+        for (TauntSwapEntry const& e : d.tauntSwaps)
+            AddReference(r, e.when);
+        // Blackrock Spire WP-PS: the holder aura (who holds it), the catch, preference, hold, gate and trigger
+        // conditions.
+        for (PassEntry const& e : d.passes)
+        {
+            if (e.holderAura && !Contains(r.auras, e.holderAura))
+                r.auras.push_back(e.holderAura);
+            AddReference(r, e.catchWhen);
+            AddReference(r, e.prefer);
+            AddReference(r, e.active);
+            for (PassHold const& h : e.holds)
+                AddReference(r, h.when);
+            for (PassTrigger const& t : e.triggers)
+                AddReference(r, t.when);
+        }
         return r;
     }
 
@@ -936,6 +1251,7 @@ namespace BossMechanics::Desc
         bool tank = false;
         bool healer = false;
         bool melee = false;     // a melee damage dealer (ignored for tanks and healers)
+        bool mainTank = false;  // the group's main tank (Who::MainTank; Who::AssistTank is every other tank)
         Key guid = 0;           // the bot itself (TargetEntry::OnlyFor); 0 matches no OnlyFor entry
     };
 
@@ -956,6 +1272,10 @@ namespace BossMechanics::Desc
                 return bot.healer;
             case Who::Dps:
                 return dps;
+            case Who::MainTank:
+                return bot.tank && bot.mainTank;
+            case Who::AssistTank:
+                return bot.tank && !bot.mainTank;
         }
         return false;
     }

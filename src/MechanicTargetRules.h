@@ -38,8 +38,10 @@ namespace BossMechanics::TargetRules
         bool aoeOk = false;             // the pick's entry allows AoE (the dps aoe picker stays)
         bool outranksBoss = false;      // a listed unit above priority 0 that is not the owner
         bool lowerListed = false;       // a live, not ignored candidate listed for this bot ranks below the pick
+        bool swapHold = false;          // a tank keeps the taunt swap boss it holds (TauntSwap::HeldFocus), whatever
+                                        // the list says (WP-TS)
 
-        bool Engaged() const { return target && (outranksBoss || lowerListed); }
+        bool Engaged() const { return target && (outranksBoss || lowerListed || swapHold); }
     };
 
     inline Focus DecideFocus(Descriptor const& d, std::vector<Desc::TargetCandidate> const& candidates, Key owner,

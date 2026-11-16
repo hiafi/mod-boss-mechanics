@@ -8,7 +8,7 @@
  *
  * A drill is a list of steps per cycle. A step is the argument line of one `.mech test` (shape, size, ms, keys), run
  * at `atMs` after the cycle start from the test owner's scheduler (or, with `after=`, after the previous step: see
- * StepOffsets; `cycle=even|odd` skips it in the other cycles), or the drill-only pseudo shape `marker <stacks>`
+ * StepOffsets; `cycle=even|odd|<k>/<m>` skips it in the other cycles), or the drill-only pseudo shape `marker <stacks>`
  * (sets Marked (drill) 205009 on group members, see Step; drill setup never hands out Weakened). The command appends
  * `dmg=<n>` to every damage step (DamageStep). Positions are yards in map coordinates; angles in radians; "ahead" is
  * along the GM's facing, "left" 90 degrees counterclockwise from it.
@@ -456,6 +456,231 @@ namespace BossMechanics::Drill
     constexpr std::uint32_t kJumpTagDutchFast = 4;      // Double Dutch: the three 1.5 s skips
     constexpr float kJumpRopeRadius = 40.f;             // the whole square around the selected unit
 
+    // ---- Blackrock Spire follow-ups (Blackrock Spire build §3.9, drill `blackrock-spire-followups`) ----------------
+    // The follow-ups of the Blackrock Spire build that gate a heroic sign-off (wave 1: B1 Omokk, B7 Gizrul and
+    // Halycon, B9's hard mode, B3 Voone). `.mech test` keys this adds (the runtime is MechanicCommand.cpp, Dice::ends):
+    //   at=last:<n>       the far end of the fixed line registered n lines before the last one (`at=last` is
+    //                     `at=last:0`); a shape placed after a later line still reads an earlier one (HG3's pounces
+    //                     register with their own charge and read `at=last`);
+    //   to=last[:<n>]     (line) aims a line from its source at that recorded end, frozen at registration like fix=1
+    //                     (reach=1 ends it there). A line aimed this way records no end of its own (it is a recorded
+    //                     point already), so the hauls of two chains read last:1 and last.
+    // Every command (and drill run) keeps the ends of its last kMaxLineEnds fixed lines (LineEnds); an index past the
+    // recorded ones lands where the selected unit stands (as `at=last` with no line yet).
+    constexpr std::uint32_t kMaxLineEnds = 8;
+
+    // The index of `at=` / `to=` "last" or "last:<n>" (n below kMaxLineEnds); nullopt for anything else.
+    inline std::optional<std::uint32_t> LastIndex(std::string_view v)
+    {
+        if (v == "last")
+            return 0;
+        if (v.size() < 6 || v.substr(0, 5) != "last:")
+            return std::nullopt;
+        std::uint32_t n = 0;
+        for (char const ch : v.substr(5))
+        {
+            if (ch < '0' || ch > '9')
+                return std::nullopt;
+            n = n * 10 + static_cast<std::uint32_t>(ch - '0');
+            if (n >= kMaxLineEnds)
+                return std::nullopt;
+        }
+        return n;
+    }
+
+    // The far ends of the last kMaxLineEnds fixed lines, oldest first (P: a position type).
+    template <class P>
+    class LineEnds
+    {
+    public:
+        void Push(P const& end)
+        {
+            if (_ends.size() == kMaxLineEnds)
+                _ends.erase(_ends.begin());
+            _ends.push_back(end);
+        }
+
+        // The end `back` lines before the last one (0: the last); nullopt when fewer were recorded.
+        std::optional<P> Back(std::uint32_t back) const
+        {
+            if (back >= _ends.size())
+                return std::nullopt;
+            return _ends[_ends.size() - 1 - back];
+        }
+
+        std::size_t Size() const { return _ends.size(); }
+
+    private:
+        std::vector<P> _ends;
+    };
+
+    // Ledger tags of `blackrock-spire-followups` (sweep keys `Zone/<tag>`, the Call's `Spot/13`). The first shapes (1,
+    // 3, 5; wave 2: 8, 9, 11, 13) are reported; the follow-ups (2, 6, 7: 1.5 s; 4: the pounce, landing 1.5 s after its
+    // charge; wave 2: 10 the later rings, 12 the second wall, 14 the challenger in the ring, 15-19 the blows) are under
+    // the sweep's bar (BrsBarTag).
+    constexpr std::uint32_t kBrsTagHaymaker = 1;        // OM2: a 5 x 30 line toward a non-tank's spot, 2.5 s
+    constexpr std::uint32_t kBrsTagOneTwo = 2;          // OM2 heroic: the second line at that player's new spot, 1.5 s
+    constexpr std::uint32_t kBrsTagCharge = 3;          // HG2 heroic: two 5 x 30 charges 1 s apart, 3 s
+    constexpr std::uint32_t kBrsTagPounce = 4;          // HG3 heroic: circle 8 at each charge's end, with its line
+    constexpr std::uint32_t kBrsTagChain = 5;           // WT11 / VO11: a 2 yd chain to each of two axes, 8 s
+    constexpr std::uint32_t kBrsTagHaul = 6;            // WT11 hard mode: a 3 yd haul along each chain, 1.5 s taut
+    constexpr std::uint32_t kBrsTagRecall = 7;          // VO12 heroic: War Cry's recall lanes, 4 yd, 1.5 s
+    // Wave 2 (WP-G2; "Blackrock Spire follow-ups, wave 2" below)
+    constexpr std::uint32_t kBrsTagNova = 8;            // EM2 heroic: the nova, 2.5 s
+    constexpr std::uint32_t kBrsTagRingFirst = 9;       // EM3 heroic: ring 1, its slice shown 5 s ahead
+    constexpr std::uint32_t kBrsTagRingNext = 10;       // EM3 heroic: rings 2-4, 1.5 s apart, turned 60 degrees
+    constexpr std::uint32_t kBrsTagWall = 11;           // RG6: the wall, 3 s
+    constexpr std::uint32_t kBrsTagWallSecond = 12;     // RG6 heroic: the second wall 3 s later, gap on the other side
+    constexpr std::uint32_t kBrsTagCall = 13;           // DR18's Call stand-in: everyone to a spot 7 yd from him
+    constexpr std::uint32_t kBrsTagRing = 14;           // DR17: the challenger in the lethal ring's band
+    constexpr std::uint32_t kBrsTagSweep = 15;          // DR18's blows (1.5 s each, the challenger only)
+    constexpr std::uint32_t kBrsTagCleave = 16;
+    constexpr std::uint32_t kBrsTagFireBlast = 17;
+    constexpr std::uint32_t kBrsTagRingOfFlame = 18;
+    constexpr std::uint32_t kBrsTagThunderclap = 19;
+    constexpr std::uint32_t kBrsBarTags[] = { 2, 4, 6, 7, 10, 12, 14, 15, 16, 17, 18, 19 };
+
+    inline bool BrsBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kBrsBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    constexpr std::uint32_t kBrsFollowupMs = 1500;      // every follow-up's warning (§3.9; §7 #26: 2 s on a fail)
+    // HG3's pounce is drawn with its charge line (B7 builds SP's reading) and lands kBrsFollowupMs after the charge:
+    // the charge's 3 s plus 1.5 s. Its bar still counts the pounce hits (B7's heroic gate).
+    constexpr std::uint32_t kPounceWarnMs = 3000 + kBrsFollowupMs;
+    constexpr float kHaymakerLength = 30.f;             // OM2 and HG2: 5 x 30 yd
+    constexpr float kHaymakerWidth = 5.f;
+    constexpr float kChargeMinYd = 15.f;                // HG2 "at the farthest non-tanks": min=, else the farthest
+    constexpr std::uint32_t kChargeGapMs = 1000;        // HG2 heroic: the two charges 1 s apart
+    constexpr float kPounceRadius = 8.f;                // HG3
+    constexpr float kChainWidth = 2.f;                  // WT11 / VO11
+    constexpr std::uint32_t kChainLifeMs = 8000;        // WT11: the haul's taut warning starts as the chain ends
+    constexpr std::uint32_t kChainTickMs = 2000;        // a crossing hits once per chain per 2 s
+    constexpr float kHaulWidth = 3.f;                   // WT11
+    constexpr float kRecallWidth = 4.f;                 // VO7 (VO12 recalls with a 1.5 s warning)
+    constexpr float kRecallExclude = 5.f;               // VO7 ExcludeSourceEnd(5): the lanes spare the boss's 5 yd
+
+    // ---- Blackrock Spire follow-ups, wave 2 (Blackrock Spire build §3.9 rows 18-30, WP-G2) --------------------------
+    // The Upper Spire rows of `blackrock-spire-followups`, each on its boss's numbers as built (B10, B12, B15). The
+    // cycle is 40 s: wave 1's rows at 0-21.5 s every cycle, then one wave 2 row from 22 s, rotating with
+    // `cycle=<k>/3` (cycles 0, 3: Emberseer; 1, 4: Rend; 2, 5: the Challenge), so the sweep's 120 s run (3 cycles)
+    // runs each once. `.mech test` keys this adds (MechanicCommand.cpp):
+    //   next=<deg>        (conefront) ConeFrontSpec::nextTurnDeg: the clockwise turn to the next ring's slice, the hint
+    //                     the kit sets on every ring that has a next one (WP-SF: the bots' ring orbit reads it);
+    //   edge=<yd>         (linefront) the gap's whole width this far inside the wall's ends (Front::PlaceGap edgeYd):
+    //                     Rend's 68 yd wall keeps its gap in the 40 yd main strip with edge=15;
+    //   inside=<yd>       Within(a circle of <yd> round the selected unit where it stands at registration): the bots'
+    //                     hard bounds (B15's RingInside; Rend's room width);
+    //   lethal=1          (circle, donut, cone, line) MechanicRef::Lethal(): bots never plan a way across (the ring);
+    //   only=member       eligible to one player only, drawn with pick= (pick=same: the member of the last pick): the
+    //                     challenger.
+    // And the plan key `cycle=<k>/<m>` (CycleOf): the step runs in cycles k, k + m, k + 2m ... (even = 0/2, odd = 1/2).
+    constexpr std::uint32_t kBrsWave2Ms = 22000;        // the wave 2 row's start in its cycle
+    constexpr std::uint32_t kBrsWave2Rows = 3;          // cycle=<k>/3: rows 18, 24, 30
+    // Row 18, Pyroguard Emberseer EM2 + EM3 heroic at 16 stacks (B10 EmberseerLogic.h through the kit's PlanRings,
+    // with the rolling front rulings): ring 1 (45 degree slice, random) shown 5 s ahead, from the nova's edge; the nova
+    // (7 + 0.3 x 16 = 11.8 yd) registered 2.5 s in with its 2.5 s warning, erupting as ring 1 launches; rings 2-4 each
+    // shown as the one before launches (1.5 s), from the apex (ruling 2) pinned at the nova's centre (at=prev: the
+    // kit fixes the apex for the pulse, and the parked tank must not drag it), turned 60 degrees clockwise, each
+    // carrying the turn to the next (next=60; none on the last); 4 yd band, 8 yd/s, to 45 yd; the bot tank parks him
+    // in each slice until the band passes nova + 12 yd. Every hit 30% x (1 + 4% x 16) = 49.2%, fire, Weakened.
+    constexpr std::uint32_t kEmberStacks = 16;
+    constexpr float kEmberNovaYd = 11.8f;               // 7 + 0.3 x 16
+    constexpr std::uint32_t kEmberRingWarnMs = 5000;    // ring 1 (ruling 1)
+    constexpr std::uint32_t kEmberNovaWarnMs = 2500;
+    constexpr std::uint32_t kEmberRings = 4;            // heroic, 14+ stacks
+    constexpr std::uint32_t kEmberSpacingMs = 1500;     // heroic
+    constexpr float kEmberSliceDeg = 45.f;              // heroic
+    constexpr float kEmberTurnDeg = 60.f;               // heroic
+    constexpr float kEmberEndYd = 45.f;
+    constexpr float kEmberSafeExtraYd = 12.f;
+    constexpr float kEmberPct = 49.2f;
+    // Row 24, Rend RG6 heroic (B12 RendGythLogic.h kSweep*): a 68 yd wall, 4 yd band, 8 yd/s over 86 yd, 3 s after
+    // the call; one 8 yd gap in the 40 yd main strip (the kit's span 40 with edge 1 = edge 15 on the 68 yd wall); the
+    // second wall 3 s later (both registered at the call), its gap on the other side within 20 yd of the first. 25%,
+    // frost, Weakened (Frozen 2 s left out: no drill rider). The room's 40 yd width as inside=20.
+    constexpr float kRendTravelYd = 86.f;
+    constexpr float kRendWidthYd = 68.f;
+    constexpr float kRendSpanYd = 40.f;
+    constexpr float kRendGapYd = 8.f;
+    constexpr float kRendEdgeYd = 15.f;                 // (68 - 40) / 2 + 1
+    constexpr float kRendApartYd = 20.f;
+    constexpr std::uint32_t kRendWarnMs = 3000;
+    constexpr std::uint32_t kRendSpacingMs = 3000;
+    constexpr float kRendRoomYd = 20.f;
+    // Row 30, General Drakkisath DR17 + DR18 (B15 DrakkisathHardModeLogic.h): the Call (everyone to a 2 yd spot on a
+    // 7 yd ring round him, 4 s: the stand-in for SP's 4 yd call circle 8 yd ahead, so the challenger stands within
+    // the 9.5 yd that keeps the ring centred on him), then the Challenge on a non-tank: the lethal ring (12 yd with a 2
+    // yd band: a donut 11-13, armed 1.5 s after the close, 10.5 s armed, eligible to the challenger only; its kill is
+    // 50% here) and six blows 2 s apart, each telegraphed 1.5 s, eligible to the challenger only, inside=10
+    // (RingInside: the band's inner edge less 1 yd). The order is fixed (B15 shuffles): Thunderclap, Ring of Flame,
+    // Sweep, Fire Blast, Overhead Cleave, then Ring of Flame again (the sixth is one of the first four). It leaves out
+    // B15's one step no bot can take: the Sweep right after the Thunderclap (the challenger 8.75-10 yd out, and the
+    // only way out of a 10 yd half disc inside 10 yd bounds is behind him: brs_upper_followups_test, STAGE-G2-REPORT).
+    constexpr std::uint32_t kCallMs = 4000;
+    constexpr float kCallRingYd = 7.f;
+    constexpr float kRingRadiusYd = 12.f;
+    constexpr float kRingWidthYd = 2.f;
+    constexpr std::uint32_t kRingArmMs = 1500;
+    constexpr std::uint32_t kRingLifeMs = 10500;
+    constexpr float kRingInsideYd = 10.f;               // 12 - 2 / 2 - 1
+    constexpr std::uint32_t kBlows = 6;
+    constexpr std::uint32_t kBlowEveryMs = 2000;
+    constexpr std::uint32_t kBlowWarnMs = 1500;
+    constexpr float kSweepDeg = 180.f;
+    constexpr float kSweepYd = 10.f;
+    constexpr float kCleaveDeg = 60.f;
+    constexpr float kCleaveYd = 15.f;
+    constexpr float kFireBlastYd = 4.f;
+    constexpr float kFireBlastAroundYd = 5.f;
+    constexpr float kRingOfFlameInner = 4.f;
+    constexpr float kRingOfFlameOuter = 12.f;
+    constexpr float kThunderclapYd = 8.f;
+
+    // ---- Rolling fronts (Blackrock Spire build WP-RF, drill `rolling-fronts`) ---------------------------------------
+    // The two rolling front kinds (MechanicFront.h) on the shapes and numbers of their first users, heroic numbers
+    // (pct= in the percent mode), round the selected creature (the boss; park=1 has the bot tank lead it into each
+    // ring's slice, Mechanic::FrontSafe). `.mech test` keys (MechanicCommand.cpp):
+    //   conefront <end> <ms> slice=<deg> [bearing=<deg>|turn=<deg>] start=<yd> band=4 speed=8 [park=1 until=<yd>]
+    //       a rolling cone front from the anchor point (at=prev: the last point circle's centre, the nova), its band
+    //       from start= out to <end>; the slice random, at bearing= from the GM's facing, or turned turn= degrees
+    //       clockwise from the previous conefront of the run (EM3's next ring);
+    //   linefront <travel> <ms> width=<yd> gap=<yd> [side=left|right|other|any] [apart=<yd>] band=4 speed=8 facing=0
+    //       a wall across the anchor point (the middle of the swept area) along the GM's facing turned by facing=,
+    //       with one gap; side=other puts it across the centreline from the previous linefront's, apart= at most that
+    //       far from it (RG6 heroic).
+    // The Emberseer pulses follow the rolling front rulings (HANDOFF §10, as the kit's PlanRings and G2's row 18):
+    // ring 1 (random slice, from the nova's edge) shown 5 s ahead; the nova registered 2.5 s in with its 2.5 s warning,
+    // erupting as ring 1 launches; each later ring shown as the one before launches, from the apex (start=0) at the
+    // nova's centre (at=prev), and every ring that has a next one carries its turn (next=). 0 s, normal at 7 stacks:
+    // the nova (7 + 0.3 x 7 = 9.1 yd) and two rings 2 s apart (60 degree slices, the second turned 45). 12 s, heroic
+    // at 14 stacks: the nova (11.2 yd) and four rings 1.5 s apart (45 degree slices turned 60). 27.5 s, Rend RG6: a
+    // 30 yd wide wall over 50 yd with an 8 yd gap, then (heroic) a second 3 s later, its gap on the other side and
+    // within 20 yd of the first (ruling 3; README "Rolling fronts"). Ledger tags (sweep keys `Zone/<tag>`): 1 and 4
+    // the novas, 2 and 5 the first rings, 3 and 6 the later rings (the follow-ups under the bar, FrontBarTag), 7 the
+    // first wall, 8 the second.
+    constexpr std::uint32_t kFrontTagNova = 1;
+    constexpr std::uint32_t kFrontTagRing = 2;
+    constexpr std::uint32_t kFrontTagRingNext = 3;
+    constexpr std::uint32_t kFrontTagNovaHeroic = 4;
+    constexpr std::uint32_t kFrontTagRingHeroic = 5;
+    constexpr std::uint32_t kFrontTagRingNextHeroic = 6;
+    constexpr std::uint32_t kFrontTagWall = 7;
+    constexpr std::uint32_t kFrontTagWallSecond = 8;
+    constexpr std::uint32_t kFrontBarTags[] = { 3, 6, 8 };
+
+    inline bool FrontBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kFrontBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -710,6 +935,115 @@ namespace BossMechanics::Drill
                     { 15500, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
                     { 17000, "jump 40 1500 anchor=target pct=25 weak=1 tag=4" },
                 }, 6 },     // six cycles a run (120 s): the sweep runs stratholme-jump:6
+            // Blackrock Spire build §3.9 (WP-G1, wave 1 rows 0-12), heroic numbers (pct= in the percent mode). 0 s,
+            // Omokk OM2 heroic one-two: a 5 x 30 yd line from the creature toward a non-tank's spot, frozen there (2.5
+            // s), then a second toward where that player stands as the first lands (1.5 s). 6 s, Gizrul and Halycon HG2
+            // + HG3 heroic: two charges 1 s apart, 5 x 30 yd lines from the creature through the farthest non-tanks
+            // (min=15, else the farthest; reach=1 so a farther one is still reached), 3 s, and an 8 yd pounce at each
+            // line's far end, shown with its line (as B7 builds HG3) and landing 1.5 s after its charge: 4.5 s (at=last
+            // right after its own charge, ties run in list order). 12 s, the axe chains (WT11 hard mode, VO11 heroic):
+            // a 2 yd chain from the creature to the spot of each of two non-tanks (their stuck axes), 8 s (2 s, then 6
+            // s with a 10% crossing every 2 s); as they end, a 1.5 s warning and a line along each chain: even cycles
+            // the haul (WT11: 3 yd, 35%), odd cycles War Cry's recall (VO12 -> VO7: 4 yd, the creature's 5 yd excluded,
+            // 40%). OM2's knockback, HG2's Rabies and VO12's Berserking are left out (the bar counts hits).
+            // WP-G2 (wave 2 rows 18-30, one per cycle from 22 s: "Blackrock Spire follow-ups, wave 2" above). Cycles
+            // 0/3, Emberseer EM2 + EM3 heroic at 16 stacks: ring 1 shown 5 s ahead from the nova's edge, the nova 2.5 s
+            // in, rings 2-4 1.5 s apart from the apex at the nova (at=prev), each turned 60 degrees and carrying the
+            // next turn; the hall as inside=29. Cycles 1/3, Rend RG6 heroic: two 68 yd walls 3 s apart over 86 yd, the
+            // gaps in the 40 yd strip on opposite sides within 20 yd; the room as inside=20. Cycles 2/3, Drakkisath
+            // DR17 + DR18: the Call (a spot on a 7 yd ring for everyone), then a non-tank's Challenge: the lethal ring
+            // 11-13 yd and six blows 2 s apart (1.5 s each), all eligible to the challenger only and the blows
+            // inside=10.
+            { "blackrock-spire-followups", "one-two punch, two charges and their pounces, axe chains then the haul "
+                "or the recall; then by turns Emberseer's rings, Rend's two walls, Drakkisath's Challenge", 40000,
+                false, {
+                    { 0, "line 30 2500 width=5 anchor=target to=member pick=nontank fix=1 pct=50 tag=1" },
+                    { 0, "line 30 1500 width=5 anchor=target to=member pick=same fix=1 after=resolve pct=50 tag=2" },
+                    { 6000, "line 30 3000 width=5 anchor=target to=member pick=nontank min=15 reach=1 pct=40 weak=1 "
+                        "tag=3" },
+                    { 6000, "circle 8 4500 at=last pct=30 weak=1 tag=4" },
+                    { 7000, "line 30 3000 width=5 anchor=target to=member pick=other min=15 reach=1 pct=40 weak=1 "
+                        "tag=3" },
+                    { 7000, "circle 8 4500 at=last pct=30 weak=1 tag=4" },
+                    { 12000, "line 5 2000 width=2 anchor=target to=member pick=nontank reach=1 persist=6000 "
+                        "tick=2000 pct=10 weak=1 tag=5" },
+                    { 12000, "line 5 2000 width=2 anchor=target to=member pick=other reach=1 persist=6000 tick=2000 "
+                        "pct=10 weak=1 tag=5" },
+                    { 20000, "line 5 1500 width=3 anchor=target to=last:1 reach=1 cycle=even pct=35 weak=1 tag=6" },
+                    { 20000, "line 5 1500 width=3 anchor=target to=last reach=1 cycle=even pct=35 weak=1 tag=6" },
+                    { 20000, "line 5 1500 width=4 exclude=5 anchor=target to=last:1 reach=1 cycle=odd pct=40 weak=1 "
+                        "tag=7" },
+                    { 20000, "line 5 1500 width=4 exclude=5 anchor=target to=last reach=1 cycle=odd pct=40 weak=1 "
+                        "tag=7" },
+                    // row 18: Emberseer (cycle=0/3)
+                    { 22000, "conefront 45 5000 slice=45 start=11.8 next=60 park=1 until=23.8 inside=29 school=fire "
+                        "pct=49.2 weak=1 cycle=0/3 tag=9" },
+                    { 24500, "circle 11.8 2500 inside=29 school=fire pct=49.2 weak=1 cycle=0/3 tag=8" },
+                    { 27000, "conefront 45 1500 at=prev slice=45 turn=60 start=0 next=60 park=1 until=23.8 "
+                        "inside=29 school=fire pct=49.2 weak=1 cycle=0/3 tag=10" },
+                    { 28500, "conefront 45 1500 at=prev slice=45 turn=60 start=0 next=60 park=1 until=23.8 "
+                        "inside=29 school=fire pct=49.2 weak=1 cycle=0/3 tag=10" },
+                    { 30000, "conefront 45 1500 at=prev slice=45 turn=60 start=0 park=1 until=23.8 inside=29 "
+                        "school=fire pct=49.2 weak=1 cycle=0/3 tag=10" },
+                    // row 24: Rend (cycle=1/3)
+                    { 22000, "linefront 86 3000 width=68 gap=8 edge=15 inside=20 school=frost pct=25 weak=1 "
+                        "cycle=1/3 tag=11" },
+                    { 22000, "linefront 86 6000 width=68 gap=8 edge=15 side=other apart=20 inside=20 school=frost "
+                        "pct=25 weak=1 cycle=1/3 tag=12" },
+                    // row 30: Drakkisath's Challenge (cycle=2/3)
+                    { 22000, "spot 2 4000 ring=7 cycle=2/3 tag=13" },
+                    { 26000, "donut 13 1500 inner=11 anchor=target only=member pick=nontank lethal=1 persist=10500 "
+                        "tick=250 pct=50 weak=1 cycle=2/3 tag=14" },
+                    { 26000, "circle 8 1500 anchor=target only=member pick=same inside=10 pct=40 weak=1 cycle=2/3 "
+                        "tag=19" },
+                    { 28000, "donut 12 1500 inner=4 anchor=target only=member pick=same inside=10 school=fire "
+                        "pct=40 weak=1 cycle=2/3 tag=18" },
+                    { 30000, "cone 10 1500 angle=180 anchor=target to=member pick=same fix=1 only=member inside=10 "
+                        "pct=40 weak=1 cycle=2/3 tag=15" },
+                    { 32000, "circle 4 1500 at=member pick=same only=member inside=10 school=fire pct=30 weak=1 "
+                        "cycle=2/3 tag=17" },
+                    { 32000, "circle 4 1500 at=member pick=same shift=0:5 only=member inside=10 school=fire pct=30 "
+                        "weak=1 cycle=2/3 tag=17" },
+                    { 32000, "circle 4 1500 at=member pick=same shift=0:-5 only=member inside=10 school=fire pct=30 "
+                        "weak=1 cycle=2/3 tag=17" },
+                    { 34000, "cone 15 1500 angle=60 anchor=target to=member pick=same fix=1 only=member inside=10 "
+                        "pct=50 cycle=2/3 tag=16" },
+                    { 36000, "donut 12 1500 inner=4 anchor=target only=member pick=same inside=10 school=fire "
+                        "pct=40 weak=1 cycle=2/3 tag=18" },
+                }, 3 },     // three cycles a run (120 s): the sweep runs blackrock-spire-followups:3
+
+            // Blackrock Spire WP-PS (the `pass` descriptor drill): the Rookery's egg clutches as 40 small persistent
+            // circles, 2 yd, scattered within 25 yd of the selected unit, laid 50 ms apart and kept 16 s; three 20 s
+            // cycles lay them again elsewhere. pct=0 (flat 1 in the dummy's flat mode): no harm, but each tick inside
+            // is a ledger hit on tag 60 (DrillPresets::kPassEggTag), so the sweep counts egg contacts. No marker.
+            { "pass-eggs", "40 egg circles (2 yd, within 25 yd), 16 s, laid again every 20 s: the pass drill's eggs",
+                20000, false, {
+                    { 0, "circle 2 500 pct=0 persist=16000 tick=1000 repeat=40 every=50 scatter=25 tele=0 tag=60" },
+                } },
+
+            // Blackrock Spire build WP-RF: the rolling fronts (see kFrontTagNova above).
+            { "rolling-fronts", "Emberseer's nova and rings, normal then heroic, then Rend's wall and its heroic "
+                "second wall", 40000, false, {
+                    // normal, 7 stacks
+                    { 0, "conefront 45 5000 slice=60 start=9.1 next=45 park=1 until=21.1 school=fire pct=30 weak=1 "
+                        "tag=2" },
+                    { 2500, "circle 9.1 2500 school=fire pct=30 weak=1 tag=1" },
+                    { 5000, "conefront 45 2000 at=prev slice=60 turn=45 start=0 park=1 until=21.1 school=fire pct=30 "
+                        "weak=1 tag=3" },
+                    // heroic, 14 stacks
+                    { 12000, "conefront 45 5000 slice=45 start=11.2 next=60 park=1 until=23.2 school=fire pct=30 "
+                        "weak=1 tag=5" },
+                    { 14500, "circle 11.2 2500 school=fire pct=30 weak=1 tag=4" },
+                    { 17000, "conefront 45 1500 at=prev slice=45 turn=60 start=0 next=60 park=1 until=23.2 "
+                        "school=fire pct=30 weak=1 tag=6" },
+                    { 18500, "conefront 45 1500 at=prev slice=45 turn=60 start=0 next=60 park=1 until=23.2 "
+                        "school=fire pct=30 weak=1 tag=6" },
+                    { 20000, "conefront 45 1500 at=prev slice=45 turn=60 start=0 park=1 until=23.2 school=fire "
+                        "pct=30 weak=1 tag=6" },
+                    // Rend
+                    { 27500, "linefront 50 3000 width=30 gap=8 school=frost pct=25 weak=1 tag=7" },
+                    { 27500, "linefront 50 6000 width=30 gap=8 side=other apart=20 school=frost pct=25 weak=1 tag=8" },
+                }, 3 },     // three cycles a run (120 s): the sweep runs rolling-fronts:3
         };
         return drills;
     }
@@ -781,6 +1115,24 @@ namespace BossMechanics::Drill
         return v;
     }
 
+    // How long a rolling front step rolls after its warning (ms): (end - start) / speed for a conefront, travel /
+    // speed for a linefront (MechanicFront.h ConeParams, LineParams); 0 for any other step.
+    inline float FrontRollMs(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 2 || (t[0] != "conefront" && t[0] != "linefront"))
+            return 0.f;
+        float const size = Number(t[1]).value_or(0.f);
+        auto key = [&line](std::string_view k, float def)
+        {
+            std::optional<std::string_view> v = Value(line, k);
+            return v ? Number(*v).value_or(def) : def;
+        };
+        float const speed = key("speed", 8.f);
+        float const start = t[0] == "conefront" ? key("start", 0.f) : 0.f;
+        return speed > 0.f ? (size - start) / speed * 1000.f : 0.f;
+    }
+
     // Does the runner add `dmg=` to this step? Every damage shape, and a bell soak (`soak ... bell=<n>`: its landing
     // circle carries the damage keys).
     inline bool DamageStep(std::string_view line)
@@ -800,8 +1152,9 @@ namespace BossMechanics::Drill
     // Two keys of a drill step that the plan reads and the runner strips before the `.mech test` parser
     // (StripPlanKeys): `after=resolve` starts the step `atMs` after the previous step of its cycle resolves (that
     // step's start plus its warning), `after=with` `atMs` after that step starts; without `after=`, `atMs` counts from
-    // the cycle start. `cycle=even|odd` runs the step only in even (0, 2, ...) or odd cycles; a skipped step is not
-    // "the previous step" of the next one.
+    // the cycle start. `cycle=even|odd` runs the step only in even (0, 2, ...) or odd cycles, `cycle=<k>/<m>` (WP-G2)
+    // only in cycles k, k + m, k + 2m ... (m from 2 to kMaxCycleEvery, k below m); a skipped step is not "the previous
+    // step" of the next one.
 
     enum class After : std::uint8_t
     {
@@ -810,12 +1163,14 @@ namespace BossMechanics::Drill
         With
     };
 
-    enum class Parity : std::uint8_t
+    // Which cycles a step runs in: those with cycle % every == at (every 1: all of them).
+    struct CycleRule
     {
-        Every,
-        Even,
-        Odd
+        std::uint32_t every = 1;
+        std::uint32_t at = 0;
     };
+
+    constexpr std::uint32_t kMaxCycleEvery = 12;
 
     // The warning of a step line (its third token, ms); 0 for `marker` and anything unreadable.
     inline std::uint32_t WarnMs(std::string_view line)
@@ -840,28 +1195,51 @@ namespace BossMechanics::Drill
         return std::nullopt;
     }
 
-    inline std::optional<Parity> ParityOf(std::string_view line)
+    // A whole number of 1-2 digits (no sign, no fraction); nullopt otherwise.
+    inline std::optional<std::uint32_t> SmallCount(std::string_view s)
+    {
+        if (s.empty() || s.size() > 2)
+            return std::nullopt;
+        std::uint32_t n = 0;
+        for (char const ch : s)
+        {
+            if (ch < '0' || ch > '9')
+                return std::nullopt;
+            n = n * 10 + static_cast<std::uint32_t>(ch - '0');
+        }
+        return n;
+    }
+
+    // The step's `cycle=` (absent: every cycle); nullopt when the value is not even, odd or a valid <k>/<m>.
+    inline std::optional<CycleRule> CycleOf(std::string_view line)
     {
         std::optional<std::string_view> const v = Value(line, "cycle");
         if (!v)
-            return Parity::Every;
+            return CycleRule{};
         if (*v == "even")
-            return Parity::Even;
+            return CycleRule{ 2, 0 };
         if (*v == "odd")
-            return Parity::Odd;
-        return std::nullopt;
+            return CycleRule{ 2, 1 };
+        std::size_t const slash = v->find('/');
+        if (slash == std::string_view::npos)
+            return std::nullopt;
+        std::optional<std::uint32_t> const at = SmallCount(v->substr(0, slash));
+        std::optional<std::uint32_t> const every = SmallCount(v->substr(slash + 1));
+        if (!at || !every || *every < 2 || *every > kMaxCycleEvery || *at >= *every)
+            return std::nullopt;
+        return CycleRule{ *every, *at };
     }
 
     // Are the step's timing keys readable? (The runner refuses a drill whose step fails this.)
     inline bool PlanKeysOk(std::string_view line)
     {
-        return AfterOf(line).has_value() && ParityOf(line).has_value();
+        return AfterOf(line).has_value() && CycleOf(line).has_value();
     }
 
     inline bool RunsInCycle(std::string_view line, std::uint32_t cycle)
     {
-        Parity const p = ParityOf(line).value_or(Parity::Every);
-        return p == Parity::Every || (p == Parity::Even) == (cycle % 2 == 0);
+        CycleRule const r = CycleOf(line).value_or(CycleRule{});
+        return cycle % r.every == r.at;
     }
 
     // When each step starts in cycle `cycle`, in ms after the cycle start (nullopt: skipped in this cycle). An

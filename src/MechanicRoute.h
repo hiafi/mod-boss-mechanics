@@ -433,7 +433,7 @@ namespace BossMechanics::Solver
                                 hotTo[idx] = std::max(hotTo[idx], fixedTo);
                                 continue;
                             }
-                            float const s = dx * r.frame.ux + dy * r.frame.uy;
+                            float const s = ProjectileS(h.shape, dx, dy, r.frame.ux, r.frame.uy);    // WP-RF: cones
                             for (HotWindow const& w : ProjectileHotWindows(params, s))
                             {
                                 std::int64_t const from = (w.from + h.timing.from).count();

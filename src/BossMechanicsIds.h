@@ -16,6 +16,7 @@
  * | 205019-205020 | M5 deadline debuff (Magic, 8 s) and its expiry burst              |
  * | 205021-205022 | M5 purgeable Magic buff, Enrage buff (soothe)                     |
  * | 205023        | M5 "Aiming" aura (raises an add's priority)                       |
+ * | 205024        | Taunt Swap (drill): tank swap debuff, 10 stacks, 15 s (WP-TS)     |
  * | 205000-205099 | the reserved spell block (`rider=` takes 205008 and 205009 only)  |
  * | 300400        | Mechanic Marker: telegraph stalker and resolve caster             |
  * | 300401        | Mechanic Test Owner: hostile owner for `.mech test`               |
@@ -42,7 +43,11 @@
  * | +17..+24 | cone (F), angle_j in kConeAngles                           |
  * | +25..+32 | cone (O)                                                   |
  * | +33      | dashed ring (rim dashes only): an armed mine               |
- * | +34..+99 | spare (+33..+98 were the lines before M1-FIX-LINE-FILL)    |
+ * | +34..+36 | wide cone (F), angle_j in kWideConeAngles (300 315 330)    |
+ * | +37..+39 | wide cone (O)                                              |
+ * | +40..+93 | arc band (a rolling cone front's band), kArcBandAngles x   |
+ * |          | kArcBandRatios, step = angle_j * 9 + ratio_k               |
+ * | +94..+99 | spare (+33..+98 were the lines before M1-FIX-LINE-FILL)    |
  *
  * Line ladder (M1-FIX-LINE-FILL): k_i = 2^((i - 8) / 4) for i 0..7 (1/4 up to 0.84) and 2^((i - 8) / 8) for i 8..56
  * (1 to 64), the same for both layers (LineAspect in MechanicMath.h); +57..+99 of each line block are spare. A line
@@ -52,7 +57,12 @@
  * the texture's edge at v = 1/2, soft by half a texel of the active mip. Every aspect shares one texture. (The
  * two-quad model of M1-FIX-LINE-FILL drew only part of the line in game and was reverted in round 4b.)
  *
- * 91000-91833 used, 91834-91999 spare (91990-91995: the asset script's opt-in diagnostic displays), 92000-92856 and
+ * Blackrock Spire WP-RF (rolling fronts) added the wide cones and the arc band at +34..+93 of every color block: a cone
+ * wider than 270 degrees draws a wide cone up to 330 (a full disc past it), and a rolling cone front's band (an
+ * annular sector, its inner/outer ratio rounded down so the drawn band is never thinner than the hitbox's) moves out
+ * by scale (MechanicFront.h).
+ *
+ * 91000-91893 used, 91894-91999 spare (91990-91995: the asset script's opt-in diagnostic displays), 92000-92856 and
  * 93000-93856 used, the rest of 92000-93999 spare. The markers used 90500-90699 before the colors fix
  * (M1-FIX-COLORS-REPORT.md); those ids are free again.
  */
@@ -107,7 +117,12 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t SPELL_DRILL_ENRAGE = 205022;        // Enrage buff (soothe)
     constexpr std::uint32_t SPELL_DRILL_AIMING = 205023;        // raises an add's target priority
     constexpr std::uint32_t SPELL_M5_FIRST = SPELL_DRILL_CAST_LOW;
-    constexpr std::uint32_t SPELL_M5_LAST = SPELL_DRILL_AIMING;     // 205024-205029 reserved, undeclared
+    constexpr std::uint32_t SPELL_M5_LAST = SPELL_DRILL_AIMING;     // 205025-205029 reserved, undeclared
+    // Taunt Swap (drill) (Blackrock Spire build WP-TS; declared in core apps/dbc-tools source/npcs/boss_mechanics.py):
+    // the `taunt-swap` drill's tank swap debuff, harmless, 15 s refreshed on every stack, up to 10 stacks. A boss
+    // debuff's shape, so the stacks fall off the tank that gave the boss away and the tanks trade again and again.
+    constexpr std::uint32_t SPELL_DRILL_TAUNT_SWAP = 205024;
+    constexpr std::uint8_t TAUNT_SWAP_DRILL_MAX_STACKS = 10;
 
     // `.mech test rider=`: the harmless drill auras only (Baited and Marked). Weakened would be handed out on a job hit
     // (around the user ruling) and outlive the encounter; a resolve spell would deal a second hit; the M5 stand-ins
@@ -161,7 +176,11 @@ namespace BossMechanics::Ids
         ConeOutline,    // O
         DashedRing,     // an armed mine: rim dashes, no interior
         Line,           // F, step = line ladder index
-        LineOutline     // O
+        LineOutline,    // O
+        // Blackrock Spire WP-RF: after the M1 shapes, so every earlier id keeps its value.
+        WideCone,       // F, step = kWideConeAngles index
+        WideConeOutline,    // O
+        ArcBand         // a rolling cone front's band, step = ArcBandStep(angle index, ratio index)
     };
 
     constexpr std::uint8_t COLOR_COUNT = 9;
@@ -196,6 +215,39 @@ namespace BossMechanics::Ids
         return shape == MarkerShape::Line || shape == MarkerShape::LineOutline;
     }
 
+    // Blackrock Spire WP-RF (rolling fronts): the cones wider than 270 degrees, and the arc band, a cone front's band
+    // (an annular sector of one of kArcBandAngles with its hole at inner/outer = one of kArcBandRatios; scale = the
+    // outer radius). Ids at +34..+93 of each color block (patch_bossmechanics_markers.py QUAD_SHAPES).
+    constexpr std::array<float, 3> kWideConeAngles = { 300.f, 315.f, 330.f };
+    constexpr std::array<float, 6> kArcBandAngles = { 180.f, 270.f, 300.f, 315.f, 330.f, 360.f };
+    constexpr std::array<float, 9> kArcBandRatios = { 0.5f, 0.6f, 0.7f, 0.75f, 0.8f, 0.85f, 0.875f, 0.9f, 0.925f };
+    constexpr std::uint32_t kWideConeOffset = 34;
+    constexpr std::uint32_t kWideConeOutlineOffset = kWideConeOffset + kWideConeAngles.size();
+    constexpr std::uint32_t kArcBandOffset = kWideConeOutlineOffset + kWideConeAngles.size();
+    constexpr std::uint32_t kArcBandSteps = kArcBandAngles.size() * kArcBandRatios.size();
+    constexpr std::uint32_t DISPLAY_PER_COLOR_WIDE = kArcBandOffset + kArcBandSteps;   // 94
+
+    constexpr std::uint32_t ArcBandStep(std::size_t angleIndex, std::size_t ratioIndex)
+    {
+        return static_cast<std::uint32_t>(angleIndex * kArcBandRatios.size() + ratioIndex);
+    }
+
+    constexpr bool IsWideShape(MarkerShape shape)
+    {
+        return shape == MarkerShape::WideCone || shape == MarkerShape::WideConeOutline || shape == MarkerShape::ArcBand;
+    }
+
+    constexpr std::uint32_t WideShapeSteps(MarkerShape shape)
+    {
+        return shape == MarkerShape::ArcBand ? kArcBandSteps : static_cast<std::uint32_t>(kWideConeAngles.size());
+    }
+
+    constexpr std::uint32_t WideShapeOffset(MarkerShape shape)
+    {
+        return shape == MarkerShape::WideCone ? kWideConeOffset
+            : (shape == MarkerShape::WideConeOutline ? kWideConeOutlineOffset : kArcBandOffset);
+    }
+
     // First offset of each non-line shape inside a 91000 color block: the running sum of the steps before it (the
     // line entries hold the block's end).
     constexpr std::array<std::uint32_t, 9> kMarkerShapeOffsets = []
@@ -217,6 +269,11 @@ namespace BossMechanics::Ids
     static_assert(DISPLAY_LINE_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + kLineSteps - 1 == 92856
         && 92856 < DISPLAY_LINE_OUTLINE_FIRST);
     static_assert(DISPLAY_LAST == 93856 && DISPLAY_LAST <= DISPLAY_SLICE_LAST);
+    // WP-RF: the wide shapes follow the dashed ring in each color block and stop short of the diagnostics (91990).
+    static_assert(kWideConeOffset == DISPLAY_PER_COLOR && DISPLAY_PER_COLOR_WIDE == 94
+        && DISPLAY_PER_COLOR_WIDE <= DISPLAY_COLOR_STRIDE);
+    static_assert(DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * (COLOR_COUNT - 1) + DISPLAY_PER_COLOR_WIDE - 1 == 91893
+        && 91893 < 91990);
 
     // The armed-mine dashed ring of the red block (+33), pinned for the asset script's tests.
     static_assert(DISPLAY_FIRST + 33 == 91033 && kMarkerShapeSteps.size() == 10);
@@ -227,6 +284,12 @@ namespace BossMechanics::Ids
     {
         std::size_t const s = static_cast<std::size_t>(shape);
         std::uint32_t const c = color < COLOR_COUNT ? color : COLOR_COUNT - 1;
+        if (IsWideShape(shape))
+        {
+            std::uint32_t const steps = WideShapeSteps(shape);
+            return DISPLAY_FIRST + DISPLAY_COLOR_STRIDE * c + WideShapeOffset(shape)
+                + (step < steps ? step : steps - 1);
+        }
         std::uint32_t const k = step < kMarkerShapeSteps[s] ? step : kMarkerShapeSteps[s] - 1;
         if (IsLineShape(shape))
             return (shape == MarkerShape::Line ? DISPLAY_LINE_FIRST : DISPLAY_LINE_OUTLINE_FIRST)
@@ -264,6 +327,16 @@ namespace BossMechanics::Ids
             return out;
         std::uint32_t const rel = display - first;
         std::uint32_t const offset = rel % DISPLAY_COLOR_STRIDE;
+        if (first == DISPLAY_FIRST && offset >= kWideConeOffset && offset < DISPLAY_PER_COLOR_WIDE)
+        {
+            // WP-RF: the wide cones and the arc band.
+            out.valid = true;
+            out.color = static_cast<std::uint8_t>(rel / DISPLAY_COLOR_STRIDE);
+            out.shape = offset >= kArcBandOffset ? MarkerShape::ArcBand
+                : (offset >= kWideConeOutlineOffset ? MarkerShape::WideConeOutline : MarkerShape::WideCone);
+            out.step = offset - WideShapeOffset(out.shape);
+            return out;
+        }
         if (offset >= perColor)
             return out;
         out.valid = true;

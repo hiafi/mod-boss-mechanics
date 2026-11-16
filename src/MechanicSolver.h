@@ -79,6 +79,14 @@ namespace BossMechanics::Solver
         // margin, no grace crossing, and the Fallback, NoPath and FallbackHolds never take a way that enters it while
         // hot (Detail::CrossesLethal). The view makes it hot from its registration on (ViewRules::LethalTiming).
         bool lethal = false;
+        // Blackrock Spire WP-RF: a rolling front (Mechanic::ConeFront / LineFront): a cone front's slice candidates
+        // (Exits) and its pull toward the band's start (Detail::FrontPull) read it.
+        bool front = false;
+        // Blackrock Spire WP-SF: a cone front of a ring sequence whose next ring is coming (ConeFrontSpec::
+        // nextTurnDeg): that ring's slice turned this far from this one's (radians, counterclockwise positive; 0: not
+        // known). What a player learns of the sequence, for the bots before the next ring is shown (Detail::
+        // PredictSlot).
+        float nextTurn = 0.f;
     };
 
     struct LaneFrame
@@ -142,9 +150,11 @@ namespace BossMechanics::Solver
     // Tank parking (§3.7): the boss chases the tank from `boss` and stops `stopYd` short of it, once the tank is
     // beyond `triggerYd`; the stop must lie `depthYd` inside `zone` (inside = true) or that far outside every
     // `avoid` shape (inside = false, drag out).
+    // together (WP-RF, a rolling front's safe slice: MechanicRef::ParkTogether): inside, and the tank stands in the
+    // zone too (it leads the boss in) instead of outside it.
     struct Park
     {
-        bool present = false, inside = true;
+        bool present = false, inside = true, together = false;
         Geo::Vec3 boss;
         float stopYd = 0.f, triggerYd = 0.f, depthYd = 1.f;
         Region zone;
@@ -334,6 +344,10 @@ namespace BossMechanics::Solver
         // Fallback and NoPath only (M4 §3.7): time the path spends inside an exact hitbox (drift kept, no yard or time
         // margin) while one of its windows is open, from now. 0 = a "clear" fallback.
         Ms exposure{ 0 };
+        // Blackrock Spire WP-RF: a Fallback chosen with a front in the view: when the target's first window opens
+        // (the ranking's latest-first key). FallbackHolds judges the end up to this, not the horizon (the first slot
+        // of two fronts is not clean through the second; it is the plan). kForever: not set.
+        Ms clearUntil = kForever;
     };
 
     struct PathCheck
@@ -726,7 +740,7 @@ namespace BossMechanics::Solver
                     continue;
                 if (SignedDistance(h.shape, pose, p) > h.marginYd)
                     continue;
-                float const s = Geo::ToLineCoords(h.shape, pose, p).s;
+                float const s = ProjectileS(h.shape, pose, p);     // WP-RF: radial for a rolling cone front
                 for (HotWindow w : ProjectileHotWindows(params, s))
                 {
                     w.from += t.from;
@@ -1069,7 +1083,7 @@ namespace BossMechanics::Solver
             float const d = Dist2(p, pk.boss);
             if (d <= pk.triggerYd)
                 return ParkStopOk(pk, pk.boss);     // stay: the boss is already where it should be, in reach
-            if (pk.inside && MinSd(pk.zone.shape, pk.zone.poses, p) <= pk.zone.marginYd)
+            if (pk.inside && !pk.together && MinSd(pk.zone.shape, pk.zone.poses, p) <= pk.zone.marginYd)
                 return false;                       // the tank stays outside the zone
             float const k = pk.stopYd / std::max(d, 1e-3f);
             Geo::Vec3 const stop{ p.x + (pk.boss.x - p.x) * k, p.y + (pk.boss.y - p.y) * k, pk.boss.z };
@@ -1522,6 +1536,26 @@ namespace BossMechanics::Solver
                     float const half = Geo::DegToRad(s.angleDeg) * 0.5f;
                     PushPolar(out, c, bearing, s.length + m, p.z);         // beyond the arc
                     PushPolar(out, c, f + Geo::kPi, m, p.z);               // behind the apex
+                    if (h.timing.type == TimingType::Projectile && d > m)
+                    {
+                        // WP-RF, a rolling cone front: into the safe slice at the bot's own distance from the apex
+                        // (its middle and both edges, the margin inside), a little nearer (the turn is shorter there
+                        // and the band passes sooner), and just outside the band's start (the nova's edge: once the
+                        // band is past, the disc inside it is clean of every later ring of the pulse): the edges'
+                        // exits above only reach the slice near the apex when the bot stands across from it.
+                        ProjectileParams const& fp = h.timing.projectile;
+                        float const inner = std::max(0.f, fp.start - fp.halfLength) + m + kExitPushYd;
+                        for (float r : { d, std::max(m * 2.f, d - 3.f), inner, inner + 3.f })
+                        {
+                            float const in2 = (m + kExitPushYd) / std::max(r, 0.1f);
+                            PushPolar(out, c, f + Geo::kPi, r, p.z);
+                            if (Geo::kPi - half > in2)
+                            {
+                                PushPolar(out, c, f + half + in2, r, p.z);
+                                PushPolar(out, c, f - half - in2, r, p.z);
+                            }
+                        }
+                    }
                     for (float sign : { 1.f, -1.f })
                     {
                         float const e = f + sign * half;
@@ -1839,6 +1873,42 @@ namespace BossMechanics::Solver
         // Parking candidates (§3.7): inside = points just outside the zone on 16 bearings around its middle, and on
         // its far side from the boss (+0, +1, +2 yd); drag out = points on 16 bearings around each avoided shape far
         // enough that the boss's stop clears it by depthYd (+0, +1.5 yd).
+        // WP-RF (Park::together): spots inside the zone for the tank, deep enough that the boss stopping stopYd short
+        // of it toward where it stands now is inside too. A cone zone (a front's slice): on rays from the apex at a
+        // few bearings across the slice, at radii from the depth out to the zone's length; any other shape: a ring
+        // round its middle. ParkOk keeps those whose stop lands inside.
+        inline void TogetherCandidates(Input const& in, std::vector<Geo::Vec3>& out)
+        {
+            Park const& pk = in.park;
+            if (pk.zone.poses.empty())
+                return;
+            Shape const& s = pk.zone.shape;
+            Geo::Pose const& pose = pk.zone.poses[pk.zone.poses.size() / 2];
+            float const inset = pk.zone.marginYd + kExitPushYd;
+            if (s.type == ShapeType::Cone && s.angleDeg < 360.f)
+            {
+                float const f = Geo::ShapeFacing(s, pose);
+                float const half = Geo::DegToRad(s.angleDeg) * 0.5f;
+                for (float frac : { 0.f, -0.5f, 0.5f })
+                {
+                    float const b = f + frac * half;
+                    for (float r = std::max(pk.stopYd + pk.depthYd, 2.f); r <= s.length - inset; r += 2.f)
+                    {
+                        // Inside by the margin across the slice at this radius (a narrow slice near the apex is not).
+                        if (r * std::sin(half * (1.f - std::fabs(frac))) < inset)
+                            continue;
+                        PushPolar(out, { pose.x, pose.y, in.bot.z }, b, r, in.bot.z);
+                    }
+                }
+                return;
+            }
+            Geo::Vec3 const c = ShapeCenter(s, pose);
+            out.push_back({ c.x, c.y, in.bot.z });
+            for (std::uint32_t i = 0; i < kRingBearings; ++i)
+                for (float r : { 2.f, 4.f, 6.f })
+                    PushPolar(out, { c.x, c.y, in.bot.z }, Geo::kTwoPi * i / kRingBearings, r, in.bot.z);
+        }
+
         inline void ParkCandidates(Input const& in, std::vector<Geo::Vec3>& out)
         {
             Park const& pk = in.park;
@@ -1861,6 +1931,11 @@ namespace BossMechanics::Solver
                 if (farSide && Dist2(c, pk.boss) > 1e-3f)
                     push(std::atan2(c.y - pk.boss.y, c.x - pk.boss.x), { 0.f, 1.f, 2.f });
             };
+            if (pk.inside && pk.together)
+            {
+                TogetherCandidates(in, out);
+                return;
+            }
             if (pk.inside)
             {
                 ring(pk.zone.shape, pk.zone.poses, pk.zone.marginYd + kExitPushYd, { 0.f }, true);
@@ -2300,6 +2375,33 @@ namespace BossMechanics::Solver
             return true;
         }
 
+        // WP-RF (Blackrock Spire, Emberseer's rings): the rings of one pulse all start at the nova's edge, so the disc
+        // inside it is clean of every later ring once the first has launched, while a spot farther out in the first
+        // ring's slice is in the next ring's way with no time to reach its slice. Each live cone front pulls a spot
+        // inside its reach toward the band's start: kFrontPullPerYd per yard beyond kFrontPullSlackYd past it (half
+        // a yard of walking per yard; a soft term, the hazards still decide what is safe).
+        constexpr float kFrontPullPerYd = 0.5f;
+        constexpr float kFrontPullSlackYd = 2.f;
+
+        inline float FrontPull(Input const& in, Geo::Vec3 const& c, Ms arrival)
+        {
+            float pull = 0.f;
+            for (Hazard const& h : in.hazards)
+            {
+                if (!h.front || h.shape.type != ShapeType::Cone || h.timing.type != TimingType::Projectile
+                    || h.poses.empty() || HazardEnd(h) + in.params.marginMs < arrival)
+                    continue;
+                Geo::Pose const& apex = h.poses.front();
+                float const r = Geo::Dist2d(apex.x, apex.y, c.x, c.y);
+                if (r > h.shape.length + h.marginYd)
+                    continue;
+                ProjectileParams const& p = h.timing.projectile;
+                float const inner = std::max(0.f, p.start - p.halfLength);
+                pull = std::max(pull, kFrontPullPerYd * std::max(0.f, r - inner - h.marginYd - kFrontPullSlackYd));
+            }
+            return pull;
+        }
+
         inline float Score(Input const& in, Geo::Vec3 const& c, float dist, Ms arrival, Ms deadline, bool isBot)
         {
             Weights const& w = in.params.w;
@@ -2366,6 +2468,7 @@ namespace BossMechanics::Solver
             if (in.reach.weightPerYd > 0.f)
                 for (Geo::Vec3 const& q : in.reach.points)
                     score += in.reach.weightPerYd * std::max(0.f, Dist2(q, c) - in.reach.maxYd);
+            score += FrontPull(in, c, arrival);
             return score;
         }
 
@@ -2588,6 +2691,263 @@ namespace BossMechanics::Solver
             return out;
         }
 
+        // Blackrock Spire WP-SF: a rolling ring sequence (Emberseer's rings: cone fronts from one apex with one slice
+        // width, a fixed spacing apart, each slice turned by the same angle, each shown as the one before it
+        // launches). RingFront: a cone front with a slice.
+        inline bool RingFront(Hazard const& h)
+        {
+            return h.front && h.shape.type == ShapeType::Cone && h.shape.angleDeg < 360.f
+                && h.timing.type == TimingType::Projectile && !h.poses.empty();
+        }
+
+        // The slot of the ring after the newest one: its own hint (Hazard::nextTurn), else the turn of the last two
+        // rings of the sequence repeated (the newest earlier ring from the same apex with the same width, at most
+        // kNextSlotSpacingMs before it).
+        constexpr Ms kNextSlotSpacingMs{ 5000 };
+
+        struct NextSlot
+        {
+            bool present = false;
+            float bearing = 0.f;        // the slice's middle seen from the apex (radians)
+        };
+
+        inline NextSlot PredictSlot(Input const& in)
+        {
+            NextSlot out;
+            Hazard const* last = nullptr;
+            for (Hazard const& h : in.hazards)
+                if (RingFront(h) && (!last || h.timing.from > last->timing.from))
+                    last = &h;
+            if (!last)
+                return out;
+            Geo::Pose const& a = last->poses.front();
+            float const facing = Geo::ShapeFacing(last->shape, a);
+            if (last->nextTurn != 0.f)
+            {
+                out.present = true;
+                out.bearing = Geo::WrapPi(facing + last->nextTurn + Geo::kPi);
+                return out;
+            }
+            Hazard const* prev = nullptr;
+            for (Hazard const& h : in.hazards)
+            {
+                if (!RingFront(h) || h.timing.from >= last->timing.from
+                    || std::fabs(h.shape.angleDeg - last->shape.angleDeg) > 0.5f
+                    || Geo::Dist2d(a.x, a.y, h.poses.front().x, h.poses.front().y) > 0.5f)
+                    continue;
+                if (!prev || h.timing.from > prev->timing.from)
+                    prev = &h;
+            }
+            if (!prev || last->timing.from - prev->timing.from > kNextSlotSpacingMs)
+                return out;
+            out.present = true;
+            out.bearing = Geo::WrapPi(2.f * facing - Geo::ShapeFacing(prev->shape, prev->poses.front()) + Geo::kPi);
+            return out;
+        }
+
+        // The ring orbit. Out in the hall a bot cannot follow such a sequence (heroic Emberseer: 60 degrees every
+        // 1.5 s, 12.6 yd at 12 yd from the apex), and each slot is reachable only in the 1.0 s between one band
+        // passing and the next arriving. Near the apex both are easy: walk inside the coming slot to its side nearest
+        // the slot after (known, or predicted), cross behind the passing band, repeat. RingOrbit plans that step: the
+        // furthest ring of the sequence whose band has not passed the orbit radius (its gate) that the bot can reach,
+        // at a spot in its slot at the side toward the next slot (the smallest radius that works), else at the side
+        // toward the bot (the way in from out in the hall: the bot's own distance and just outside a ring's start
+        // too; the earliest arrival), with the earliest departure from which the straight way there is clean and the
+        // spot stays clean until the gate has passed, standing where the bot is until then (window algebra over the
+        // hot windows of every hazard in the view). Orbit margins: each hazard's drift plus at most
+        // Params::tightMarginYd, and kOrbitMarginMs (the full margins leave nothing of the 1.0 s); a lethal hazard
+        // keeps its full margin.
+        constexpr std::array<float, 4> kOrbitRadii{ 4.f, 5.5f, 7.f, 8.5f };
+        constexpr Ms kOrbitMarginMs{ 150 };
+        constexpr Ms kOrbitGoMs{ 100 };             // a departure this soon is now; a later one is a hold
+        constexpr float kOrbitMaxYd = 20.f;         // a bot this far from the apex or nearer is also tried at its own
+        constexpr float kOrbitDetourYd = 1.f;       // Solve: the oracle's way to the step may be this much longer
+
+        struct Orbit
+        {
+            bool ok = false;
+            Geo::Vec3 target;
+            Ms depart{ 0 }, arrive{ 0 }, gateEnd{ 0 };
+        };
+
+        inline Orbit RingOrbit(Input const& in)
+        {
+            Orbit best;
+            std::size_t newest = in.hazards.size();
+            for (std::size_t i = 0; i < in.hazards.size(); ++i)
+                if (RingFront(in.hazards[i])
+                    && (newest == in.hazards.size() || in.hazards[i].timing.from > in.hazards[newest].timing.from))
+                    newest = i;
+            if (newest == in.hazards.size())
+                return best;
+            Hazard const& last = in.hazards[newest];
+            Geo::Pose const apex = last.poses.front();
+            std::vector<std::size_t> rings;
+            for (std::size_t i = 0; i < in.hazards.size(); ++i)
+            {
+                Hazard const& h = in.hazards[i];
+                if (RingFront(h) && std::fabs(h.shape.angleDeg - last.shape.angleDeg) <= 0.5f
+                    && Geo::Dist2d(apex.x, apex.y, h.poses.front().x, h.poses.front().y) <= 0.5f)
+                    rings.push_back(i);
+            }
+            // Only a sequence the orbit is for: one ring of it starting inside the orbit (rings that all start farther
+            // out leave the disc inside them clean once they are past: the haven the generic solver finds), or a ring
+            // that says where the next one turns (ConeFrontSpec::nextTurnDeg).
+            bool reaches = false;
+            for (std::size_t i : rings)
+            {
+                ProjectileParams const& p = in.hazards[i].timing.projectile;
+                reaches = reaches || p.start - p.halfLength < kOrbitRadii.front();
+            }
+            if (last.nextTurn == 0.f && (rings.size() < 2 || !reaches))
+                return best;
+            std::sort(rings.begin(), rings.end(), [&in](std::size_t a, std::size_t b)
+            {
+                return in.hazards[a].timing.from < in.hazards[b].timing.from;
+            });
+            NextSlot const next = PredictSlot(in);
+            Input m;
+            m.bot = in.bot;
+            m.speed = in.speed;
+            m.now = in.now;
+            m.params = in.params;
+            m.params.marginMs = kOrbitMarginMs;
+            m.hazards = in.hazards;
+            for (Hazard& h : m.hazards)
+                if (!h.lethal)
+                    h.marginYd = std::max(h.driftYd, std::min(h.marginYd, h.driftYd + in.params.tightMarginYd));
+            auto windows = [&](Geo::Vec3 const& p, auto&& f)
+            {
+                for (Hazard const& h : m.hazards)
+                    ForEachWindow(h, p, f);
+            };
+            float const speed = Speed(in);
+            Ms const stepMs = TravelMs(kStepYd, speed);
+            Ms const widen = kOrbitMarginMs + stepMs;
+            Ms const delay = in.params.startDelay;
+            // Standing where it is until the departure: clean until its first window there.
+            Ms spotFirst = kForever;
+            windows(in.bot, [&](HotWindow const& w)
+            {
+                if (w.to + widen >= in.now)
+                    spotFirst = std::min(spotFirst, w.from);
+            });
+            Ms const lastDepart = spotFirst >= kForever ? kForever : spotFirst - widen - delay - stepMs;
+            if (lastDepart < in.now)
+                return best;
+            std::vector<std::pair<Ms, Ms>> bad;
+            // One step toward ring k (an index into `rings`) at radius rho: false when it does not fit.
+            float const botBearing = std::atan2(in.bot.y - apex.y, in.bot.x - apex.x);
+            auto step = [&](float rho, std::size_t k, bool far, Orbit& out)
+            {
+                Hazard const& g = m.hazards[rings[k]];
+                float const f = Geo::ShapeFacing(g.shape, g.poses.front());
+                Geo::Vec3 const probe{ apex.x + std::cos(f) * rho, apex.y + std::sin(f) * rho, in.bot.z };
+                bool got = false;
+                HotWindow gw;
+                ForEachWindow(g, probe, [&](HotWindow const& w)
+                {
+                    if (!got || w.to > gw.to)
+                        gw = w;
+                    got = true;
+                });
+                if (!got || gw.to + widen < in.now)
+                    return false;
+                float const mid = Geo::WrapPi(f + Geo::kPi);
+                float const half = Geo::DegToRad(360.f - g.shape.angleDeg) * 0.5f;
+                // The far side: toward the next slot (the next ring of the sequence, else the predicted one); the near
+                // side: toward the bot.
+                float side = 0.f;
+                if (!far)
+                    side = Geo::WrapPi(botBearing - mid);
+                else if (k + 1 < rings.size())
+                {
+                    Hazard const& n = m.hazards[rings[k + 1]];
+                    side = Geo::WrapPi(Geo::ShapeFacing(n.shape, n.poses.front()) + Geo::kPi - mid);
+                }
+                else if (next.present)
+                    side = Geo::WrapPi(next.bearing - mid);
+                float const inset = (g.marginYd + kExitPushYd) / rho;
+                float const theta = side != 0.f && half > inset ? mid + (side > 0.f ? 1.f : -1.f) * (half - inset)
+                    : mid;
+                Geo::Vec3 const t{ apex.x + std::cos(theta) * rho, apex.y + std::sin(theta) * rho, in.bot.z };
+                if (!BossMechanics::DropSpot::InBounds(in.bounds, t))
+                    return false;
+                float const len = Dist3(in.bot, t);
+                Ms const legMs = delay + TravelMs(len, speed);
+                Ms const gateEnd = gw.to + widen;
+                bad.clear();
+                std::uint32_t const steps = std::max<std::uint32_t>(1,
+                    static_cast<std::uint32_t>(std::ceil(len / kStepYd)));
+                for (std::uint32_t j = 1; j <= steps; ++j)
+                {
+                    float const u = static_cast<float>(j) / static_cast<float>(steps);
+                    Geo::Vec3 const p{ in.bot.x + (t.x - in.bot.x) * u, in.bot.y + (t.y - in.bot.y) * u,
+                        in.bot.z + (t.z - in.bot.z) * u };
+                    Ms const off = delay + TravelMs(len * u, speed);
+                    windows(p, [&](HotWindow const& w)
+                    {
+                        bad.emplace_back(w.from - widen - off, w.to + widen - off);
+                    });
+                }
+                // The spot stays clean from the arrival until the gate has passed.
+                windows(t, [&](HotWindow const& w)
+                {
+                    if (w.from - widen <= gateEnd)
+                        bad.emplace_back(-kForever, w.to + widen - legMs);
+                });
+                std::sort(bad.begin(), bad.end());
+                Ms depart = in.now;
+                for (auto const& [from, to] : bad)
+                {
+                    if (from > depart)
+                        break;
+                    depart = std::max(depart, to + Ms(1));
+                }
+                if (depart > lastDepart)
+                    return false;
+                out.ok = true;
+                out.target = t;
+                out.depart = depart;
+                out.arrive = depart + legMs;
+                out.gateEnd = gateEnd;
+                return true;
+            };
+            // The furthest ring a step reaches (a later slot is clean of the earlier rings by construction): its far
+            // side at the smallest radius, else its near side (the way in from out in the hall: the bot's own
+            // distance too) at the earliest arrival.
+            std::vector<float> radii(kOrbitRadii.begin(), kOrbitRadii.end());
+            float const botRho = Geo::Dist2d(apex.x, apex.y, in.bot.x, in.bot.y);
+            if (botRho > radii.back() && botRho <= kOrbitMaxYd)
+                radii.push_back(botRho);
+            // Just outside a ring's start beyond the orbit (Emberseer's first ring starts at the nova's edge).
+            for (std::size_t i : rings)
+            {
+                ProjectileParams const& p = m.hazards[i].timing.projectile;
+                float const r = std::max(0.f, p.start - p.halfLength) + m.hazards[i].marginYd + 2.f * kExitPushYd;
+                if (r > kOrbitRadii.back() && r <= kOrbitMaxYd)
+                    radii.push_back(r);
+            }
+            std::sort(radii.begin(), radii.end());
+            auto const same = [](float a, float b) { return std::fabs(a - b) < 0.25f; };
+            radii.erase(std::unique(radii.begin(), radii.end(), same), radii.end());
+            for (std::size_t k = rings.size(); k-- > 0;)
+            {
+                for (float rho : radii)
+                    if (step(rho, k, true, best))
+                        return best;
+                for (float rho : radii)
+                {
+                    Orbit o;
+                    if (step(rho, k, false, o) && (!best.ok || o.arrive < best.arrive))
+                        best = o;
+                }
+                if (best.ok)
+                    return best;
+            }
+            return best;
+        }
+
         // The input of the reduced-margin pass: every margin cut to its drift + tightMarginYd. false = no margin
         // changes (the pass would repeat the first one).
         inline bool ReducedMargins(Input const& in, Input& out)
@@ -2724,6 +3084,47 @@ namespace BossMechanics::Solver
         };
         if (spotOk && !in.roleSolve)
             return safeHere(plan);
+
+        // Blackrock Spire WP-SF: a rolling ring sequence in the view (Detail::RingOrbit): the orbit's step, for a bot
+        // with no player kind to keep (a hard region, a carried shape, a park). A Fallback: it is planned at the orbit
+        // margins, and its end is never clean over the horizon (the next ring comes). A later departure holds the bot
+        // where it is until then; the step itself needs walkable ground and an oracle path that keeps to the straight
+        // line the orbit planned (within kOrbitDetourYd), else the solve goes on as before.
+        if (!in.reroute && !Detail::HasPlayerKinds(in))
+            if (Detail::Orbit const orbit = Detail::RingOrbit(in); orbit.ok)
+            {
+                bool const go = orbit.depart <= in.now + Detail::kOrbitGoMs;
+                std::vector<Geo::Vec3> path{ in.bot };
+                bool walkable = true;
+                if (go)
+                {
+                    Geo::Vec3 q = orbit.target;
+                    plan.pathChecks = 1;
+                    walkable = oracle.Walkable(q) && oracle.Find(in.bot, q, path) && !path.empty();
+                    if (walkable)
+                    {
+                        Detail::AnchorPath(in.bot, path);
+                        walkable = Detail::Dist3(path.back(), orbit.target) <= Detail::kOrbitDetourYd
+                            && Detail::PathLength(path) <= Detail::Dist3(in.bot, orbit.target) + Detail::kOrbitDetourYd;
+                    }
+                }
+                if (walkable)
+                {
+                    plan.outcome = Outcome::Fallback;
+                    plan.path = std::move(path);
+                    plan.target = plan.path.back();
+                    plan.arriveAt = go ? orbit.arrive : in.now;
+                    Input exact = in;
+                    exact.params.marginMs = Ms(0);
+                    for (Hazard& h : exact.hazards)
+                        h.marginYd = std::max(0.f, h.driftYd);
+                    plan.exposure = Detail::WalkPath(exact, plan.path, in.now, true, true).timeInsideHot;
+                    plan.clearUntil = go ? orbit.gateEnd : orbit.depart;
+                    plan.answers = Detail::Answers(in, plan.path);
+                    plan.holdUntil = std::max(plan.arriveAt, plan.clearUntil);
+                    return plan;
+                }
+            }
 
         // M4 cost (D9): which candidates the lane frames made (only asked when there is a lane frame).
         std::vector<std::uint8_t> fromLanes;
@@ -3061,6 +3462,17 @@ namespace BossMechanics::Solver
                 }
                 return lethalMemo[i] == 1;
             };
+            // Blackrock Spire WP-RF: with a front in the view (it sweeps a whole room: every spot outside the room is
+            // "hazard-free"), a candidate outside the hard bounds never sets the ranking's floor, so the Fallback
+            // ranks the spots in the room (the gap, the slice) rather than walking into a wall.
+            bool const fronts = std::any_of(in.hazards.begin(), in.hazards.end(), [](Hazard const& h)
+            {
+                return h.front;
+            });
+            if (fronts && !in.bounds.empty())
+                for (std::uint32_t i = 1; i < cands.size(); ++i)
+                    if (!BossMechanics::DropSpot::InBounds(in.bounds, cands[i]))
+                        unreachable.insert(i);
             std::vector<std::uint32_t> counts(cands.size(), 1);
             std::uint32_t minCount = std::numeric_limits<std::uint32_t>::max();
             for (std::uint32_t i = 0; i < cands.size(); ++i)
@@ -3109,8 +3521,26 @@ namespace BossMechanics::Solver
                 std::uint32_t violated;
                 float dist;
                 std::uint32_t index;
+                Ms firstHot = kForever;     // WP-RF, with a front in the view: when the target's first window opens
             };
             bool const kinds = Detail::HasPlayerKinds(in);
+            // Blackrock Spire WP-RF: two rolling fronts whose safe slots do not overlap (Emberseer's rings with their
+            // slices turned past their width, Rend's heroic walls with gaps on opposite sides) leave nothing clean
+            // over the horizon, though each alone can be dodged: stand in the first slot as the first front passes,
+            // then cross behind it to the next. With a front in the view the ranking puts, after the time inside on
+            // the way, the target whose first window opens latest first (the first slot outlasts the second), and
+            // the bot's next solves move it on once the first front has passed. Without a front nothing changes.
+            auto firstHotAt = [&](Geo::Vec3 const& c, Ms arrival)
+            {
+                Ms first = kForever;
+                for (Hazard const& h : in.hazards)
+                    Detail::ForEachWindow(h, c, [&](HotWindow const& w)
+                    {
+                        if (Detail::Meets(w, in.params.marginMs, arrival, std::max(arrival, horizonEnd)))
+                            first = std::min(first, std::max(arrival, w.from - in.params.marginMs));
+                    });
+                return first;
+            };
             // Ranked by the time inside the exact hitboxes (drift kept, no yard or time margin): nothing clean
             // exists at the margins, so the least real exposure wins, not the least time in the margin band.
             Input exact = in;
@@ -3121,6 +3551,8 @@ namespace BossMechanics::Solver
             {
                 if (a.inside != b.inside)
                     return a.inside < b.inside;
+                if (a.firstHot != b.firstHot)
+                    return a.firstHot > b.firstHot;     // WP-RF: kForever for every candidate without a front
                 if (a.violated != b.violated)
                     return a.violated < b.violated;
                 return a.dist < b.dist;
@@ -3145,17 +3577,24 @@ namespace BossMechanics::Solver
                     + (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c) ? 1u : 0u);
                 Ms cap = kForever;
                 bool walk = true;
+                // WP-RF: the target's first window (kForever without a front: every candidate ties on it).
+                Ms const firstHot = fronts ? firstHotAt(c, moveStart + Detail::TravelMs(dist, speed)) : kForever;
                 if (top.size() >= Detail::kFallbackRanked)
                 {
                     Ranked const& last = top.back();
-                    Detail::FallbackCap const fc = Detail::FallbackWalkCap(last.inside, last.violated, last.dist,
+                    Detail::FallbackCap fc = Detail::FallbackWalkCap(last.inside, last.violated, last.dist,
                         violated, dist);
+                    if (firstHot > last.firstHot)
+                        fc = Detail::FallbackCap{ last.inside, true };     // a tie on time inside ranks it ahead
+                    else if (firstHot < last.firstHot)
+                        fc = last.inside > Ms(0) ? Detail::FallbackCap{ last.inside - Ms(1), true }
+                            : Detail::FallbackCap{ kForever, false };
                     cap = fc.cap;
                     walk = fc.walk;
                 }
                 Ms const inside = walk
                     ? Detail::WalkPath(exact, { in.bot, c }, in.now, true, true, cap).timeInsideHot : kForever;
-                Ranked const r{ inside, violated, dist, i };
+                Ranked const r{ inside, violated, dist, i, firstHot };
                 ranked.push_back(r);
                 if (walk && inside <= cap)
                 {
@@ -3310,6 +3749,8 @@ namespace BossMechanics::Solver
             work.path = path;
             work.target = path.back();
             work.arriveAt = moveStart + Detail::TravelMs(Detail::PathLength(path), speed);
+            if (fronts && havePath)
+                work.clearUntil = firstHotAt(work.target, work.arriveAt);
             work.score = 0.f;
             // M4 §3.7: the exposure of the path taken, at the exact hitboxes (a clear or a hot fallback).
             work.exposure = Detail::WalkPath(exact, path, in.now, true, true).timeInsideHot;
@@ -3385,7 +3826,11 @@ namespace BossMechanics::Solver
         // One densification step of travel: the rest is sampled from another phase than the plan was.
         if (pc.timeInsideHot > plan.exposure + Detail::TravelMs(Detail::kStepYd, Detail::Speed(in)))
             return false;
-        return PointSafe(exact, plan.target, pc.arriveAt, std::max(pc.arriveAt, horizonEnd));
+        // WP-RF: a front-staged Fallback (Plan::clearUntil) holds while its end stays clear until its first window.
+        Ms const until = plan.clearUntil < kForever ? std::min(horizonEnd, plan.clearUntil - Ms(1)) : horizonEnd;
+        if (until < pc.arriveAt)
+            return false;
+        return PointSafe(exact, plan.target, pc.arriveAt, std::max(pc.arriveAt, until));
     }
 }
 

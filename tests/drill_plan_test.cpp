@@ -333,7 +333,8 @@ namespace
 
     bool M5Spell(std::uint32_t id)
     {
-        return (id >= Ids::SPELL_M5_FIRST && id <= Ids::SPELL_M5_LAST) || Ids::RiderAllowed(id);
+        return (id >= Ids::SPELL_M5_FIRST && id <= Ids::SPELL_M5_LAST) || Ids::RiderAllowed(id)
+            || id == Ids::SPELL_DRILL_TAUNT_SWAP;
     }
 
     bool M5Creature(std::uint32_t entry)
@@ -418,7 +419,16 @@ namespace
             {
                 CHECK(e.endMs > e.startMs && e.endMs <= p->loopMs);
                 CHECK(Drill::EntryWindowMs(*p, e) == e.endMs - e.startMs);
-                CHECK(e.kind != Drill::EntryKind::Drill && e.kind != Drill::EntryKind::Barrage);
+                // No `.mech test` damage on the Descriptor Training Dummy: no barrage, and a drill only when every
+                // step is harmless (Blackrock Spire WP-PS: `pass` lays its egg circles with pct=0, `pass-eggs`).
+                CHECK(e.kind != Drill::EntryKind::Barrage);
+                if (e.kind == Drill::EntryKind::Drill)
+                {
+                    CHECK(e.drill != nullptr);
+                    if (e.drill)
+                        for (Drill::Step const& step : e.drill->steps)
+                            CHECK(!Drill::DamageStep(step.line) || Drill::Value(step.line, "pct") == "0");
+                }
                 if (e.kind == Drill::EntryKind::Describe)
                 {
                     described = true;
