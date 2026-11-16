@@ -33,6 +33,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicRoute.h` | Pure route search around hazards (grid A*, string-pulled legs): `Route`, `RouteHandoff` |
 | `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
 | `src/MechanicJump.h` | Pure Jump kind rules (Stratholme X3): the hop's timing and speeds, who counts as in the air |
+| `src/MechanicFront.h` | Pure rolling fronts (Blackrock Spire WP-RF): specs, gaps, wall segments, placement, markers |
 | `src/MechanicBotView.h/.cpp` | Registry -> solver input and tasks for one bot; reservations; navmesh, sight oracle |
 | `src/MechanicViewRules.h` | Pure player-kind rules of the view: planned spots, margins, separation (host-tested) |
 | `src/MechanicBotGuard.h` | `BOSS_MECHANICS_WITH_BOTS`: 1 only with mod-playerbots enabled |
@@ -98,6 +99,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player; that player taking it is the job |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Jump(owner, spec, warn)`, `Jump(owner, at, r, warn)` | A sweep that hits who is on the ground (Stratholme X3) |
+| `ConeFront`, `LineFront`, `FrontSafe` | Rolling fronts, their safe slot for the bot tank ([below](#rolling-fronts-blackrock-spire-wp-rf)) |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
 | `RefFlat(owner, pct, tank)` | Script spells: `pct`% of the owner's reference row ([below](#reference-health)) |
@@ -121,6 +123,7 @@ M3 options:
 | `Radius(yd)` | Bait | the landing circle (Fenrus 6 yd); default: only the picked player |
 | `Tolerance(yd)` | HoldStill | movement allowed in the window (default 0.3 yd; Alexei 1 yd) |
 | `Park(unit)` | shape kinds | the tank holds `unit` (default the owner) inside this shape; bots only |
+| `ParkTogether(unit)` | shape kinds, no front | as Park, the tank inside the shape too (a front's safe slice, WP-RF) |
 | `DropSpot(rule)` | shape kinds on a player | where its carrier bot takes it before it lands; bots only |
 | `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
 | `Lethal()` | Zone/Frontal, no mine or decoy | bots never plan a way across it ([below](#lethal-stratholme-x4)) |
@@ -340,7 +343,8 @@ Spread on 5 players 10, an n-piece line 2n; projectile lines and the RunOut poin
 `MaxActivePerMap` (256) caps mechanics, not markers: 256 one-piece mechanics are about 512 marker creatures. Fill
 resizes send one value update per fill marker per step (~7 per second), like a moving creature.
 
-- Cone angles round up to the ladder (30, 45, 60, 90, 120, 150, 180, 270); a cone wider than 270 degrees draws a full
+- Cone angles round up to the ladder (30, 45, 60, 90, 120, 150, 180, 270, and since WP-RF the wide cones 300, 315,
+  330 at +34..+39 of each color block); a cone wider than 330 degrees draws a full
   disc of its length (the hitbox stays the cone; a WARN names it).
 - Donut ratios round **down** to the ladder (0.25, 0.33, 0.40, 0.50, 0.60, 0.67, 0.75): the drawn safe hole is never
   bigger than the real one (`Rules::kDonutRatioRoundUp = false`, harness ruling 2026-11-02). A ratio below 0.25 draws
@@ -1259,6 +1263,118 @@ Drill: `stratholme-jump` (above). Tests: `tests/jump_test.cpp` (the filter, the 
 who counts as in the air, a 400 ms late resolve tick, the hop along a walk under three back-to-back skips plus a
 RunOut, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range, and the drill's
 rows).
+
+### Rolling fronts (Blackrock Spire WP-RF)
+
+Shared doc BS5 and library L25 (designer ruling 54): a band that rolls over the floor at a set speed and hits whoever
+it passes over; the safe slot is marked. Two shapes, both Zones (`Kind::Zone`) with a single-pass projectile timing, so
+the resolve, the hot windows, the solver, the route search and `.mech` reuse the projectile code (`src/MechanicFront.h`
+holds what is front-specific; host tests `tests/front_test.cpp`):
+
+- **Rolling cone front**, `ConeFront(owner, apex, ConeFrontSpec, warn)`: the hitbox is `Cone(360 - sliceDeg, endYd)`
+  on the apex, facing away from the slice; the projectile's s is the radial distance from the apex.
+- **Rolling line front**, `LineFront(owner, start, LineFrontSpec, warn)`: the hitbox is `Line(travelYd, widthYd)` from
+  the start line's middle along `facing`, minus the gaps; s runs along `facing`.
+
+```cpp
+// Emberseer EM2 + EM3 (normal, 7 stacks): the nova, then ring 1 with it and ring 2 two seconds later, its slice
+// turned 45 degrees clockwise and shown as ring 1 launches; the tank leads him into each slice.
+float const nova = 7.f + 0.3f * stacks;
+Position const spot = me->GetPosition();                         // where he stood as the warning began
+Mechanic::Circle(me, spot, nova, 2500ms).Damage(30.f).School(SPELL_SCHOOL_FIRE).Weakened().Tag(EM2);
+ConeFrontSpec ring{ firstSlice, 60.f, nova, 45.f, 4.f, 8.f };   // slice bearing, slice, start, end, band, speed
+MechanicHandle r1 = Mechanic::ConeFront(me, spot, ring, 2500ms).Damage(30.f).School(SPELL_SCHOOL_FIRE).Weakened()
+    .Tag(EM3);
+Mechanic::FrontSafe(me, r1, me, nova + 12.f);
+// ... at ring 1's launch (2.5 s later):
+ring.sliceBearing = Front::SliceBearing(firstSlice, 1, 45.f);
+MechanicHandle r2 = Mechanic::ConeFront(me, spot, ring, 2000ms).Damage(30.f).School(SPELL_SCHOOL_FIRE).Weakened()
+    .Tag(EM3);
+Mechanic::FrontSafe(me, r2, me, nova + 12.f);
+
+// Rend RG6 heroic: two walls from the portcullis (x 194) to the way-in door, 3 s apart, gaps on opposite sides, off
+// the live pools, the second within 20 yd of the first.
+LineFrontSpec wall{ Geo::kPi, 86.f, 40.f, 4.f, 8.f, {} };        // facing, travel, width, band, speed
+float const g1 = *Front::PlaceGap(40.f, 8.f, pools, frand(0.f, 1.f));
+wall.gaps = { { g1, 8.f } };
+Mechanic::LineFront(me, portcullisMiddle, wall, 3000ms).Damage(25.f).School(SPELL_SCHOOL_FROST).Weakened()
+    .Rider(SPELL_FROZEN_2S).Within(arena).Tag(RG6);
+wall.gaps = { { *Front::PlaceGap(40.f, 8.f, pools, frand(0.f, 1.f), -Front::SideOf(g1), 0.f, g1, 20.f), 8.f } };
+Mechanic::LineFront(me, portcullisMiddle, wall, 6000ms).Damage(25.f).School(SPELL_SCHOOL_FROST).Weakened()
+    .Rider(SPELL_FROZEN_2S).Within(arena).Tag(RG6);
+```
+
+- **Timing.** The band (`bandYd` thick) launches at `now + warn`: a cone front's band has its inner edge on `startYd`
+  then (the nova's edge) and the front is over once that edge passes `endYd`, after `(endYd - startYd) / speed`; a line
+  front's band has its back edge on the start line and is over once that edge passes `travelYd`. Ground behind the
+  launched band is never hot (`ProjectileParams::start`, `src/MechanicMath.h`): **the disc inside a cone front's start
+  radius is clean for every ring of the pulse once the nova has gone off** (a designer question in the WP-RF report).
+- **Hits.** Everyone eligible the band passes over, once (the projectile sweep: a slow map tick never skips a player);
+  the options of any Zone (`Damage`, `TankDamage`, `School`, `Spell`, `Rider`, `Weakened`, `OnHit`, `OnResolve` once
+  after the band passed everything, `Eligible`, `TankExempt`, `Within`, `Tag`, `Color`, `NoTelegraph`, `Decoy`).
+  Refused on a front: `Persistent`, `Projectile`, `ProjectileUnit`, `OutAndBack`, `FacingOffset`, `Rear`,
+  `ExcludeSourceEnd`, `AnchorOn`, `Park`, `DropSpot` (a WARN). The apex or start is a point (`Anchor` orientation
+  ignored). A line front with no gap warns (it cannot be dodged).
+- **The safe slot for the bot tank.** `FrontSafe(owner, front, parked, untilYd, gap)` registers a bots-only Zone on the
+  front's slice (a cone on the apex) or gap `gap` (a lane along the facing): nobody is eligible, nothing draws, and
+  `ParkTogether(parked)` sends the bot tank of `parked` (default the owner) into it with the boss (the boss's chase stop
+  `Park.DepthYd` inside it, the tank inside too: `Solver::Park::together`, unlike `Park` whose tank stands outside the
+  zone). It lives from now until the band's back edge passes `untilYd` from the apex or start (0: the whole front);
+  among several live `ParkTogether` zones the tank takes the newest (the next ring's slice). The tank's own safety is
+  the front itself (it is in its view like for anyone).
+- **Placement rules** (pure, for the scripts, KT-B2 and the drill): `Front::SliceBearing(first, ring, turnDeg)` (each
+  ring turned clockwise), `Front::PlaceGap(wallWidth, gapWidth, blocked, u, side, edgeYd, near, within)` (a gap clear of
+  blocked lateral intervals, on a side, within `within` of `near`), `Front::BlockedBy(line, pose, centre, r)` (a pool's
+  lateral extent on the wall), `Front::GapClear`, `Front::SideOf`.
+- **Telegraph** (`DrawPath::Front`, `Front::ConePieces` / `LinePieces`): a cone front draws its hitbox's outline (a wide
+  cone: 300, 315, 330), its slice in the get-in color (a cone, its angle rounded **down** so the drawn slice is never
+  wider than the real one; none below 30 degrees) from the registration, and from the launch the band itself, an **arc
+  band** (an annular sector of the front's angle, rounded up, its hole's ratio rounded down to the ladder 0.5-0.925 so
+  the drawn band is never thinner than the hitbox's; scale = the band's outer radius; a band thicker than half its
+  radius draws the filled cone). A line front draws, per wall segment, the lane it still has to sweep (outline, its
+  start following the wall's back edge in steps of the segment's width), each gap's lane in the get-in color, and the
+  wall itself (a line across, `bandYd` wide, moved by a spline every step). Moving pieces step every
+  `Front::MarkerStepMs` (the band moves 0.8 yd a step: 100 ms at 8 yd/s, within 50 ms and FollowIntervalMs) and aim one
+  step ahead. No fill timer (the band is the timer), no ground snap. The wide cones and the arc band are new marker
+  displays (+34..+93 of each color block, `BossMechanicsIds.h`; core `apps/dbc-tools/patch_bossmechanics_markers.py`):
+  **the BM build and the patch-M with them deploy together** (a 300 degree Zone cone drew a disc before; it now names a
+  wide cone display). Every look is unconfirmed until seen in game.
+- **Bots.** The view gives a gapped wall to the solver as one Line hazard per segment between its gaps
+  (`Front::Segments`; same id, same timing), so a gap is plain safe floor; a cone front's hazard reads s radially
+  (`ProjectileS` in `ForEachWindow` and the route raster). The solver adds slice candidates for a cone front (the
+  slice's middle and edges at the bot's distance, 3 yd nearer, and just outside the band's start) and pulls spots in a
+  cone front's reach toward the band's start (`Detail::FrontPull`, half a yard of walking per yard past 2 yd beyond
+  it: the rings of a pulse start at the nova's edge, so a spot near it can duck into the nova's disc behind the first
+  ring). With a front in the view the Fallback (nothing clean over the horizon: two fronts whose slots do not
+  overlap) ranks, after the time inside on the way, the target whose first window opens latest first, keeps a front
+  Fallback while its end stays clear until that window (`Plan::clearUntil`, `FallbackHolds`), and never lets a spot
+  outside the hard bounds (`Within`) set its floor: the bot stands in the first slot as the first front passes and
+  crosses behind it to the next one. Give a line front `Within(arena)`: outside the room every spot is "safe".
+- **What the bots can and cannot do** (`tests/front_test.cpp`, the brain model with the room's walls): Rend's normal
+  wall, 0 hits; heroic two walls with the second gap within 20 yd of the first, 4 hits in 360 wall passes; with the gap
+  anywhere on the other side (up to 32 yd apart), 38 in 360 (a crossing of more than about 20 yd behind the first wall
+  does not fit in 3 s). Emberseer with the group close (within 9 yd): no ring hits in 2,000 ring passes; the nova and
+  the first ring together are out of reach for a bot (or a player) across the boss from a random slice beyond a few
+  yards, or inside a nova of 10 yd or more (13+ stacks): 57 nova hits in 700 nova passes there; with the ranged at
+  15 yd, 65 ring hits in 900. Both are design questions (the WP-RF report), not solver work.
+- **Cost.** Four 315 degree rings and the nova in one view: a solve under 1.2 ms mean (M5's budget: 2 ms), the route
+  search 0.6 ms (it finds nothing: every cell is hot at some moment).
+
+Drill `rolling-fronts` (`MechanicDrill.h`, three 40 s cycles: Emberseer normal and heroic pulses with the dummy parked
+in each slice, Rend's wall and its heroic second wall; ledger tags 1-8, the later rings and the second wall under the
+bar, `Drill::FrontBarTag`). `.mech test` grammar:
+
+```
+.mech test conefront <end> <ms> [slice=60] [bearing=<deg>|turn=<deg>] [start=0] [band=4] [speed=8] [park=1 until=<yd>]
+.mech test linefront <travel> <ms> [width=40] [gap=8] [side=any|left|right|other] [apart=<yd>] [band=4] [speed=8]
+    [facing=<deg>]
+```
+
+A `conefront` rolls from the anchor point (`at=prev`: the last point circle's centre, the nova); its slice is random,
+`bearing=` degrees from your facing, or `turn=` degrees clockwise from the previous `conefront` of the command or drill
+run. `park=1` (a selected creature): `FrontSafe` for it, `until=` its end. A `linefront` is a wall across the anchor
+point (the middle of the swept area) along your facing turned by `facing=`; `side=other` puts its gap across the
+centreline from the previous `linefront`'s, `apart=` at most that far from it. The damage keys as a circle.
 
 ### Taunt swap (Blackrock Spire WP-TS)
 

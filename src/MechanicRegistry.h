@@ -17,6 +17,7 @@
 #include "Define.h"
 #include "Duration.h"
 #include "MechanicDescriptor.h"
+#include "MechanicFront.h"
 #include "MechanicGeometry.h"
 #include "MechanicJudge.h"
 #include "MechanicJump.h"
@@ -135,6 +136,7 @@ namespace BossMechanics
         bool outAndBack = false;
         float halfLength = 0.f;         // 0 = width / 2
         ObjectGuid unit;                // set: track this unit's projected position instead of the computed one
+        float start = 0.f;              // single pass: the body's centre at launch (ProjectileParams::start; fronts)
 
         // runtime (registry)
         Milliseconds lastElapsed{ 0 };
@@ -450,6 +452,10 @@ namespace BossMechanics
         std::optional<Projectile> projectile;
         std::optional<MineState> mine;
         std::optional<Persist> persist;
+        // Blackrock Spire WP-RF: a rolling front (Mechanic::ConeFront / LineFront; MechanicFront.h). Its timing is the
+        // projectile's (a single pass launched at `start`); a cone front's s is the radial distance from the apex, a
+        // line front's gaps are carved out of the hitbox (ContainsPoint, the resolve, the bot view's wall segments).
+        std::optional<FrontInfo> front;
 
         // bot-facing (PLAN §3.1)
         Eligibility eligibility;
@@ -474,6 +480,9 @@ namespace BossMechanics
         // bots only; no server effect.
         bool park = false;
         ObjectGuid parkUnit;
+        // ParkTogether (WP-RF, Mechanic::FrontSafe): the tank stands inside the zone with the parked unit (a front's
+        // safe slice), instead of outside it pulling the unit in (a Park on a danger zone).
+        bool parkTogether = false;
         BaitRule bait;
         // DropSpot(rule) (Stratholme X2): where the carrier bot takes this shape before it lands. Bots only.
         std::optional<DropSpotRule> dropSpot;

@@ -80,9 +80,12 @@ namespace BossMechanics
     // ------------------------------------------------------------------------------------------------------------
 
     // The projectile is a body of half-length h centred on c(e), travelling along the line's s axis from 0.
-    // Single pass: c = v*e, it keeps going until its tail clears `length`.
+    // Single pass: c = start + v*e, it keeps going until its tail clears `length`.
     // Out and back: c = v*e up to `length`, waits `pause` there, comes back to 0 and keeps going until its tail clears
     // 0. Pass 0 is everything before the return starts (including the pause), pass 1 the return.
+    // Rolling fronts (Blackrock Spire WP-RF, MechanicFront.h) are single-pass bodies launched at `start` > 0 (the
+    // band's centre at launch: a cone front's band starts at the nova's edge); a point behind the launched body
+    // (s < start - h) is never hot. Out and back ignores `start`.
     struct ProjectileParams
     {
         float length = 0.f;             // yd
@@ -90,7 +93,28 @@ namespace BossMechanics
         float halfLength = 0.f;         // h, yd
         bool outAndBack = false;
         Ms pause{ 0 };
+        float start = 0.f;              // single pass: the body's centre at launch (yd along s)
     };
+
+    // The launch offset a pass uses: `start` for a single pass, 0 out and back.
+    inline float ProjectileStart(ProjectileParams const& p)
+    {
+        return p.outAndBack ? 0.f : p.start;
+    }
+
+    // A point's projectile coordinate s, from its offset (dx, dy) to the anchor and the shape's unit axis (ux, uy):
+    // the distance along a line's axis, or (a rolling cone front, WP-RF) the radial distance from the cone's apex.
+    inline float ProjectileS(Shape const& shape, float dx, float dy, float ux, float uy)
+    {
+        return shape.type == ShapeType::Cone ? std::hypot(dx, dy) : dx * ux + dy * uy;
+    }
+
+    inline float ProjectileS(Shape const& shape, Geo::Pose const& pose, Geo::Vec3 const& p)
+    {
+        if (shape.type == ShapeType::Cone)
+            return Geo::Dist2d(pose.x, pose.y, p.x, p.y);
+        return Geo::ToLineCoords(shape, pose, p).s;
+    }
 
     inline float SecondsOf(Ms t)
     {
@@ -113,7 +137,7 @@ namespace BossMechanics
     {
         if (p.speed <= 0.f)
             return Ms(0);
-        float t = (p.length + p.halfLength) / p.speed;
+        float t = std::max(0.f, p.length + p.halfLength - ProjectileStart(p)) / p.speed;
         if (p.outAndBack)
             t += ProjectileReturnStart(p);
         return MsOf(t);
@@ -127,7 +151,7 @@ namespace BossMechanics
         if (p.speed <= 0.f)
             return 0.f;
         if (!p.outAndBack)
-            return p.speed * e;
+            return p.start + p.speed * e;
         float const tOut = p.length / p.speed;
         float const tBack = tOut + SecondsOf(p.pause);
         if (e < tBack)
@@ -219,7 +243,10 @@ namespace BossMechanics
         float const v = p.speed;
         if (!p.outAndBack)
         {
-            out.push_back({ MsOf(std::max(0.f, (s - h) / v)), MsOf((s + h) / v), 0, false });
+            // A launch ahead of 0 (a rolling front): the body never reaches a point behind its launch.
+            if (p.start > 0.f && s + h < p.start)
+                return out;
+            out.push_back({ MsOf(std::max(0.f, (s - h - p.start) / v)), MsOf((s + h - p.start) / v), 0, false });
             return out;
         }
         float const tOut = p.length / v;
@@ -797,6 +824,15 @@ namespace BossMechanics
             case ShapeType::Cone:
             {
                 std::size_t const j = LadderAtLeast(Ids::kConeAngles, shape.angleDeg);
+                std::size_t const wide = j == Ids::kConeAngles.size()
+                    ? LadderAtLeast(Ids::kWideConeAngles, shape.angleDeg) : Ids::kWideConeAngles.size();
+                if (j == Ids::kConeAngles.size() && wide < Ids::kWideConeAngles.size())
+                {
+                    // Blackrock Spire WP-RF: past 270 degrees the wide cones (a rolling front's 300 degrees).
+                    pick.pieces.push_back({ display(outline ? MarkerShape::WideConeOutline : MarkerShape::WideCone,
+                        wide), shape.length, Geo::DegToRad(shape.facingOffsetDeg), 0.f });
+                    break;
+                }
                 if (j == Ids::kConeAngles.size())
                 {
                     // Wider than the widest cone: the largest drawn cone would be smaller than the hitbox, so draw

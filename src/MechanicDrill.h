@@ -550,6 +550,42 @@ namespace BossMechanics::Drill
     constexpr float kRecallWidth = 4.f;                 // VO7 (VO12 recalls with a 1.5 s warning)
     constexpr float kRecallExclude = 5.f;               // VO7 ExcludeSourceEnd(5): the lanes spare the boss's 5 yd
 
+    // ---- Rolling fronts (Blackrock Spire build WP-RF, drill `rolling-fronts`) ----------------------------------------
+    // The two rolling front kinds (MechanicFront.h) on the shapes and numbers of their first users, heroic numbers
+    // (pct= in the percent mode), round the selected creature (the boss; park=1 has the bot tank lead it into each
+    // ring's slice, Mechanic::FrontSafe). `.mech test` keys (MechanicCommand.cpp):
+    //   conefront <end> <ms> slice=<deg> [bearing=<deg>|turn=<deg>] start=<yd> band=4 speed=8 [park=1 until=<yd>]
+    //       a rolling cone front from the anchor point (at=prev: the last point circle's centre, the nova), its band
+    //       from start= out to <end>; the slice random, at bearing= from the GM's facing, or turned turn= degrees
+    //       clockwise from the previous conefront of the run (EM3's next ring);
+    //   linefront <travel> <ms> width=<yd> gap=<yd> [side=left|right|other|any] [apart=<yd>] band=4 speed=8 facing=0
+    //       a wall across the anchor point (the middle of the swept area) along the GM's facing turned by facing=,
+    //       with one gap; side=other puts it across the centreline from the previous linefront's, apart= at most that
+    //       far from it (RG6 heroic).
+    // 0 s, Emberseer EM2 + EM3 normal at 7 stacks: the nova (9 yd, 2.5 s) and two rings 2 s apart (60 degree slices,
+    // the second turned 45). 12 s, heroic at 14 stacks: the nova (11 yd) and three rings 1.5 s apart (45 degree
+    // slices turned 60). 24 s, Rend RG6: a 30 yd wide wall over 50 yd with an 8 yd gap, then (heroic) a second 3 s
+    // later, its gap on the other side and within 20 yd of the first (README "Rolling fronts"). Ledger tags (sweep keys
+    // `Zone/<tag>`): 1 and 4 the novas, 2 and 5 the first rings, 3 and 6 the later rings (the follow-ups under the
+    // bar, FrontBarTag), 7 the first wall, 8 the second.
+    constexpr std::uint32_t kFrontTagNova = 1;
+    constexpr std::uint32_t kFrontTagRing = 2;
+    constexpr std::uint32_t kFrontTagRingNext = 3;
+    constexpr std::uint32_t kFrontTagNovaHeroic = 4;
+    constexpr std::uint32_t kFrontTagRingHeroic = 5;
+    constexpr std::uint32_t kFrontTagRingNextHeroic = 6;
+    constexpr std::uint32_t kFrontTagWall = 7;
+    constexpr std::uint32_t kFrontTagWallSecond = 8;
+    constexpr std::uint32_t kFrontBarTags[] = { 3, 6, 8 };
+
+    inline bool FrontBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kFrontBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -836,6 +872,23 @@ namespace BossMechanics::Drill
                     { 20000, "line 5 1500 width=4 exclude=5 anchor=target to=last reach=1 cycle=odd pct=40 weak=1 "
                         "tag=7" },
                 }, 5 },     // five cycles a run (120 s): the sweep runs blackrock-spire-followups:5
+            // Blackrock Spire build WP-RF: the rolling fronts (see kFrontTagNova above).
+            { "rolling-fronts", "Emberseer's nova and rings, normal then heroic, then Rend's wall and its heroic "
+                "second wall", 40000, false, {
+                    { 0, "circle 9 2500 school=fire pct=30 weak=1 tag=1" },
+                    { 0, "conefront 45 2500 at=prev slice=60 start=9 park=1 until=21 school=fire pct=30 weak=1 tag=2" },
+                    { 2500, "conefront 45 2000 at=prev slice=60 turn=45 start=9 park=1 until=21 school=fire pct=30 "
+                        "weak=1 tag=3" },
+                    { 12000, "circle 11 2500 school=fire pct=30 weak=1 tag=4" },
+                    { 12000, "conefront 45 2500 at=prev slice=45 start=11 park=1 until=23 school=fire pct=30 weak=1 "
+                        "tag=5" },
+                    { 14500, "conefront 45 1500 at=prev slice=45 turn=60 start=11 park=1 until=23 school=fire pct=30 "
+                        "weak=1 tag=6" },
+                    { 16000, "conefront 45 1500 at=prev slice=45 turn=60 start=11 park=1 until=23 school=fire pct=30 "
+                        "weak=1 tag=6" },
+                    { 24000, "linefront 50 3000 width=30 gap=8 school=frost pct=25 weak=1 tag=7" },
+                    { 24000, "linefront 50 6000 width=30 gap=8 side=other apart=20 school=frost pct=25 weak=1 tag=8" },
+                }, 3 },     // three cycles a run (120 s): the sweep runs rolling-fronts:3
         };
         return drills;
     }
@@ -905,6 +958,24 @@ namespace BossMechanics::Drill
                 return std::nullopt;
         }
         return v;
+    }
+
+    // How long a rolling front step rolls after its warning (ms): (end - start) / speed for a conefront, travel /
+    // speed for a linefront (MechanicFront.h ConeParams, LineParams); 0 for any other step.
+    inline float FrontRollMs(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 2 || (t[0] != "conefront" && t[0] != "linefront"))
+            return 0.f;
+        float const size = Number(t[1]).value_or(0.f);
+        auto key = [&line](std::string_view k, float def)
+        {
+            std::optional<std::string_view> v = Value(line, k);
+            return v ? Number(*v).value_or(def) : def;
+        };
+        float const speed = key("speed", 8.f);
+        float const start = t[0] == "conefront" ? key("start", 0.f) : 0.f;
+        return speed > 0.f ? (size - start) / speed * 1000.f : 0.f;
     }
 
     // Does the runner add `dmg=` to this step? Every damage shape, and a bell soak (`soak ... bell=<n>`: its landing

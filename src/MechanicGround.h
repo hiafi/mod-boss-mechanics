@@ -257,6 +257,13 @@ namespace BossMechanics::Ground
                 out.inner = Ids::kDonutRatios[std::min<std::size_t>(parts.step, Ids::kDonutRatios.size() - 1)]
                     * piece.scale;
                 break;
+            case Ids::MarkerShape::WideCone:
+            case Ids::MarkerShape::WideConeOutline:
+                // WP-RF: a cone past 270 degrees.
+                out.type = PieceShape::Type::Cone;
+                out.halfAngle = Geo::DegToRad(Ids::kWideConeAngles[std::min<std::size_t>(parts.step,
+                    Ids::kWideConeAngles.size() - 1)]) * 0.5f;
+                break;
             default:
                 break;
         }

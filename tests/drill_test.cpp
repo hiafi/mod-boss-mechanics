@@ -25,7 +25,8 @@ namespace
     constexpr float kMarginYd = 0.5f;
 
     std::set<std::string_view> const kTestShapes = { "circle", "donut", "cone", "rearcone", "line", "projectile",
-        "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump" };
+        "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
+        "conefront", "linefront" };
 
     struct Parsed
     {
@@ -70,6 +71,7 @@ namespace
         if (p.shape == "holdstill")
             end += p.size * 1000.f;
         end += Key(step.line, "persist", 0.f);
+        end += Drill::FrontRollMs(step.line);     // WP-RF: a rolling front rolls on after its warning
         return end;
     }
 
@@ -217,7 +219,7 @@ namespace
         }
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
             "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
-            "blackrock-spire-followups" })
+            "blackrock-spire-followups", "rolling-fronts" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
