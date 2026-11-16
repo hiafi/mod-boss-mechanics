@@ -294,7 +294,7 @@ namespace BossMechanics
     {
         ActiveMechanic const* cur = Get();
         bool const fits = cur && IsShapeKind(cur->kind) && cur->shape.type == ShapeType::Line && !cur->mine
-            && !cur->persist && speed > 0.f && !cur->resolved;
+            && !cur->persist && speed > 0.f && !cur->resolved && !cur->front;
         if (ActiveMechanic* m = Edit("Projectile", fits))
         {
             if (!m->projectile)
@@ -309,7 +309,7 @@ namespace BossMechanics
     MechanicRef& MechanicRef::ProjectileUnit(Unit const* unit)
     {
         ActiveMechanic const* cur = Get();
-        if (ActiveMechanic* m = Edit("ProjectileUnit", cur && cur->projectile && unit))
+        if (ActiveMechanic* m = Edit("ProjectileUnit", cur && cur->projectile && !cur->front && unit))
             m->projectile->unit = unit->GetGUID();
         return *this;
     }
@@ -317,7 +317,7 @@ namespace BossMechanics
     MechanicRef& MechanicRef::OutAndBack(Milliseconds pause)
     {
         ActiveMechanic const* cur = Get();
-        if (ActiveMechanic* m = Edit("OutAndBack", cur && cur->projectile))
+        if (ActiveMechanic* m = Edit("OutAndBack", cur && cur->projectile && !cur->front))
         {
             m->projectile->outAndBack = true;
             m->projectile->returnPause = std::max(pause, Milliseconds(0));
@@ -354,7 +354,7 @@ namespace BossMechanics
     {
         ActiveMechanic const* cur = Get();
         bool const fits = cur && IsShapeKind(cur->kind) && cur->shape.type == ShapeType::Line && yd >= 0.f
-            && yd < cur->shape.length;
+            && yd < cur->shape.length && !cur->front;
         if (ActiveMechanic* m = Edit("ExcludeSourceEnd", fits, true))
             m->shape.excludeStart = yd;
         return *this;
@@ -364,7 +364,7 @@ namespace BossMechanics
     {
         ActiveMechanic const* cur = Get();
         bool const fits = cur && IsShapeKind(cur->kind)
-            && (cur->shape.type == ShapeType::Cone || cur->shape.type == ShapeType::Line);
+            && (cur->shape.type == ShapeType::Cone || cur->shape.type == ShapeType::Line) && !cur->front;
         if (ActiveMechanic* m = Edit("FacingOffset", fits, true))
             m->shape.facingOffsetDeg = deg;
         return *this;
@@ -379,7 +379,7 @@ namespace BossMechanics
     {
         ActiveMechanic const* cur = Get();
         bool const fits = cur && unit && (IsShapeKind(cur->kind) || cur->kind == Kind::Stack
-            || cur->kind == Kind::Soak);
+            || cur->kind == Kind::Soak) && !cur->front;
         if (ActiveMechanic* m = Edit("AnchorOn", fits, true))
         {
             bool const follow = m->anchor.followFacing;
@@ -515,9 +515,22 @@ namespace BossMechanics
     MechanicRef& MechanicRef::Park(Unit const* unit)
     {
         ActiveMechanic const* cur = Get();
-        if (ActiveMechanic* m = Edit("Park", cur && IsShapeKind(cur->kind)))
+        // A front parks nothing: its safe slot is Mechanic::FrontSafe (WP-RF).
+        if (ActiveMechanic* m = Edit("Park", cur && IsShapeKind(cur->kind) && !cur->front))
         {
             m->park = true;
+            m->parkUnit = unit ? unit->GetGUID() : ObjectGuid::Empty;
+        }
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::ParkTogether(Unit const* unit)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("ParkTogether", cur && IsShapeKind(cur->kind) && !cur->front))
+        {
+            m->park = true;
+            m->parkTogether = true;
             m->parkUnit = unit ? unit->GetGUID() : ObjectGuid::Empty;
         }
         return *this;
@@ -526,7 +539,7 @@ namespace BossMechanics
     MechanicRef& MechanicRef::DropSpot(DropSpotRule const& rule)
     {
         ActiveMechanic const* cur = Get();
-        if (ActiveMechanic* m = Edit("DropSpot", cur && IsShapeKind(cur->kind) && !cur->decoy))
+        if (ActiveMechanic* m = Edit("DropSpot", cur && IsShapeKind(cur->kind) && !cur->decoy && !cur->front))
             m->dropSpot = rule;
         return *this;
     }
@@ -904,6 +917,129 @@ namespace Mechanic
     MechanicRef Line(Unit* owner, Anchor const& from, float facing, float length, float width, Milliseconds warn)
     {
         return Zone(owner, Shapes::LineFacing(from, facing, length, width), warn);
+    }
+
+    // Blackrock Spire WP-RF (rolling fronts, MechanicFront.h).
+    MechanicRef ConeFront(Unit* owner, Position const& apex, ConeFrontSpec const& spec, Milliseconds warn)
+    {
+        if (!Front::Valid(spec))
+        {
+            LOG_WARN(kLog, "Mechanic::ConeFront from {}: needs band >= {} yd, speed > 0, end > start >= 0 and a slice "
+                "of 0-{} degrees; ignored", owner ? owner->GetGUID().ToString() : "?", Front::kMinBandYd,
+                Front::kMaxSliceDeg);
+            return MechanicRef();
+        }
+        Position at = apex;
+        at.SetOrientation(Front::ConeFacing(spec));
+        ProjectileParams const p = Front::ConeParams(spec);
+        return Register(owner, "ConeFront", Kind::Zone, Anchor(at), Front::ConeShape(spec), warn,
+            [&spec, &p](ActiveMechanic& m)
+        {
+            m.projectile.emplace();
+            m.projectile->speed = p.speed;
+            m.projectile->halfLength = p.halfLength;
+            m.projectile->start = p.start;
+            m.front = Front::InfoOf(spec);
+        });
+    }
+
+    MechanicRef LineFront(Unit* owner, Position const& start, LineFrontSpec const& spec, Milliseconds warn)
+    {
+        if (!Front::Valid(spec))
+        {
+            LOG_WARN(kLog, "Mechanic::LineFront from {}: needs band >= {} yd, speed > 0, travel and width > 0 and "
+                "gaps of width > 0; ignored", owner ? owner->GetGUID().ToString() : "?", Front::kMinBandYd);
+            return MechanicRef();
+        }
+        if (spec.gaps.empty())
+            LOG_WARN(kLog, "Mechanic::LineFront from {}: a wall with no gap cannot be dodged",
+                owner ? owner->GetGUID().ToString() : "?");
+        Position at = start;
+        at.SetOrientation(spec.facing);
+        ProjectileParams const p = Front::LineParams(spec);
+        return Register(owner, "LineFront", Kind::Zone, Anchor(at), Front::LineShape(spec), warn,
+            [&spec, &p](ActiveMechanic& m)
+        {
+            m.projectile.emplace();
+            m.projectile->speed = p.speed;
+            m.projectile->halfLength = p.halfLength;
+            m.projectile->start = p.start;
+            m.front = Front::InfoOf(spec);
+        });
+    }
+
+    MechanicRef FrontSafe(Unit* owner, MechanicHandle front, Unit const* parked, float untilYd, std::size_t gap)
+    {
+        Registry* reg = RegistryOf(owner);
+        ActiveMechanic const* f = reg ? reg->Find(front.id) : nullptr;
+        if (!f || !f->front || !f->projectile || f->owner != owner->GetGUID())
+        {
+            LOG_WARN(kLog, "Mechanic::FrontSafe from {}: mechanic {} is not a live front of this owner; ignored",
+                owner ? owner->GetGUID().ToString() : "?", front.id);
+            return MechanicRef();
+        }
+        FrontInfo const info = *f->front;
+        ProjectileParams const params = ProjectileParamsOf(*f);
+        Geo::Pose const apex = reg->AnchorPose(*f);
+        Milliseconds const resolveAt = f->resolveAt;
+        Milliseconds const expireAt = f->expireAt;
+        float const length = f->shape.length;
+        float const width = f->shape.width;
+        // The safe slot as a Zone: a cone front's slice (a cone on the apex), a line front's gap (a lane along the
+        // facing, laterally on the gap's centre).
+        Position at(apex.x, apex.y, apex.z, apex.o);
+        Shape shape;
+        if (info.type == FrontType::Cone)
+        {
+            if (info.sliceDeg <= 0.f)
+            {
+                LOG_WARN(kLog, "Mechanic::FrontSafe from {}: front {} is a full ring (no slice); ignored",
+                    owner->GetGUID().ToString(), front.id);
+                return MechanicRef();
+            }
+            shape = Shape::Cone(info.sliceDeg, length);
+            at.SetOrientation(info.sliceBearing);
+        }
+        else
+        {
+            if (gap >= info.gaps.size())
+            {
+                LOG_WARN(kLog, "Mechanic::FrontSafe from {}: front {} has no gap {}; ignored",
+                    owner->GetGUID().ToString(), front.id, gap);
+                return MechanicRef();
+            }
+            FrontGap const& g = info.gaps[gap];
+            float const half = width * 0.5f;
+            float const a = std::max(-half, g.centre - g.width * 0.5f);
+            float const b = std::min(half, g.centre + g.width * 0.5f);
+            if (b <= a)
+                return MechanicRef();
+            float const mid = (a + b) * 0.5f;
+            at.Relocate(apex.x - std::sin(apex.o) * mid, apex.y + std::cos(apex.o) * mid, apex.z);
+            shape = Shape::Line(length, b - a);
+        }
+        shape.zTolerance = f->shape.zTolerance;
+        // Live from now through the launch until the band has passed untilYd (0: the whole front).
+        Milliseconds until = expireAt;
+        if (untilYd > 0.f)
+        {
+            // The band's back edge (centre - h) reaches untilYd: centre = untilYd + h.
+            float const travel = std::max(0.f, untilYd + params.halfLength - params.start);
+            until = std::min(expireAt, resolveAt + MsOf(travel / params.speed));
+        }
+        Milliseconds const now = GameTime::GetGameTimeMS();
+        Milliseconds const warn = std::max(Milliseconds(0), resolveAt - now);
+        MechanicRef ref = Register(owner, "FrontSafe", Kind::Zone, Anchor(at), shape, warn,
+            [](ActiveMechanic& m)
+        {
+            m.eligibility.roles = Role::None;       // nobody: never a hazard, never hits
+            m.telegraph = false;                    // the front draws its own slice or gap
+        });
+        if (!ref.IsValid())
+            return ref;
+        ref.Persistent(std::max(Milliseconds(1), until - std::max(resolveAt, now)), Milliseconds(0));
+        ref.ParkTogether(parked);
+        return ref;
     }
 
     MechanicRef Mine(Unit* owner, Position const& pos, float r, Milliseconds arm, Milliseconds grace)

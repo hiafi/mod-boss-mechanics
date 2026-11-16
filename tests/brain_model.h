@@ -259,6 +259,9 @@ namespace BrainModel
         std::function<bool(std::size_t)> isTank;
         // WP-Q3: where bot i's mover aura puts it on each hop (false: no hop).
         std::function<bool(std::size_t, Vec3&)> moverHop;
+        // Blackrock Spire WP-RF (tests/front_test.cpp): the path oracle of every solve and route (a room's walls);
+        // nullptr = straight paths anywhere (Straight).
+        Solver::PathOracle* oracle = nullptr;
         // Diagnostics: every solve with its input, its plan and where it ran (the bot's mode before it, and whether
         // it is the Escape re-check's re-solve).
         enum class SolveAt { Spot, ReCheck, Reroute };
@@ -369,7 +372,8 @@ namespace BrainModel
 
         Solver::Plan RunSolve(Bot& b, Solver::Input const& in, Ms now, SolveAt at = SolveAt::Spot)
         {
-            Straight oracle;
+            Straight straight;
+            Solver::PathOracle& oracle = this->oracle ? *this->oracle : straight;
             auto const t0 = std::chrono::steady_clock::now();
             Solver::Plan plan = Solver::Solve(in, oracle);
             std::int64_t const us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -657,7 +661,8 @@ namespace BrainModel
             ++b.c.routes;
             if (Solver::IsRouteLoop(b.handoffAt, b.handoffGoal, now, b.routeGoal))
                 ++b.c.routeLoops;
-            Straight oracle;
+            Straight straight;
+            Solver::PathOracle& oracle = this->oracle ? *this->oracle : straight;
             Solver::RouteStats rs;
             auto const t0 = std::chrono::steady_clock::now();
             Solver::Plan plan = Solver::Route(in, b.routeGoal, oracle, cfg.route, &rs);
@@ -807,7 +812,8 @@ namespace BrainModel
                     --budget;
                     b.lastRegionRouteAt = now;
                     ++b.c.regionRoutes;
-                    Straight oracle;
+                    Straight straight;
+                    Solver::PathOracle& oracle = this->oracle ? *this->oracle : straight;
                     Solver::RouteStats rs;
                     std::uint32_t const goal = b.regionRouteGoal;
                     b.regionRouteGoal = 0;

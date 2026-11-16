@@ -139,6 +139,9 @@ namespace BossMechanics
         MechanicRef& Tolerance(float yd);               // HoldStill: movement allowed in the window (default 0.3)
         // Shape kinds: the tank should hold `unit` (nullptr: the owner) inside this shape. Bots only.
         MechanicRef& Park(Unit const* unit = nullptr);
+        // Park, with the tank standing inside the shape too (a safe zone the tank leads the unit into: a rolling
+        // front's slice, Mechanic::FrontSafe) instead of outside it pulling the unit in. Bots only. Not on a front.
+        MechanicRef& ParkTogether(Unit const* unit = nullptr);
         // Shape kinds anchored on a player (AnchorOn) or aimed at one (a line's `to` end): where that player's bot
         // carries the shape before it lands (DropSpotRule, MechanicRegistry.h; Stratholme X2). Bots only.
         MechanicRef& DropSpot(BossMechanics::DropSpotRule const& rule);
@@ -273,6 +276,32 @@ namespace Mechanic
     // resolve (BossMechanics.Bots.Jump.*). Drawn like a Zone; onResolve's `cleared` lists who was in the air.
     MechanicRef Jump(Unit* owner, BossMechanics::ZoneSpec const& spec, Milliseconds warn);
     MechanicRef Jump(Unit* owner, Anchor const& at, float r, Milliseconds warn);
+
+    // Blackrock Spire WP-RF (rolling fronts, MechanicFront.h; README "Rolling fronts"). A Zone whose band rolls over
+    // the floor from now + warn: everyone eligible it passes over is hit once (Damage, Weakened, School, Rider, OnHit
+    // as any Zone; onResolve once, after the band has passed everything). The drawn front: the cone's outline (a wide
+    // cone), the safe slice in the get-in color from the registration, and the band from the launch; a line front: the
+    // lanes it sweeps, its gaps in the get-in color, and the wall. Not with Persistent, Projectile, OutAndBack,
+    // FacingOffset, Rear, ExcludeSourceEnd, AnchorOn, Park or DropSpot.
+    //
+    //     ConeFrontSpec ring{ sliceBearing, 60.f, novaRadius, 45.f, 4.f, 8.f };   // slice, start, end, band, speed
+    //     MechanicHandle h = Mechanic::ConeFront(me, novaSpot, ring, 2500ms).Damage(30.f).School(SPELL_SCHOOL_FIRE)
+    //         .Weakened().Tag(3);
+    //     Mechanic::FrontSafe(me, h, me, novaRadius + 12.f);       // the tank leads him into the slice
+    //
+    // ConeFront: `apex` is a point (its orientation is ignored); the band starts with its inner edge on startYd and the
+    // front is over once that edge passes endYd. LineFront: `start` is the middle of the wall's start line; the wall
+    // is widthYd across, travels along spec.facing, and is over once its back edge passes travelYd.
+    MechanicRef ConeFront(Unit* owner, Position const& apex, BossMechanics::ConeFrontSpec const& spec,
+        Milliseconds warn);
+    MechanicRef LineFront(Unit* owner, Position const& start, BossMechanics::LineFrontSpec const& spec,
+        Milliseconds warn);
+    // A live front's safe slot for the bots: a Zone nobody is eligible for and nothing draws (the cone front's slice,
+    // or the line front's gap `gap`), with ParkTogether(parked): the bot tank of `parked` (nullptr: the owner) leads it
+    // into the slot and stands there with it. Live from now until the band's back edge has passed `untilYd` from the
+    // apex or start line (0: the whole front), so a later ring's FrontSafe takes over once this band is past the tank.
+    MechanicRef FrontSafe(Unit* owner, MechanicHandle front, Unit const* parked = nullptr, float untilYd = 0.f,
+        std::size_t gap = 0);
 
     // handles
     void Cancel(Unit* owner, MechanicHandle h);
