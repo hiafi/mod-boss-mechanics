@@ -1260,7 +1260,7 @@ namespace BossMechanics
 
         std::unordered_set<uint32> kept;     // hazard ids in the view (lane rects are filtered by them)
         // F-2b (R-2-FW m-4): a bot with a pet or guardian beside it keeps lethal walls farther off (the kit strikes
-        // pets too).
+        // pets too; F-3: not the ones that spare pets).
         bool const hasPet = HasFollowPet(bot);
         reg.ForEachActive(now - opt.postResolveHold, [&](ActiveMechanic const& m)
         {
@@ -1292,8 +1292,10 @@ namespace BossMechanics
                     std::max(kMaxDriftLead, opt.movingAnchorRecheck));
                 drift = driftSpeed * std::chrono::duration<float>(lead).count();
             }
+            // F-3: not on a lethal one that spares pets (players only, or SparesPets: Drakkisath's duel ring).
             if (m.lethal)
-                drift += ViewRules::LethalPetExtraYd(opt.safetyMarginYd, hasPet);
+                drift += ViewRules::LethalPetExtraYd(opt.safetyMarginYd, hasPet,
+                    !m.eligibility.playersOnly && !m.sparesPets);
             float const margin = opt.safetyMarginYd + drift;
 
             if (Geo::Dist2d(pose.x, pose.y, out.bot.x, out.bot.y) > Geo::Bounds(shape) + margin + reachYd)

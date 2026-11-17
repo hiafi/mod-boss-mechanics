@@ -162,6 +162,11 @@ namespace BossMechanics
         // across it, not in the reduced-margin pass, not under a grace, not as a Fallback, and see it from the moment
         // it registers (hot through its warning too). For the kit's LethalWall (Stratholme X4). Bots only.
         MechanicRef& Lethal();
+        // A lethal one whose owner's strike spares pets and guardians (the kit's LethalRing with pets = false): a bot
+        // with a pet keeps no extra pet margin from it (ViewRules::LethalPetExtraYd; Blackrock Spire F-3). Bots only.
+        // A players-only lethal one (Eligible playersOnly) is treated as sparing pets too: an owner whose own strike
+        // hits pets must not set playersOnly.
+        MechanicRef& SparesPets();
         MechanicRef& OnHit(std::function<void(Unit* hit)> fn);
         MechanicRef& OnResolve(std::function<void(ResolveResult const&)> fn);
 

@@ -112,7 +112,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`,
 `MissedSoak(mode)`, `Count(n)`,
 `Targets(set)`, `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`,
-`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `OnHit(fn)`, `OnResolve(fn)`.
+`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `SparesPets()`, `OnHit(fn)`, `OnResolve(fn)`.
 
 M3 options:
 
@@ -127,6 +127,7 @@ M3 options:
 | `DropSpot(rule)` | shape kinds on a player | where its carrier bot takes it before it lands; bots only |
 | `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
 | `Lethal()` | Zone/Frontal, no mine or decoy | bots never plan a way across it ([below](#lethal-stratholme-x4)) |
+| `SparesPets()` | after `Lethal()` | its owner's strike spares pets: a pet owner's view adds no pet margin; bots only |
 | `MissedSoak(mode)` | Soak | when a short pass posts `MissedSoak`: `EveryPass` (default), `OnChange`, `Never` |
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
@@ -1203,6 +1204,11 @@ Mechanic::Zone(me, ZoneSpec{ Anchor(from), Shape::Line(length, 3.f), Anchor(to) 
 - **Pets** (F-2b, R-2-FW m-4): the kit strikes pets too, and a follow pet stands 2 yd beside its owner. A bot with a
   live pet or guardian keeps a lethal hazard `ViewRules::LethalPetExtraYd` farther off (its margin reaches the follow
   distance + 1 yd, 3 yd), counted as drift so the reduced-margin pass and the Fallback's lethal screen keep it too.
+  Not a lethal hazard that spares pets (Blackrock Spire F-3): one eligible to players only (`Eligibility::playersOnly`,
+  the drill's `only=member`) or one whose owner declares `MechanicRef::SparesPets()` (the kit's `LethalRing` with
+  `pets = false`: Drakkisath's duel ring pushes pets out). With the margin, a pet owner challenged in the duel ring
+  found no spot: the ring forbade 8.0 yd and out, the Thunderclap 8.75 yd and in. Players only implies sparing pets:
+  an owner whose own strike hits pets (outside the registry's judge) must not set `playersOnly` on a lethal hazard.
 - **Movement spells** (F-2b, R-2-B for X4): in Idle and Watch the lock refuses a gap closer whose straight way to its
   landing enters a lethal hazard (`Landing::CloserCrossesLethal`: Charge, Intercept, Heroic Leap, Shadowstep, Death
   from Above over a wall to a target beyond it), and a mover that lands away whose way does (`Landing::AwayPoint`, 20
@@ -1375,10 +1381,36 @@ Mechanic::LineFront(me, portcullisMiddle, wall, 6000ms).Damage(25.f).School(SPEL
   Fallback while its end stays clear until that window (`Plan::clearUntil`, `FallbackHolds`), and never lets a spot
   outside the hard bounds (`Within`) set its floor: the bot stands in the first slot as the first front passes and
   crosses behind it to the next one. Give a line front `Within(arena)`: outside the room every spot is "safe".
+- **Walls in the Fallback (Blackrock Spire F-3).** With a wall (a line front) in the view, the spot the bot stands on
+  joins the Fallback's floor even when it is not hazard-free: a spot in the first gap never is (the second wall comes
+  through it), while a spot in the second gap is, from an arrival behind the first wall, and without its own spot in
+  the ranking the bot left the first gap at once on a way through the first wall (the live sweep's Zone/11: the first
+  wall on nearly every member in 4 of 5 iterations). The Fallback's exact walk also checks each sample from
+  `startDelay` + one map update (`Detail::kSweepLagMs`) before its planned time (`Params::earlyMs`): the live bot
+  leaves at once and the registry sweeps the band since the previous update, so a way that clips the first wall's
+  trailing edge is not a clean one (the plan's `exposure` is still measured at the planned times, R-3 m-2). Cone
+  fronts keep the floor as before.
+- **A shape on the bots during the walls (F-3b, R-3 m-1).** The own spot is on that floor whatever else will land on
+  it, and its walk is zero-length, so it outranked every way that crosses anything: a bot waiting in the first gap
+  held its spot under a circle dropped on it until a step out no longer fit. In Rend's real fight that is Gyth's mark
+  (a 4 s cone; refused while Gyth hovers for the sweep, so only one marked just before the call, or while Gyth is
+  still walking in) and, in heroic, Shadowflame (the round after the sweep: its circles land under every player 13 s
+  after the call, while the second wall rolls, and leave 6 yd pools armed 0.5 s later, which no solver dodges). When a
+  non-wall hazard will be hot on the bot's spot, the spots within 20 yd in the same gap join the floor too: the first
+  wall to reach them is the one that reaches the bot's spot, the straight way there touches no wall's exact hitbox,
+  and no non-wall hazard is hot there from the arrival on. `tests/front_test.cpp` gates it (heroic two walls, a circle
+  on every bot 3.5 s after the call, 3 s warning, 360 drops and 720 wall passes): live, circle / wall hits 2 yd 11 / 1
+  -> 0 / 1, 5 yd 21 / 6 -> 0 / 4; on the model's own timing 8 / 0 -> 0 / 2 and 51 / 31 -> 0 / 26. The trade-off: the
+  own spot alone stays on the floor (dropping it when hot, or putting every spot clean of non-wall hazards on it,
+  brought back 22-48 wall hits), and a drop at the second wall's launch (6 s, 3 s warning, 5 yd) takes a few more wall
+  hits on the model's own timing (21 -> 32; live 9 -> 7) for no circle hits (6 -> 0). Walls alone are unchanged.
 - **What the bots can and cannot do** (`tests/front_test.cpp`, the brain model with the room's walls): Rend's normal
-  wall, 0 hits; heroic two walls with the second gap within 20 yd of the first, 4 hits in 360 wall passes; with the gap
-  anywhere on the other side (up to 32 yd apart), 38 in 360 (a crossing of more than about 20 yd behind the first wall
-  does not fit in 3 s). Emberseer with the group close (within 9 yd): no ring hits in 2,000 ring passes; the nova and
+  wall, 0 hits; heroic two walls with the second gap within 20 yd of the first, 0 hits in 360 wall passes (also on the
+  live timing, `BrainModel::Config::Live`); with the gap anywhere on the other side (up to 32 yd apart), 35 in 360 (a
+  crossing of more than about 20 yd behind the first wall does not fit in 3 s). The drill's row 24
+  (`tests/brs_upper_followups_test.cpp`, Rend's walls in a 20 yd `inside=` circle): no first-wall hits; second-wall
+  hits only with the gaps more than 16 yd apart (8-13% of those passes), where the circle leaves no room to cross in
+  time. Emberseer with the group close (within 9 yd): no ring hits in 2,000 ring passes; the nova and
   the first ring together are out of reach for a bot (or a player) across the boss from a random slice beyond a few
   yards, or inside a nova of 10 yd or more (13+ stacks): 57 nova hits in 700 nova passes there; with the ranged at
   15 yd, 65 ring hits in 900. Both are design questions (the WP-RF report), not solver work.
@@ -1407,6 +1439,10 @@ centreline from the previous `linefront`'s, `apart=` at most that far from it. T
 **Ring orbit (Blackrock Spire WP-SF).** When a bot's view holds a sequence of cone fronts that start at the apex
 (Emberseer's rings 2-4), the solver's `Detail::RingOrbit` step moves the bot to the side of its current slice nearest
 the next ring's slice, close to the boss, and picks the earliest clean departure once the current band has passed.
+The step is planned with no start delay (`Detail::kOrbitStartDelay`, F-3): it starts from a hold, and live the brain's
+`MoveTo` has the bot on its way at the next map update. Planned with `StartDelayMs` (150 ms) it left the slice that
+much early, into the trailing edge of the band the registry sweeps (the live sweeps' heroic rings 2-4, 17-20% of the
+passes; 25-28% in the brain model on the live timing, 6-9% now).
 Bots with hard regions, carried shapes or a park (the parked tank) skip it, and without such a sequence the solver
 behaves as before. A ring of a sequence that has a next ring sets `ConeFrontSpec::nextTurnDeg` (that ring's turn,
 clockwise degrees; 0 on the last): the hint tells the orbit which way the next slice turns. The dungeon kit's

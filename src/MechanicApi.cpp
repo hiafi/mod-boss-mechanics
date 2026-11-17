@@ -600,6 +600,14 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::SparesPets()
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("SparesPets", cur && cur->lethal))
+            m->sparesPets = true;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::OnHit(std::function<void(Unit* hit)> fn)
     {
         if (ActiveMechanic* m = Edit("OnHit", true))
