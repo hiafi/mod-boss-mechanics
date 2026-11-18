@@ -19,7 +19,9 @@
  * - turned teammates (SFK F1): IsHostilePlayer, read by TargetEntry::HostilePlayers and the playerbots fork's
  *   hostile-teammate hook (MechanicBotTargets.cpp);
  * - taunt swaps (Blackrock Spire WP-TS): TauntSwapEntry here, the rules in MechanicTauntSwap.h;
- * - passes (Blackrock Spire WP-PS): PassEntry here, the rules in MechanicPass.h.
+ * - passes (Blackrock Spire WP-PS): PassEntry here, the rules in MechanicPass.h;
+ * - holds (Blackrock Depths WP-DS, shared doc BD3): HoldEntry, HoldOn, HeldDamageMask, DamageHeld, KicksHeld (an
+ *   Attacks hold is read by IsIgnored); the dispel rank key DispelEntry::MostStacksFirst (OrderDispels).
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DESCRIPTOR_H
@@ -162,6 +164,15 @@ namespace BossMechanics
         {
         }
 
+        // Blackrock Depths WP-DS (Gerstahn's Doubt): among afflictions of equal urgency and priority, the member with
+        // the most stacks of aura `aura` (any caster) goes first, before the time-left order. Shadow Word: Pain on the
+        // player with the most Doubt first: `DispelEntry(SPELL_SWP, 2).MostStacksFirst(SPELL_DOUBT)`.
+        DispelEntry& MostStacksFirst(std::uint32_t aura)
+        {
+            rankAura = aura;
+            return *this;
+        }
+
         std::uint32_t auraId = 0;
         std::uint8_t priority = 1;          // higher first
         bool urgent = false;                // loss of control: before everything, past the healers' 50% gate
@@ -170,6 +181,7 @@ namespace BossMechanics
         // neither the listed walk nor the stock cure rows (they pass over a member whose only aura of the type is
         // held). Urgency does not override it.
         Condition when;
+        std::uint32_t rankAura = 0;         // MostStacksFirst: the stacked aura ranked on (0: none)
     };
 
     struct PurgeEntry
@@ -303,6 +315,62 @@ namespace BossMechanics
         std::uint32_t entry = 0;
         std::uint64_t guid = 0;             // raw ObjectGuid; set: that unit only
         Condition when;
+    };
+
+    // Blackrock Depths WP-DS (shared doc BD3, aura-conditioned boss data): "hold action A on unit U while U has aura
+    // X", one rule for Eviscerator's Spell Eater (hold magic damage on him while the shell is up), Angerforge's
+    // Commanding Aura (hold interrupts on an add that has it) and any "leave it alone while" case. The bots, not the
+    // server: a human may still hit or kick it.
+    //     d.holds.push_back(HoldEntry::Damage(NPC_EVISCERATOR, SPELL_SPELL_EATER, kSchoolMaskMagic));
+    //     d.holds.push_back(HoldEntry::Interrupts(NPC_ANVILRAGE_OFFICER, SPELL_COMMANDING_AURA));
+    //     d.holds.push_back(HoldEntry::Attacks(NPC_SHADE, SPELL_INCORPOREAL));
+    constexpr std::uint32_t kSchoolMaskPhysical = 0x01;
+    constexpr std::uint32_t kSchoolMaskMagic = 0x7E;     // holy, fire, nature, frost, shadow, arcane
+    constexpr std::uint32_t kSchoolMaskAll = 0x7F;
+
+    struct HoldEntry
+    {
+        enum class Action : std::uint8_t
+        {
+            Damage,         // no damaging spell (direct, periodic, leech, weapon) whose school meets `schoolMask`;
+                            // a wand's shot counts by the wand's damage school. White swings are not held (Attacks).
+            Interrupts,     // no kick or cast-stopper used as one: neither `boss kick` nor the stock rows
+            Attacks         // no attack at all: the unit is treated as ignored (IgnoreEntry) while the hold is on
+        };
+
+        HoldEntry(std::uint32_t entry_ = 0, std::uint32_t auraId_ = 0, Action action_ = Action::Damage,
+            std::uint32_t schoolMask_ = kSchoolMaskMagic, Condition when_ = {})
+            : entry(entry_), auraId(auraId_), action(action_), schoolMask(schoolMask_), when(std::move(when_))
+        {
+        }
+
+        static HoldEntry Damage(std::uint32_t entry, std::uint32_t auraId, std::uint32_t schoolMask = kSchoolMaskMagic,
+            Condition when = {})
+        {
+            return HoldEntry(entry, auraId, Action::Damage, schoolMask, std::move(when));
+        }
+        static HoldEntry Interrupts(std::uint32_t entry, std::uint32_t auraId, Condition when = {})
+        {
+            return HoldEntry(entry, auraId, Action::Interrupts, 0, std::move(when));
+        }
+        static HoldEntry Attacks(std::uint32_t entry, std::uint32_t auraId, Condition when = {})
+        {
+            return HoldEntry(entry, auraId, Action::Attacks, kSchoolMaskAll, std::move(when));
+        }
+
+        // One unit (raw ObjectGuid), whatever its entry.
+        HoldEntry& OnUnit(std::uint64_t guid_)
+        {
+            guid = guid_;
+            return *this;
+        }
+
+        std::uint32_t entry = 0;            // 0 (and no guid): any non-player unit
+        std::uint64_t guid = 0;             // raw ObjectGuid; set: that unit only
+        std::uint32_t auraId = 0;           // the unit has this aura (0: always)
+        Action action = Action::Damage;
+        std::uint32_t schoolMask = kSchoolMaskMagic;    // Damage: the held schools (SpellSchoolMask bits)
+        Condition when;                     // judged on the unit too (both must hold)
     };
 
     // When the holder of a pass throws (Blackrock Spire WP-PS, PassEntry below). Any one trigger that fires makes the
@@ -555,6 +623,7 @@ namespace BossMechanics
         std::vector<IgnoreEntry> ignores;
         std::vector<TauntSwapEntry> tauntSwaps;     // Blackrock Spire WP-TS
         std::vector<PassEntry> passes;              // Blackrock Spire WP-PS
+        std::vector<HoldEntry> holds;               // Blackrock Depths WP-DS (BD3)
         // Auras that mark a charmed player as turned against the group (SFK F1: Arugal's Turned). A charmed player
         // carrying one is a valid attack target for bots, and bots stop healing, buffing and curing it, until the
         // aura or the charm ends. Empty: a charmed teammate stays off limits (the playerbots default).
@@ -564,7 +633,7 @@ namespace BossMechanics
         bool Empty() const
         {
             return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty()
-                && tauntSwaps.empty() && passes.empty() && hostilePlayerAuras.empty();
+                && tauntSwaps.empty() && passes.empty() && holds.empty() && hostilePlayerAuras.empty();
         }
     };
 }
@@ -730,6 +799,13 @@ namespace BossMechanics::Desc
             AddReference(r, e.when);
         for (TauntSwapEntry const& e : d.tauntSwaps)
             AddReference(r, e.when);
+        // Blackrock Depths WP-DS: the hold's aura and condition, both judged on the held unit.
+        for (HoldEntry const& e : d.holds)
+        {
+            if (e.auraId && !Contains(r.auras, e.auraId))
+                r.auras.push_back(e.auraId);
+            AddReference(r, e.when);
+        }
         // Blackrock Spire WP-PS: the holder aura (who holds it), the catch, preference, hold, gate and trigger
         // conditions.
         for (PassEntry const& e : d.passes)
@@ -1164,6 +1240,7 @@ namespace BossMechanics::Desc
         Ms remaining{ 0 };
         std::uint8_t rank = 0;      // the stock order of the member (master, healers, tanks, others: 0 first)
         bool held = false;          // DispelHeld for this member now (the caller judged it): left out
+        std::uint32_t rankStacks = 0;   // the member's stacks of the entry's rankAura (MostStacksFirst; 0: none)
     };
 
     struct DispelPick
@@ -1173,8 +1250,9 @@ namespace BossMechanics::Desc
         bool urgent = false;
     };
 
-    // The listed afflictions, best first: urgent before the rest, then the entry's priority, then the aura with less
-    // time left, then the member's stock rank and key. Unlisted auras are left out (the stock order handles them,
+    // The listed afflictions, best first: urgent before the rest, then the entry's priority, then (WP-DS) the more
+    // stacks of the entry's rankAura (MostStacksFirst; entries without one count 0), then the aura with less time
+    // left, then the member's stock rank and key. Unlisted auras are left out (the stock order handles them,
     // after every listed one), and so are held ones (Affliction::held). `urgentOnly`: the urgent ones only (the
     // `boss dispel urgent` action).
     inline std::vector<DispelPick> OrderDispels(Descriptor const& d, std::vector<Affliction> const& afflictions,
@@ -1201,6 +1279,10 @@ namespace BossMechanics::Desc
                 return pa > pb;
             Affliction const& x = afflictions[a.affliction];
             Affliction const& y = afflictions[b.affliction];
+            std::uint32_t const sx = d.dispels[a.entry].rankAura ? x.rankStacks : 0;
+            std::uint32_t const sy = d.dispels[b.entry].rankAura ? y.rankStacks : 0;
+            if (sx != sy)
+                return sx > sy;
             if (x.remaining != y.remaining)
                 return x.remaining < y.remaining;
             if (x.rank != y.rank)
@@ -1280,7 +1362,55 @@ namespace BossMechanics::Desc
         return false;
     }
 
-    // Is the unit on the ignore list now? An entry with neither guid nor entry matches nothing.
+    // ----------------------------------------------------------------------------------------------------------------
+    // Holds (Blackrock Depths WP-DS, shared doc BD3)
+    // ----------------------------------------------------------------------------------------------------------------
+
+    // Does the hold apply to the unit now: the unit matches (guid; else entry; entry 0: any non-player unit), it has
+    // the aura (auraId 0: no aura needed) and `when` holds on it. A dead unit is never held.
+    inline bool HoldOn(HoldEntry const& e, UnitFacts const& u, Context const& ctx)
+    {
+        if (!u.alive)
+            return false;
+        bool const match = e.guid ? e.guid == u.guid : e.entry ? !u.player && e.entry == u.entry : !u.player;
+        if (!match || (e.auraId && !Contains(u.auras, e.auraId)))
+            return false;
+        return Holds(e.when, u, ctx);
+    }
+
+    // The schools no damage may come in on the unit now (SpellSchoolMask bits): every Damage hold's mask, and all of
+    // them for an Attacks hold. 0: nothing held.
+    inline std::uint32_t HeldDamageMask(Descriptor const& d, UnitFacts const& u, Context const& ctx)
+    {
+        std::uint32_t mask = 0;
+        for (HoldEntry const& e : d.holds)
+            if ((e.action == HoldEntry::Action::Damage || e.action == HoldEntry::Action::Attacks) && HoldOn(e, u, ctx))
+                mask |= e.action == HoldEntry::Action::Attacks ? kSchoolMaskAll : e.schoolMask;
+        return mask;
+    }
+
+    // A damaging spell of `spellSchoolMask` on the unit is held now (any school in common with a held mask).
+    inline bool DamageHeld(Descriptor const& d, UnitFacts const& u, Context const& ctx, std::uint32_t spellSchoolMask)
+    {
+        return (HeldDamageMask(d, u, ctx) & spellSchoolMask) != 0;
+    }
+
+    // No kick on the unit now: an Interrupts hold (an Attacks hold covers kicks through the ignore list).
+    inline bool KicksHeld(Descriptor const& d, UnitFacts const& u, Context const& ctx)
+    {
+        for (HoldEntry const& e : d.holds)
+            if (e.action == HoldEntry::Action::Interrupts && HoldOn(e, u, ctx))
+                return true;
+        return false;
+    }
+
+    inline bool HasHolds(Descriptor const& d, HoldEntry::Action action)
+    {
+        return std::any_of(d.holds.begin(), d.holds.end(), [action](HoldEntry const& e) { return e.action == action; });
+    }
+
+    // Is the unit on the ignore list now? An entry with neither guid nor entry matches nothing. WP-DS: an Attacks hold
+    // that applies counts as an ignore entry (no damage from bots or pets, no AoE count, no kick).
     inline bool IsIgnored(Descriptor const& d, UnitFacts const& u, Context const& ctx)
     {
         for (IgnoreEntry const& e : d.ignores)
@@ -1289,6 +1419,9 @@ namespace BossMechanics::Desc
             if (match && Holds(e.when, u, ctx))
                 return true;
         }
+        for (HoldEntry const& e : d.holds)
+            if (e.action == HoldEntry::Action::Attacks && HoldOn(e, u, ctx))
+                return true;
         return false;
     }
 

@@ -354,6 +354,7 @@ namespace BossMechanics
                 else
                     _st.perception.clear();
                 Player* bot = _bot;
+                _hooks.selfMelee = PlayerbotAI::IsMelee(bot);   // WP-DS: SpotBounds::For's Melee / Ranged
                 _hooks.plannedSpot = [bot](ObjectGuid guid, Geo::Vec3& spot, float& facing)
                 {
                     Player const* member = ObjectAccessor::GetPlayer(*bot, guid);
@@ -2308,8 +2309,10 @@ namespace BossMechanics
         if (st.reserved && st.viewInfo.tasks.empty())
             DropBoard(reg, bot, st);
         BotRole::UpdateFrontalSources(bot, *reg, st, cfg);
+        // Blackrock Depths WP-DS: strict bounds bind the bot (its owner fights it): Watch keeps its spot and its stock
+        // motions inside them.
         bool const relevant = AnyRelevant(in) || AnyTask(st, now) || now <= st.freezeUntil
-            || (cfg.tankFacingEnable && !st.frontalSources.empty());
+            || (cfg.tankFacingEnable && !st.frontalSources.empty()) || DropSpot::AnyStrict(in.bounds);
         if (!relevant)
         {
             DropBoard(reg, bot, st);

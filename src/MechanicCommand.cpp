@@ -10,8 +10,8 @@
  *   .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
- *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups> [cycles=3] [seed=]
- *               [dmg=1] [self=0]
+ *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
+ *               |blackrock-depths-shapes|blackrock-depths-shapes-2> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -68,6 +68,13 @@
  * end of the warning it hits every scope member inside who is on the ground (damage keys as a circle); whoever is in
  * the air is spared, and bots hop for it (MechanicJump.h).
  *
+ * Blackrock Depths build WP-HK (the `hide` row of drill `blackrock-depths-shapes`): `hide <range> <ms> [blockers=3]
+ * [apart=8] [r=2.5] [display=3711] [go=148503] [behind=3] [share=2] [eye=<yd>] [linger=3000]` summons `blockers` game
+ * objects on a ring of `apart` yd round the selected creature (else the test owner), the first along the GM's facing,
+ * sets their display, and registers a Mechanic::Hide from that creature over them (MechanicHide.h): at the end of the
+ * warning every scope member within `range` it can see is hit (damage keys as a circle); bots hide behind the
+ * blockers. The blockers despawn `linger` ms after the resolve.
+ *
  * Blackrock Spire build (WP-G1 §3.9, drill `blackrock-spire-followups`): every command (and drill run) keeps the far
  * ends of its last fixed lines (Dice::ends, Drill::LineEnds): `at=last:<n>` lands on the end of the line n before the
  * last (a shape placed after a later line), and `to=last[:<n>]` aims a line at such an end, frozen like fix=1
@@ -85,6 +92,17 @@
  * `only=member` makes the shape eligible to one player, drawn with pick= (the challenger of Drakkisath's ring). A
  * cone takes `fix=1` with to= (aimed once, at registration).
  *
+ * Blackrock Depths build (WP-G1 §3.9, drill `blackrock-depths-shapes`): `offset=<deg>` on a line turns its fixed
+ * facing (and shift='s axes) counterclockwise, and two drill-only steps (RunDrillWith, MechanicDrill.h "Blackrock
+ * Depths shapes"): `walk <yd> <ms> [offset=]` relocates the selected creature along the run's facing (ScheduleWalk; a
+ * boss with combat movement off) and `leash <yd> <ms> [role=tank] [tick=] tag=<n>` posts an OffSpot failure for each
+ * scope member left farther than <yd> from it (ScheduleLeash; nothing registers, so the bots never see it).
+ *
+ * Blackrock Depths build (WP-G2 §3.9, drill `blackrock-depths-shapes-2`): `soak <width> <ms> shape=line
+ * to=target|member|me` is a beam from the anchor to that unit (Shapes::Line(from, to, width): it turns with the unit,
+ * its length is the distance at registration), and `at=target` lands a point where the selected unit stands as the
+ * repeat registers (a drill parses its steps at the start, so a plain point stays where a walking boss started).
+ *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
 
@@ -92,6 +110,7 @@
 #include "Chat.h"
 #include "CommandScript.h"
 #include "Creature.h"
+#include "GameObject.h"
 #include "GameTime.h"
 #include "Group.h"
 #include "Log.h"
@@ -548,13 +567,25 @@ namespace
         Position insideCentre;          // inside=: the selected unit's spot, set when the repeat registers
         bool lethal = false;            // lethal=1: MechanicRef::Lethal()
         bool onlyMember = false;        // only=member: eligible to one member (pick=), players only
+        // Blackrock Depths build WP-HK (`hide`, MechanicHide.h): the blockers summoned round the source
+        uint32 hideBlockers = 3;        // blockers=: how many (0-8)
+        float hideApart = 8.f;          // apart=: their ring round the source (yd)
+        float hideRadius = Hide::kDefaultBlockerRadiusYd;   // r=: each footprint (yd)
+        uint32 hideGo = Ids::GO_HIDE_TEST_BLOCKER;          // go=: the game object entry summoned
+        uint32 hideDisplay = Hide::kDisplayLavaRock;        // display=: its display (0: the template's)
+        float hideBehind = Hide::kDefaultBehindYd;          // behind=
+        uint8 hideShare = Hide::kDefaultShare;              // share=
+        float hideEye = -1.f;           // eye=: the source's eye height (< 0: its collision height)
+        Milliseconds hideLinger{ 3000 };    // linger=: the blockers stay this long after the resolve
+        // Blackrock Depths build WP-G2 (drill `blackrock-depths-shapes-2`)
+        bool atTarget = false;          // at=target: where the selected unit stands as the repeat registers
     };
 
     bool IsShapeName(std::string const& s)
     {
         static char const* const shapes[] = { "circle", "donut", "cone", "rearcone", "line", "projectile", "mine",
             "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
-            "conefront", "linefront" };
+            "conefront", "linefront", "hide" };
         for (char const* name : shapes)
             if (s == name)
                 return true;
@@ -862,7 +893,26 @@ namespace
         }
         else if (s == "soak")
         {
-            MechanicRef ref = spec.lane ? Mechanic::Soak(owner, laneSpec(), spec.need, spec.warn)
+            // shape=line to= (Blackrock Depths WP-G2): a beam from the anchor to that unit, Shapes::Line(from, to):
+            // it turns with the unit live, its length is the distance now.
+            std::optional<ZoneSpec> beam;
+            if (spec.lane && spec.to != TestSpec::To::None)
+            {
+                Unit* toUnit = ObjectAccessor::GetUnit(*owner, spec.toUnit);
+                if (!toUnit)
+                {
+                    err = "the to= unit is gone";
+                    return ids;
+                }
+                if (here.GetExactDist2d(toUnit) < 1.f)
+                {
+                    err = "the beam's ends are within 1 yd of each other";
+                    return ids;
+                }
+                beam = Shapes::Line(anchor, Anchor(toUnit), spec.width);
+            }
+            MechanicRef ref = beam ? Mechanic::Soak(owner, *beam, spec.need, spec.warn)
+                : spec.lane ? Mechanic::Soak(owner, laneSpec(), spec.need, spec.warn)
                 : Mechanic::Soak(owner, anchor, spec.size, spec.need, spec.warn);
             ApplyCommon(ref, spec, false, true);
             keep(ref);
@@ -899,6 +949,42 @@ namespace
         {
             // Stratholme X3: a circle of `size` that sweeps at the end of the warning; whoever is in the air is spared.
             MechanicRef ref = Mechanic::Jump(owner, anchor, spec.size, spec.warn);
+            ApplyCommon(ref, spec, true, false);
+            keep(ref);
+        }
+        else if (s == "hide")
+        {
+            // Blackrock Depths WP-HK (MechanicHide.h): the selected creature (else the test owner) is the source;
+            // `blockers` game objects on a ring of `apart` yd round it, the first along the GM's facing, each with
+            // `display`; a Hide of range `size` from it over them. The blockers despawn `linger` after the resolve.
+            Unit* source = ObjectAccessor::GetUnit(*owner, spec.selected);
+            if (!source || !source->IsCreature() || !source->IsInWorld() || source->GetMap() != owner->GetMap())
+                source = owner;
+            HideSpec hide{ Anchor(source) };
+            hide.Range(spec.size).Behind(spec.hideBehind).Share(spec.hideShare);
+            if (spec.hideEye >= 0.f)
+                hide.Eye(spec.hideEye);
+            uint32 const lifeSecs = static_cast<uint32>(((spec.warn + spec.hideLinger).count() + 999) / 1000);
+            for (uint32 i = 0; i < spec.hideBlockers; ++i)
+            {
+                float const a = Geo::WrapPi(spec.facing + Geo::kTwoPi * static_cast<float>(i)
+                    / static_cast<float>(spec.hideBlockers));
+                float const x = source->GetPositionX() + std::cos(a) * spec.hideApart;
+                float const y = source->GetPositionY() + std::sin(a) * spec.hideApart;
+                float const z0 = source->GetPositionZ();
+                float const ground = owner->GetMap()->GetHeight(owner->GetPhaseMask(), x, y, z0 + 2.f, true, 10.f);
+                float const z = ground > INVALID_HEIGHT && std::fabs(ground - z0) <= 5.f ? ground : z0;
+                GameObject* go = owner->SummonGameObject(spec.hideGo, x, y, z, a, 0.f, 0.f, 0.f, 0.f, lifeSecs);
+                if (!go)
+                {
+                    err = Acore::StringFormat("game object {} could not be summoned (go=)", spec.hideGo);
+                    return ids;
+                }
+                if (spec.hideDisplay && go->GetDisplayId() != spec.hideDisplay)
+                    go->SetDisplayId(spec.hideDisplay);     // recreates its collision model (GameObject::UpdateModel)
+                hide.Blocker(go->GetGUID(), go->GetPosition(), spec.hideRadius);
+            }
+            MechanicRef ref = Mechanic::Hide(owner, hide, spec.warn);
             ApplyCommon(ref, spec, true, false);
             keep(ref);
         }
@@ -1315,6 +1401,14 @@ namespace
                 spec.point = selected->GetPosition();
             spec.point.SetOrientation(spec.facing);
         }
+        if (spec.atTarget)
+        {
+            // at=target (Blackrock Depths WP-G2): where the selected unit stands now. A drill parses its steps at its
+            // start, so a plain point would stay where a walking boss stood then.
+            if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+                spec.point = selected->GetPosition();
+            spec.point.SetOrientation(spec.facing);
+        }
         if (spec.atPrev)
         {
             // The centre of the last point-anchored circle; none yet: where the selected unit stands now.
@@ -1667,7 +1761,7 @@ namespace
 
     constexpr char const* kTestUsage = "Usage: .mech test <shape> <size> <ms> [key=value ...]; shapes: circle donut "
         "cone rearcone line projectile mine lanes spread runout stack soak frontal bait holdstill spot jump conefront "
-        "linefront; "
+        "linefront hide; "
         "rider=<spell> takes only the module's spells 205008-205099";
 
     // What a `.mech test` line is parsed against (M4): the reference unit stands in for the GM (`anchor=me`, the
@@ -1750,6 +1844,9 @@ namespace
             spec.minDist = opt.Float("min", 0.f);
             if (spec.minDist < 0.f)
                 opt.MarkBad("min");
+            // offset=<deg> (line, Blackrock Depths WP-G1): turns the fixed facing counterclockwise (applied below).
+            if (s == "line")
+                spec.offset = opt.Float("offset", 0.f);
         }
         if (s == "projectile")
         {
@@ -1815,6 +1912,8 @@ namespace
                 if (spec.landRadius <= 0.f)
                     opt.MarkBad("land");
             }
+            // to=target|member|me with shape=line (Blackrock Depths WP-G2): a beam from the anchor to that unit.
+            readTo(false);
         }
         if (s == "hunt")
         {
@@ -1881,6 +1980,41 @@ namespace
             spec.ring = opt.Float("ring", 10.f);
             if (spec.ring < 0.f)
                 opt.MarkBad("ring");
+        }
+        // Blackrock Depths WP-HK: `hide <range> <ms>`, blockers summoned on a ring round the source.
+        if (s == "hide")
+        {
+            int32 const blockers = opt.Int("blockers", 3);
+            if (blockers < 0 || blockers > static_cast<int32>(Hide::kTestMaxBlockers))
+                opt.MarkBad("blockers");
+            else
+                spec.hideBlockers = static_cast<uint32>(blockers);
+            spec.hideApart = opt.Float("apart", 8.f);
+            spec.hideRadius = opt.Float("r", Hide::kDefaultBlockerRadiusYd);
+            spec.hideBehind = opt.Float("behind", Hide::kDefaultBehindYd);
+            spec.hideEye = opt.Float("eye", -1.f);
+            spec.hideLinger = opt.Ms("linger", Milliseconds(3000));
+            int32 const share = opt.Int("share", Hide::kDefaultShare);
+            int32 const go = opt.Int("go", static_cast<int32>(Ids::GO_HIDE_TEST_BLOCKER));
+            int32 const display = opt.Int("display", static_cast<int32>(Hide::kDisplayLavaRock));
+            if (spec.hideApart <= spec.hideRadius)
+                opt.MarkBad("apart");
+            if (spec.hideRadius <= 0.f)
+                opt.MarkBad("r");
+            if (spec.hideBehind < 0.f)
+                opt.MarkBad("behind");
+            if (share < 1 || share > 40)
+                opt.MarkBad("share");
+            else
+                spec.hideShare = static_cast<uint8>(share);
+            if (go <= 0)
+                opt.MarkBad("go");
+            else
+                spec.hideGo = static_cast<uint32>(go);
+            if (display < 0)
+                opt.MarkBad("display");
+            else
+                spec.hideDisplay = static_cast<uint32>(display);
         }
         if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "line" || s == "conefront")
             spec.park = opt.Bool("park", false);
@@ -2112,6 +2246,8 @@ namespace
             spec.atPredict = true;
             spec.lead = opt.Ms("lead", Milliseconds(Drill::kDefaultPredictLeadMs));
         }
+        else if (at == "target")
+            spec.atTarget = true;
         else if (!at.empty())
             opt.MarkBad("at");
         std::string const pick = opt.Str("pick", "any");
@@ -2132,13 +2268,16 @@ namespace
 
         // anchor
         spec.facing = ctx.facing;
+        // A line's offset= turns its fixed facing, and with it the axes of shift= (Blackrock Depths WP-G1).
+        if (s == "line" && spec.offset != 0.f)
+            spec.facing = Geo::WrapPi(spec.facing + Geo::DegToRad(spec.offset));
         spec.gm = ctx.scope;
         spec.point = selected->GetPosition();
         spec.point.SetOrientation(spec.facing);
         spec.target = selected->GetGUID();
         spec.selected = selected->GetGUID();
         bool const atPoint = spec.atMember || spec.atGroup || spec.atGm || spec.atLast || spec.atEach || spec.atPrev
-            || spec.atPredict;
+            || spec.atPredict || spec.atTarget;
         if (s == "frontal")
         {
             if (selected == gm || !selected->IsCreature())
@@ -2186,10 +2325,25 @@ namespace
             return "exempt=target spares a unit: to=last aims at a point";
         if (spec.to == TestSpec::To::Last && spec.follow)
             return "to=last freezes the line at a recorded end: no follow=1";
+        if (s == "line" && spec.offset != 0.f && (spec.to != TestSpec::To::None || spec.follow))
+            return "offset= turns a line's fixed facing: not with to= (it aims the line) or follow=1";
         if (spec.shifted && (spec.unitAnchor || spec.anchorMember))
             return "shift= moves a point anchor; leave anchor= out";
         if (spec.cluster && spec.lane)
             return "cluster= needs a circle stack (no shape=line)";
+        if (spec.atTarget && selected == gm)
+            return "at=target lands where the selected unit stands: select one";
+        if (s == "soak" && spec.to != TestSpec::To::None)
+        {
+            // WP-G2: a beam between two units (Shapes::Line(from, to)); its length is the distance at registration.
+            if (!spec.lane)
+                return "to= on a soak makes a beam to that unit: add shape=line";
+            if (opt.Has("length"))
+                return "a beam runs to the to= unit: leave length= out";
+            if (spec.unitAnchor && ((spec.to == TestSpec::To::Target && spec.unit == spec.selected)
+                || (spec.to == TestSpec::To::Me && spec.unit == gm->GetGUID())))
+                return "a beam needs two ends: anchor= and to= name the same unit";
+        }
         if (spec.fix && spec.to == TestSpec::To::None)
             return "fix=1 and reach=1 aim at the to= unit: add to=member, target or me";
         if (spec.fix && (spec.follow || s == "projectile"))
@@ -2325,6 +2479,71 @@ namespace
         return p && p->IsInWorld() && p->GetMap() == owner->GetMap() ? p : nullptr;
     }
 
+    // Drill step `walk` (Blackrock Depths WP-G1, MechanicDrill.h): the selected creature walks `w.yd` along the run's
+    // facing turned by w.offsetDeg over `w.ms`, relocated every kWalkStepMs from where it stands when the walk starts
+    // (NearTeleportTo: a rooted unit moves too, the sim's boss stand-in is one), keeping its orientation and snapped
+    // to the floor from its last height. A creature only: never a player.
+    void ScheduleWalk(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec, Drill::WalkStep const& w)
+    {
+        auto const start = std::make_shared<std::optional<Position>>();
+        float const heading = Geo::WrapPi(spec.facing + Geo::DegToRad(w.offsetDeg));
+        uint32 const steps = Drill::WalkSteps(w.ms);
+        for (uint32 k = 0; k <= steps; ++k)
+        {
+            uint32 const elapsed = k ? Drill::WalkStepAt(k, w.ms) : 0;
+            schedule(delay + Milliseconds(elapsed), [selected = spec.selected, start, heading, w, elapsed](
+                Creature* testOwner)
+            {
+                Creature* unit = ObjectAccessor::GetCreature(*testOwner, selected);
+                if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                    return;
+                if (!*start)
+                    *start = unit->GetPosition();
+                if (!elapsed)
+                    return;
+                Position const& s = **start;
+                Geo::Vec3 const p = Drill::WalkPoint({ s.GetPositionX(), s.GetPositionY(), s.GetPositionZ() }, heading,
+                    w.yd, w.ms, elapsed);
+                unit->NearTeleportTo(p.x, p.y, GroundZ(testOwner, p.x, p.y, unit->GetPositionZ()),
+                    unit->GetOrientation());
+            });
+        }
+    }
+
+    // Drill step `leash` (Blackrock Depths WP-G1): every tick for `l.ms`, each alive scope member (role=tank: the ones
+    // the role provider calls tanks for the selected unit) farther than `l.yd` from the selected unit takes an OffSpot
+    // failure on the owner's encounter (ledger key Zone/<tag>). No mechanic registers: the bots never see it.
+    void ScheduleLeash(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::LeashStep const& l)
+    {
+        uint32 const ticks = Drill::LeashTicks(l.ms, l.tickMs);
+        for (uint32 k = 1; k <= ticks; ++k)
+            schedule(delay + Milliseconds(static_cast<int64>(k) * l.tickMs), [spec, l](Creature* testOwner)
+            {
+                Unit* unit = ObjectAccessor::GetUnit(*testOwner, spec.selected);
+                if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                    return;
+                Registry& reg = Registry::GetOrCreate(testOwner->GetMap());
+                reg.AddScopePlayer(testOwner->GetGUID(), spec.gm);
+                Geo::Vec3 const at{ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() };
+                for (Player const* p : GroupMembers(testOwner, spec.gm, spec.includeGm))
+                {
+                    if (l.tanksOnly && !HasRole(GetRoleProvider().Get(unit, p), Role::Tank))
+                        continue;
+                    if (!Drill::OutOfLeash(at, { p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() }, l.yd))
+                        continue;
+                    FailureEvent e;
+                    e.encounter = testOwner->GetGUID();
+                    e.tag = l.ledgerTag;
+                    e.kind = Kind::Zone;
+                    e.player = p->GetGUID();
+                    e.type = FailureEvent::Type::OffSpot;
+                    e.at = GameTime::GetGameTimeMS();
+                    reg.PostFailure(e);
+                }
+            });
+    }
+
     // RunDrill with the run's dice (a program shares one across its entries).
     bool RunDrillWith(Creature* owner, Unit* boss, ObjectGuid scopeGuid, Drill::Def const& def,
         DrillOptions const& opt, RngPtr const& rng, DrillResult& out, std::string& err)
@@ -2354,6 +2573,8 @@ namespace
         {
             bool marker = false;
             uint8 stacks = 0;
+            std::optional<Drill::WalkStep> walk;        // `walk` (Blackrock Depths WP-G1)
+            std::optional<Drill::LeashStep> leash;      // `leash`
             TestSpec spec;
         };
         ParseCtx const ctx = CtxOf(scope, scopeGuid);
@@ -2399,6 +2620,27 @@ namespace
                 planned.push_back(std::move(p));
                 continue;
             }
+            if (!head.empty() && (head[0] == "walk" || head[0] == "leash"))
+            {
+                // Drill-only (MechanicDrill.h "Blackrock Depths shapes"): the selected unit walks, or the scope
+                // members it leaves behind take ledger failures; nothing registers.
+                if (head[0] == "walk")
+                    p.walk = Drill::ParseWalk(line);
+                else
+                    p.leash = Drill::ParseLeash(line);
+                if (!p.walk && !p.leash)
+                {
+                    err = Acore::StringFormat("Drill {}: bad step '{}' (walk <yd> <ms> [offset=<deg>], leash <yd> "
+                        "<ms> [role=tank|any] [tick=<ms>] tag=<n>)", def.name, step.line);
+                    return false;
+                }
+                p.spec.gm = scopeGuid;
+                p.spec.includeGm = self;
+                p.spec.selected = boss->GetGUID();
+                p.spec.facing = ctx.facing;
+                planned.push_back(std::move(p));
+                continue;
+            }
             if (Drill::DamageStep(line) && !opt.percent)
                 line += Acore::StringFormat(" dmg={}", dmg);
             std::vector<std::string_view> const stepTokens = Acore::Tokenize(line, ' ', false);
@@ -2431,6 +2673,10 @@ namespace
                 {
                     DrillMarker(testOwner, spec, stacks, *rng);
                 });
+            else if (p.walk)
+                ScheduleWalk(schedule, delay, p.spec, *p.walk);
+            else if (p.leash)
+                ScheduleLeash(schedule, delay, p.spec, *p.leash);
             else
                 schedule(delay, [spec = p.spec, rng, follow](Creature* testOwner)
                 {
@@ -3621,6 +3867,11 @@ public:
                     m.front ? " front" : (m.projectile ? " projectile" : ""), m.mine ? (m.mine->armed ? " mine(armed)"
                     : " mine") : "",
                     m.persist ? " persistent" : "", m.decoy ? " decoy" : "", m.lethal ? " lethal" : "");
+                // Hide (Blackrock Depths WP-HK): the blockers alive and the spots of the last placement.
+                if (m.hide)
+                    handler->PSendSysMessage("    hide: {} of {} blocker(s) live, {} spot(s) ({} not good), placed {} "
+                        "time(s)", m.hide->live.size(), m.hide->spec.blockers.size(), m.hide->spots.size(),
+                        m.hide->badSpots, m.hide->placements);
             });
         handler->PSendSysMessage("{} active mechanic(s) on this map.", shown);
         return true;

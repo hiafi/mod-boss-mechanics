@@ -19,6 +19,7 @@
 #include "MechanicDescriptor.h"
 #include "MechanicFront.h"
 #include "MechanicGeometry.h"
+#include "MechanicHide.h"
 #include "MechanicJudge.h"
 #include "MechanicJump.h"
 #include "MechanicMath.h"
@@ -207,8 +208,9 @@ namespace BossMechanics
     // its view (MechanicRef::Within; DropSpotRule::Within for a carrier's drop). The union of `areas` (none =
     // anywhere; like the kit's arena regions: polygons, circles, boxes, each with a z band), minus the keep-out
     // circles (doors: the navmesh walks through a closed door). PathInside(): the walked path stays inside too, once
-    // it is in. The bot's own spot is never refused (a bot already outside may stay), and a parked boss's stop keeps
-    // the bounds as well. Bots only (Solver::Bounds, MechanicDropSpot.h). For a room with a door on its east wall:
+    // it is in. The bot's own spot is never refused (a bot already outside may stay) unless Strict(), and a parked
+    // boss's stop keeps the bounds as well; For(bits) binds some roles only (WP-DS). Bots only (Solver::Bounds,
+    // MechanicDropSpot.h). For a room with a door on its east wall:
     //
     //     SpotBounds room = SpotBounds().Polygon({ ... the walls ... }, floorZ - 3.f, floorZ + 5.f)
     //         .KeepOut(doorCenter, 6.f).PathInside();
@@ -281,7 +283,29 @@ namespace BossMechanics
             return *this;
         }
         SpotBounds& PathInside() { pathInside = true; return *this; }
+
+        // Blackrock Depths WP-DS (Lord of the Lake): who the bounds bind (default: everyone). The bot's role is the
+        // module's role provider's (the owner's victim is the tank); Melee and Ranged split the damage dealers by
+        // playerbots' IsMelee. `For(BoundsFor::Melee | BoundsFor::Tank)`: the melee and the tank stay on the causeway.
+        SpotBounds& For(uint8 who_) { who = who_; return *this; }
+        // Strict: the bot's own spot outside the bounds breaks them too (Solver::TargetOk), so a bot outside walks in,
+        // a stock motion that ends outside is re-routed (Watch) and the bot stays in Watch while they bind it. Without
+        // it a bot already outside may stay where it is (the F-1b rule).
+        SpotBounds& Strict() { strict = true; return *this; }
+
+        uint8 who = 0x0F;           // BoundsFor bits
+        bool strict = false;
     };
+
+    // SpotBounds::For bits (Blackrock Depths WP-DS).
+    namespace BoundsFor
+    {
+        constexpr uint8 Tank = 0x01;
+        constexpr uint8 Healer = 0x02;
+        constexpr uint8 Melee = 0x04;      // a melee damage dealer
+        constexpr uint8 Ranged = 0x08;     // a ranged damage dealer
+        constexpr uint8 All = 0x0F;
+    }
 
     // The drop spot rule (Stratholme build X2): where the carrier of a shape anchored on itself (a Zone with
     // AnchorOn(player): a circle that follows a player and lands where they stand) or of a line aimed at it (a Line
@@ -367,6 +391,82 @@ namespace BossMechanics
         DropSpotRule& Within(SpotBounds b) { bounds = std::move(b); return *this; }
     };
 
+    // The Hide kind (Blackrock Depths BD1, Mechanic::Hide; pure rules in MechanicHide.h). At the end of the warning
+    // everyone eligible within rangeYd of the source whom the source can see (real line of sight, from its centre at
+    // eyeHeight) is hit. The blockers are for the bots: each eligible player gets a spot behindYd past one of them on
+    // the far side from the source, at most `share` per blocker while there are enough, and the bots walk round the
+    // blockers. A blocker is a game object (its live position; dropped once it is gone: a melted Boulder) or a fixed
+    // point, with its footprint radius. Built in place and passed to Mechanic::Hide:
+    //
+    //     HideSpec furnace(me);                                   // the source: Bael'Gar
+    //     for (ObjectGuid const& g : boulders)
+    //         if (GameObject* go = me->GetMap()->GetGameObject(g))
+    //             furnace.Blocker(go->GetGUID(), go->GetPosition(), 2.5f);
+    //     Mechanic::Hide(me, furnace, 5000ms).Damage(80.f).School(SPELL_SCHOOL_FIRE).Tag(BG4);
+    struct HideBlocker
+    {
+        ObjectGuid go;                  // a game object (its live position), or empty for a fixed point
+        Position point;                 // the fixed point, or the object's position when it was listed
+        float radius = Hide::kDefaultBlockerRadiusYd;
+    };
+
+    struct HideSpec
+    {
+        Anchor source;                  // whose sight counts (a unit: its live position; a point)
+        std::vector<HideBlocker> blockers;
+        float rangeYd = Hide::kDefaultRangeYd;          // players farther (3D) are not judged (at most kMaxRangeYd)
+        // The source's eye above its feet; unset: its collision height (a point source: kTargetHeightYd).
+        std::optional<float> eyeHeight;
+        float reachYd = Hide::kDefaultReachYd;          // the ray starts this far toward the target (0: the centre)
+        float behindYd = Hide::kDefaultBehindYd;        // bots: the spot this far past the blocker's far edge
+        float spotRadiusYd = Hide::kDefaultSpotRadiusYd;    // bots: the region round the spot
+        uint8 share = Hide::kDefaultShare;              // bots: players per blocker while there are enough blockers
+
+        HideSpec() = default;
+        explicit HideSpec(Anchor const& src) : source(src) { }
+
+        HideSpec& Blocker(ObjectGuid go, Position const& at, float radius = Hide::kDefaultBlockerRadiusYd)
+        {
+            blockers.push_back({ go, at, radius });
+            return *this;
+        }
+        HideSpec& Blocker(Position const& at, float radius = Hide::kDefaultBlockerRadiusYd)
+        {
+            blockers.push_back({ ObjectGuid::Empty, at, radius });
+            return *this;
+        }
+        HideSpec& Range(float yd) { rangeYd = yd; return *this; }
+        HideSpec& Eye(float yd) { eyeHeight = yd; return *this; }
+        HideSpec& Reach(float yd) { reachYd = yd; return *this; }
+        HideSpec& Behind(float yd) { behindYd = yd; return *this; }
+        HideSpec& SpotRadius(float yd) { spotRadiusYd = yd; return *this; }
+        HideSpec& Share(uint8 n) { share = n; return *this; }
+    };
+
+    // A Hide's runtime (Registry::PlaceHide, StepHide): the blockers alive at the last placement, where each eligible
+    // player should stand, and what the resolve judged.
+    struct HideState
+    {
+        struct LiveBlocker
+        {
+            Position at;
+            float radius = 0.f;
+        };
+
+        HideSpec spec;
+        std::vector<LiveBlocker> live;                          // at the last placement
+        std::unordered_map<ObjectGuid, Position> spots;         // player -> spot (bots read; .mech list counts)
+        std::unordered_map<ObjectGuid, uint32> blockerOf;       // player -> index into `live`
+        GuidSet placedFor;                                      // the players the last placement saw
+        Position placedFrom;                                    // the source's position then
+        bool placed = false;
+        uint32 placements = 0;                                  // how many times the spots were placed
+        uint32 badSpots = 0;                                    // spots of the last placement that are not Good
+        GuidSet hidden;                                         // at the resolve: in range, out of sight
+        bool warnedNoModel = false;                             // the one-time "blocker has no collision" warning
+        bool warnedAllBad = false;                              // the one-time "no spot is good" warning
+    };
+
     // A bot's planned spot on one mechanic (M3 handoff §3.6). Registry::Reserve replaces the bot's earlier entry and
     // keeps its `since`; Tick drops it at `until`.
     struct Reservation
@@ -414,6 +514,7 @@ namespace BossMechanics
         bool fizzled = false;           // mine removed by its cap or lifetime: no damage
         ObjectGuid picked;              // Bait: who took it
         // Jump (Stratholme X3): the eligible players inside who were in the air (spared); `hits` are the tripped.
+        // Hide (Blackrock Depths BD1): the eligible players in range who were out of the source's sight (spared).
         std::vector<ObjectGuid> cleared;
     };
 
@@ -541,6 +642,8 @@ namespace BossMechanics
         // it right before the cast; the resolve filter reads it).
         std::unordered_map<ObjectGuid, HopNote> hops;
         GuidSet jumpCleared;
+        // Hide (Blackrock Depths BD1): the spec, the bots' spots and the resolve's verdict (Registry::StepHide).
+        std::optional<HideState> hide;
 
         bool IsShapeKind() const { return Judge::IsShapeKind(kind); }
         bool IsCluster() const { return kind == Kind::Stack && clusterMinOthers > 0; }
@@ -855,7 +958,9 @@ namespace BossMechanics
         // Shape kinds: inside the hitbox now (false for `who` when the shape is anchored on `who`, decision §7.7).
         // Spread/RunOut: within the radius of a carrier other than `who`. Stack/Soak: inside the shape. Stack
         // Cluster(n): at least n eligible players other than `who` within the radius of the point. Spot: within the
-        // radius of who's own spot. Jump: inside the shape, in the air or not (other kinds: false).
+        // radius of who's own spot. Jump: inside the shape, in the air or not. Hide: in range and in the source's sight
+        // now (real line of sight to the point at kTargetHeightYd; `who` alive in the map: to that unit). Other
+        // kinds: false.
         bool ContainsPoint(ActiveMechanic const& m, Position const& p, ObjectGuid who = ObjectGuid::Empty) const;
         bool ContainsUnit(ActiveMechanic const& m, Unit const* who) const;
         // When the point is dangerous (empty when it is outside the shape). Times are absolute.
@@ -877,6 +982,10 @@ namespace BossMechanics
         // flight, or with countPlanned a noted hop whose planned air time covers now).
         Jump::ClearBy JumpClearBy(ActiveMechanic const& m, Unit const* who, Milliseconds at, bool countPlanned) const;
         void SampleHops(ActiveMechanic& m, Milliseconds now);
+        // Hide (Blackrock Depths BD1): the source's position now (its unit, else the last known pose), and whether the
+        // source sees `p` (or `who`, when it is a unit in the map) from there. Range is not checked here.
+        Position HideSource(ActiveMechanic const& m) const;
+        bool HideSees(ActiveMechanic const& m, Position const& p, Unit const* who = nullptr) const;
 
     private:
         Unit* FindUnit(ObjectGuid guid) const;
@@ -899,6 +1008,11 @@ namespace BossMechanics
         void StepHoldStill(ActiveMechanic& m, Milliseconds now);
         void StepSpot(ActiveMechanic& m, Milliseconds now);
         void StepJump(ActiveMechanic& m, Milliseconds now);
+        void StepHide(ActiveMechanic& m, Milliseconds now);
+        // Hide: places every eligible player in range on a spot behind a live blocker (MechanicHide.h Assign, each
+        // candidate spot judged by a real ray, the floor and the encounter's lasting zones). `force`: even when
+        // nothing changed (Hide::NeedsReplace). Bumps the revision when the spots change.
+        void PlaceHide(ActiveMechanic& m, bool force);
         // One Stack/Soak judgement (a single resolve, or one pass of a lasting one).
         void JudgeStackSoak(ActiveMechanic& m, uint32 pass, Milliseconds now);
         // Shape kinds anchored on a player: that player (never hit by its own shape, decision §7.7); else empty.

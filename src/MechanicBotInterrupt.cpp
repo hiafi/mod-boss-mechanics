@@ -69,7 +69,8 @@ namespace
     {
         MarkHold = 1,
         MarkStockDrop = 2,
-        MarkMiss = 3
+        MarkMiss = 3,
+        MarkHoldDrop = 4        // WP-DS: a stopper dropped on a caster an Interrupts hold covers
     };
 
     Milliseconds Now()
@@ -453,12 +454,13 @@ void BotKick::Refresh(PlayerbotAI* botAI, MechanicBotState& st, Milliseconds now
     uint64 const self = bot->GetGUID().GetRawValue();
 
     // The encounter's interruptible casts (owner first, then the tracked units). M5 WP-F (R m-3): not on a unit the
-    // ignore list holds now (a hostile hit there costs what the list exists to avoid).
+    // ignore list holds now (a hostile hit there costs what the list exists to avoid). Blackrock Depths WP-DS: nor on
+    // one an Interrupts hold covers now (Angerforge's Commanding Aura).
     std::vector<LiveCast> live;
     auto gather = [&](ObjectGuid guid)
     {
         if (Unit* u = ObjectAccessor::GetUnit(*bot, guid); u && u->IsAlive() && u->IsInWorld()
-            && !BotTargets::IsIgnoredNow(st, *reg, bot, u, now))
+            && !BotTargets::IsIgnoredNow(st, *reg, bot, u, now) && !BotTargets::KicksHeldNow(st, *reg, bot, u, now))
             InterruptibleCasts(u, *reg, now, live);
     };
     gather(st.descriptor.owner);
@@ -500,7 +502,8 @@ void BotKick::Refresh(PlayerbotAI* botAI, MechanicBotState& st, Milliseconds now
         ObjectGuid const caster(n.caster);
         if (!st.descriptor.IsEncounterUnit(caster))
             continue;
-        if (Unit* u = ObjectAccessor::GetUnit(*bot, caster); u && BotTargets::IsIgnoredNow(st, *reg, bot, u, now))
+        if (Unit* u = ObjectAccessor::GetUnit(*bot, caster); u && (BotTargets::IsIgnoredNow(st, *reg, bot, u, now)
+            || BotTargets::KicksHeldNow(st, *reg, bot, u, now)))
             continue;
         notes.push_back(n);
     }
@@ -742,9 +745,9 @@ std::string BotKick::ReportLine(MechanicBotState const& st)
         plan = Acore::StringFormat("kick {} on {} cast {} (priority {})", k.kickSpell,
             ObjectGuid(k.target.caster).ToString(), k.target.spellId, k.priority);
     return Acore::StringFormat("  m5 kicks: landed {}, wasted {}, do-not-kick {}, duplicates {}, overload holds {}, "
-        "listed missed {}{}, stock kicks dropped {}, stuns/silences judged {} | {}{} | {}", c.kicksLanded,
+        "listed missed {}{}, stock kicks dropped {} (held {}), stuns/silences judged {} | {}{} | {}", c.kicksLanded,
         c.kicksWasted, c.doNotKickKicks, c.duplicateKicks, c.overloadHolds, c.listedMissed,
-        k.observer ? " (observer)" : "", c.stockKicksDropped, c.castStops,
+        k.observer ? " (observer)" : "", c.stockKicksDropped, c.holdKicksDropped, c.castStops,
         k.active ? "interrupt list on" : "no interrupt list", k.active && k.cooldown == Milliseconds(0) ? ", no kick"
         : "", plan);
 }
@@ -826,7 +829,10 @@ float MechanicBotKickMultiplier::GetValue(Action* action)
         return 1.f;
     Milliseconds const now = Now();
     BotKick::Refresh(botAI, *st, now);
-    if (!st->kick.active || dynamic_cast<BossKickAction*>(action))
+    // Blackrock Depths WP-DS: an Interrupts hold drops the stock stoppers on its unit with or without a kick list.
+    bool const holds = st->descriptor.Active()
+        && Desc::HasHolds(st->descriptor.descriptor, HoldEntry::Action::Interrupts);
+    if ((!st->kick.active && !holds) || dynamic_cast<BossKickAction*>(action))
         return 1.f;
     CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action);
     if (!cast)
@@ -842,6 +848,27 @@ float MechanicBotKickMultiplier::GetValue(Action* action)
     // M5 WP-F (R M-2): a stun or silence used as an interrupt (`hammer of justice interrupt`, `bear bash`, a rotation
     // stun on a casting target) is judged as a kick; one the target is immune to stops nothing and stays.
     if (!Kick::Find(spellId) && !StopperLands(target, info))
+        return 1.f;
+    // WP-DS: a real kick on a held unit always goes; a stun or silence only while it would stop a cast.
+    if (holds && (Kick::Find(spellId) || target->IsNonMeleeSpellCast(false))
+        && BotTargets::KicksHeldNow(*st, *reg, bot, target, now))
+    {
+        Spell const* cur = target->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+        if (!cur)
+            cur = target->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        // Counted once per caster, spell and 5 s (the mark's start is that bucket; marks age out after kMarkKeep).
+        Desc::CastKey const key{ target->GetGUID().GetRawValue(), cur ? cur->GetSpellInfo()->Id : 0u,
+            Milliseconds(now.count() / 5000 * 5000) };
+        if (Kick::MarkOnce(st->kick.marks, key, MarkHoldDrop, now, kMarkKeep))
+        {
+            ++st->counters.holdKicksDropped;
+            if (GetConfig().bots.debug)
+                LOG_INFO(kLog, "Bot {}: stock `{}` on {} dropped (interrupt hold)", bot->GetName(), action->getName(),
+                    target->GetName());
+        }
+        return 0.f;
+    }
+    if (!st->kick.active)
         return 1.f;
     TargetJudgement const j = JudgeTarget(bot, *st, *reg, target, RecoveryOf(info), now);
     Kick::StockVerdict const verdict = Kick::JudgeStockKick(j.cast, Kick::Find(spellId) != nullptr);

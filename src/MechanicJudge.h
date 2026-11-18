@@ -28,7 +28,8 @@ namespace BossMechanics
         Bait,
         HoldStill,
         Spot,
-        Jump        // Stratholme X3: a sweep at its resolve that spares whoever is in the air (MechanicJump.h)
+        Jump,       // Stratholme X3: a sweep at its resolve that spares whoever is in the air (MechanicJump.h)
+        Hide        // Blackrock Depths BD1: hits everyone in range the source can see at its resolve (MechanicHide.h)
     };
 
     // Stratholme F-2b (R-2-A A-2): when a Soak with fewer bodies inside than its count posts its group MissedSoak
@@ -51,10 +52,12 @@ namespace BossMechanics
         }
 
         // Decision §7.8: the circles of Spread, RunOut and Bait hit players only (bots cannot place pets); Zones and
-        // Frontals still hit pets and guardians. A Jump (Stratholme X3) trips players only: a pet cannot jump.
+        // Frontals still hit pets and guardians. A Jump (Stratholme X3) trips players only: a pet cannot jump. A Hide
+        // (Blackrock Depths BD1) judges players only: bots cannot hide their pets, and a melee pet on the boss would
+        // take the wave every time.
         constexpr bool PlayersOnly(Kind k)
         {
-            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait || k == Kind::Jump;
+            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait || k == Kind::Jump || k == Kind::Hide;
         }
 
         // Decision §7.7: a shape kind anchored on a player never hits that player (Cookie's chowder cone; the apex
@@ -77,6 +80,7 @@ namespace BossMechanics
             bool hitThisPass = false;       // already kept by an earlier cast of the same pass
             bool decoy = false;             // the mechanic is a Decoy() (DecoyFits): it keeps nobody
             bool airborne = false;          // Jump: in the air at the resolve (Jump::Clear, MechanicJump.h)
+            bool hidden = false;            // Hide: out of the source's line of sight at the resolve (MechanicHide.h)
             bool playersOnly = false;       // the mechanic's Eligibility::playersOnly: players only, any kind
         };
 
@@ -117,6 +121,8 @@ namespace BossMechanics
                 return false;
             if (k == Kind::Jump && c.airborne)
                 return false;   // Stratholme X3: the sweep passes under a player in the air
+            if (k == Kind::Hide && c.hidden)
+                return false;   // Blackrock Depths BD1: out of the source's sight behind a blocker
             return c.inside && c.eligible && !c.tankExempted && !c.hitThisPass;
         }
 

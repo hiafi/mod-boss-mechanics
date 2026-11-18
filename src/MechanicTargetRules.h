@@ -105,6 +105,10 @@ namespace BossMechanics::TargetRules
         for (IgnoreEntry const& e : d.ignores)
             if (e.guid ? e.guid == guid : e.entry && e.entry == entry)
                 return true;
+        // WP-DS: an Attacks hold acts as an ignore entry (entry 0: any non-player unit; the facts tell players apart).
+        for (HoldEntry const& e : d.holds)
+            if (e.action == HoldEntry::Action::Attacks && (e.guid ? e.guid == guid : !e.entry || e.entry == entry))
+                return true;
         return false;
     }
 

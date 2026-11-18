@@ -11,6 +11,7 @@
 #include "Containers.h"
 #include "Creature.h"
 #include "EngineBridge.h"
+#include "GameObject.h"
 #include "GameTime.h"
 #include "InstanceScript.h"
 #include "Log.h"
@@ -142,6 +143,7 @@ namespace BossMechanics
             case Kind::HoldStill: return "HoldStill";
             case Kind::Spot: return "Spot";
             case Kind::Jump: return "Jump";
+            case Kind::Hide: return "Hide";
         }
         return "?";
     }
@@ -375,6 +377,8 @@ namespace BossMechanics
         m->committed = true;
         PickTargets(*m);
         EnforceCap(*m);
+        if (m->hide)
+            PlaceHide(*m, true);
         if (!m->telegraph)
             return;
         if (EngineBridge* bridge = GetEngineBridge())
@@ -1159,6 +1163,13 @@ namespace BossMechanics
                 Shape const shape = EffectiveShape(m, pose);
                 return Geo::Contains(shape, pose, v);
             }
+            case Kind::Hide:
+            {
+                if (!m.hide || !Geo::Contains(m.shape, AnchorPose(m), v))
+                    return false;   // out of range: never judged
+                Unit const* u = who.IsEmpty() ? nullptr : FindUnit(who);
+                return HideSees(m, p, u && u->GetExactDist(&p) < 0.1f ? u : nullptr);
+            }
             case Kind::Bait:
             case Kind::HoldStill:
                 return false;
@@ -1347,6 +1358,7 @@ namespace BossMechanics
             c.hitThisPass = done.count(u->GetGUID()) != 0;
             c.decoy = m->decoy;
             c.airborne = m->jumpCleared.count(u->GetGUID()) != 0;    // Jump: judged by StepJump before the cast
+            c.hidden = m->hide && m->hide->hidden.count(u->GetGUID()) != 0;  // Hide: judged by StepHide before it
             if (!Judge::KeepResolveTarget(m->kind, c))
                 return true;
             done.insert(u->GetGUID());
@@ -1450,6 +1462,7 @@ namespace BossMechanics
                 c.hitThisPass = done.count(p->GetGUID()) != 0;
                 c.decoy = m.decoy;
                 c.airborne = m.jumpCleared.count(p->GetGUID()) != 0;
+                c.hidden = m.hide && m.hide->hidden.count(p->GetGUID()) != 0;
                 if (!Judge::KeepResolveTarget(m.kind, c))
                     continue;
                 done.insert(p->GetGUID());
@@ -1618,6 +1631,9 @@ namespace BossMechanics
                 break;
             case Kind::Jump:
                 StepJump(m, now);
+                break;
+            case Kind::Hide:
+                StepHide(m, now);
                 break;
         }
     }
@@ -2040,6 +2056,225 @@ namespace BossMechanics
                 by[static_cast<uint8>(Jump::ClearBy::Falling)], by[static_cast<uint8>(Jump::ClearBy::Hop)],
                 by[static_cast<uint8>(Jump::ClearBy::Planned)], by[static_cast<uint8>(Jump::ClearBy::None)],
                 r.hits.size(), m.hops.size());
+        Report(m, r);
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // Hide (Blackrock Depths BD1; MechanicHide.h)
+    // ----------------------------------------------------------------------------------------------------------------
+    Position Registry::HideSource(ActiveMechanic const& m) const
+    {
+        Geo::Pose const pose = AnchorPose(m);
+        return Position(pose.x, pose.y, pose.z, pose.o);
+    }
+
+    bool Registry::HideSees(ActiveMechanic const& m, Position const& p, Unit const* who) const
+    {
+        if (!m.hide)
+            return false;
+        HideSpec const& spec = m.hide->spec;
+        Unit const* src = m.anchor.IsUnit() ? FindUnit(m.anchor.unit) : nullptr;
+        if (src && !src->IsInWorld())
+            src = nullptr;
+        // A unit in the map: the core's own check (both ends lifted by their collision heights, the source's by
+        // eyeHeight when set, the ray starting reachYd toward the target).
+        if (src && who && who->IsInWorld() && who->GetMap() == _map)
+            return src->IsWithinLOSInMap(who, VMAP::ModelIgnoreFlags::Nothing, LINEOFSIGHT_ALL_CHECKS, spec.eyeHeight,
+                spec.reachYd);
+        // A bare point (or the source is gone): one ray from the source's eye to the point at chest height.
+        Position const from = HideSource(m);
+        float const eye = spec.eyeHeight ? *spec.eyeHeight : (src ? src->GetCollisionHeight() : Hide::kTargetHeightYd);
+        float sx = from.GetPositionX();
+        float sy = from.GetPositionY();
+        float const sz = from.GetPositionZ() + eye;
+        float const dist = Geo::Dist2d(sx, sy, p.GetPositionX(), p.GetPositionY());
+        if (spec.reachYd > 0.f && dist > 0.01f)
+        {
+            float const step = std::min(spec.reachYd, dist) / dist;
+            sx += (p.GetPositionX() - sx) * step;
+            sy += (p.GetPositionY() - sy) * step;
+        }
+        uint32 const phase = src ? src->GetPhaseMask() : (who ? who->GetPhaseMask() : uint32(PHASEMASK_NORMAL));
+        return _map->isInLineOfSight(sx, sy, sz, p.GetPositionX(), p.GetPositionY(),
+            p.GetPositionZ() + Hide::kTargetHeightYd, phase, LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
+    }
+
+    void Registry::PlaceHide(ActiveMechanic& m, bool force)
+    {
+        if (!m.hide)
+            return;
+        HideState& h = *m.hide;
+
+        // The blockers alive now: a game object while it is spawned in this map, a point always.
+        std::vector<HideState::LiveBlocker> live;
+        for (HideBlocker const& b : h.spec.blockers)
+        {
+            if (b.go.IsEmpty())
+            {
+                live.push_back({ b.point, b.radius });
+                continue;
+            }
+            GameObject const* go = _map->GetGameObject(b.go);
+            if (go && go->IsInWorld() && go->isSpawned())
+            {
+                live.push_back({ go->GetPosition(), b.radius });
+                // A display with no entry in GameObjectModels.dtree has no collision model: it never blocks the ray,
+                // so every spot reads Seen (R-1-FW MIN-6). Once per Hide, whatever the debug switches.
+                if (!go->m_model && !h.warnedNoModel)
+                {
+                    h.warnedNoModel = true;
+                    LOG_WARN("module.bossmechanics", "Hide {} (tag {}): blocker {} (entry {}, display {}) has no "
+                        "collision model: it blocks no line of sight", m.id, m.tag, go->GetGUID().ToString(),
+                        go->GetEntry(), go->GetDisplayId());
+                }
+            }
+        }
+
+        // The players judged: eligible and in range of the source now.
+        Position const src = HideSource(m);
+        Geo::Pose const srcPose = ToPose(src);
+        std::vector<Hide::Seeker> seekers;
+        std::vector<ObjectGuid> guids;
+        GuidSet judged;
+        for (Player* p : CandidatePlayers(m))
+        {
+            if (!IsEligible(m, p) || !Geo::Contains(m.shape, srcPose, ToVec(p->GetPosition())))
+                continue;
+            seekers.push_back({ p->GetGUID().GetRawValue(), ToVec(p->GetPosition()) });
+            guids.push_back(p->GetGUID());
+            judged.insert(p->GetGUID());
+        }
+        if (!force && h.placed && !Hide::NeedsReplace(h.live.size(), live.size(), judged != h.placedFor,
+            src.GetExactDist(&h.placedFrom)))
+            return;
+
+        // Each candidate spot on the floor (as `.mech minefield` places its mines), then judged: no floor, seen by
+        // the source (one real ray), on a lasting zone (a crack the bot would stand in), else good.
+        Unit const* srcUnit = m.anchor.IsUnit() ? FindUnit(m.anchor.unit) : nullptr;
+        uint32 const phase = srcUnit ? srcUnit->GetPhaseMask() : uint32(PHASEMASK_NORMAL);
+        auto ground = [this, phase](Geo::Vec3 const& c, float& z)
+        {
+            float const g = _map->GetHeight(phase, c.x, c.y, c.z + 2.f, true, 10.f);
+            if (g <= INVALID_HEIGHT || std::fabs(g - c.z) > 5.f)
+                return false;
+            z = g;
+            return true;
+        };
+        auto badness = [&](Geo::Vec3 const& c)
+        {
+            float z = c.z;
+            if (!ground(c, z))
+                return Hide::SpotBadness::OffFloor;
+            Position const at(c.x, c.y, z);
+            if (HideSees(m, at))
+                return Hide::SpotBadness::Seen;
+            for (auto const& [oid, other] : _mechanics)
+            {
+                if (oid == m.id || other.cancelled || other.finished || other.decoy || !other.IsShapeKind())
+                    continue;
+                bool const lasting = other.mine || (other.persist && other.persist->until > m.resolveAt);
+                if (lasting && ContainsPoint(other, at))
+                    return Hide::SpotBadness::OnLastingZone;
+            }
+            return Hide::SpotBadness::Good;
+        };
+
+        std::vector<Hide::Blocker> blockers;
+        blockers.reserve(live.size());
+        for (HideState::LiveBlocker const& b : live)
+            blockers.push_back({ ToVec(b.at), b.radius });
+        Hide::Params params;
+        params.behindYd = h.spec.behindYd;
+        params.share = h.spec.share;
+        std::vector<Hide::Placement> const placed = Hide::Assign(ToVec(src), blockers, seekers, params, badness);
+
+        std::unordered_map<ObjectGuid, Position> spots;
+        std::unordered_map<ObjectGuid, uint32> blockerOf;
+        uint32 bad = 0;
+        for (std::size_t i = 0; i < placed.size(); ++i)
+        {
+            Hide::Placement const& pl = placed[i];
+            if (pl.blocker == Hide::kNoBlocker)
+                continue;
+            float z = pl.spot.z;
+            ground(pl.spot, z);
+            spots[guids[i]] = Position(pl.spot.x, pl.spot.y, z);
+            blockerOf[guids[i]] = pl.blocker;
+            if (pl.badness != Hide::SpotBadness::Good)
+                ++bad;
+        }
+
+        bool changed = spots.size() != h.spots.size() || live.size() != h.live.size();
+        for (auto const& [g, at] : spots)
+        {
+            auto it = h.spots.find(g);
+            if (changed || it == h.spots.end() || it->second.GetExactDist(&at) > 0.1f)
+            {
+                changed = true;
+                break;
+            }
+        }
+        h.live = std::move(live);
+        h.spots = std::move(spots);
+        h.blockerOf = std::move(blockerOf);
+        h.placedFor = std::move(judged);
+        h.placedFrom = src;
+        h.placed = true;
+        h.badSpots = bad;
+        ++h.placements;
+        if (!h.spots.empty() && bad == h.spots.size() && !h.warnedAllBad)
+        {
+            h.warnedAllBad = true;
+            LOG_WARN("module.bossmechanics", "Hide {} (tag {}): none of the {} spot(s) behind {} blocker(s) is good "
+                "(seen by the source, off the floor or on a lasting zone)", m.id, m.tag, h.spots.size(), h.live.size());
+        }
+        if (changed)
+            BumpRevision();
+        if (GetConfig().debug || GetConfig().bots.debug)
+            LOG_INFO("module.bossmechanics", "Hide {} (tag {}): placement {}: {} player(s) behind {} blocker(s), {} "
+                "spot(s) not good{}", m.id, m.tag, h.placements, h.spots.size(), h.live.size(), bad,
+                changed ? "" : " (unchanged)");
+    }
+
+    // Hide (Blackrock Depths BD1): before the resolve the spots follow the blockers, the players in range and the
+    // source (PlaceHide, only on a change); at the resolve every eligible player in range is judged once with real
+    // line of sight from the source (HideSees), so the filter, the result and the log agree, and the resolve spell
+    // (damage, Weakened, rider) hits the ones the source sees.
+    void Registry::StepHide(ActiveMechanic& m, Milliseconds now)
+    {
+        if (!m.hide)
+        {
+            m.finished = true;
+            return;
+        }
+        if (now < m.resolveAt && !m.detonateRequested)
+        {
+            PlaceHide(m, false);
+            return;
+        }
+        m.detonateRequested = false;
+        HideState& h = *m.hide;
+        Geo::Pose const pose = AnchorPose(m);
+        h.hidden.clear();
+        uint32 judged = 0;
+        for (Player* p : CandidatePlayers(m))
+        {
+            if (!IsEligible(m, p) || !Geo::Contains(m.shape, pose, ToVec(p->GetPosition())))
+                continue;
+            ++judged;
+            if (!HideSees(m, p->GetPosition(), p))
+                h.hidden.insert(p->GetGUID());
+        }
+        ResolveResult r = BaseResult(m, 0);
+        r.hits = ResolvePass(m, 0, pose, m.shape);
+        r.count = r.hits.size();
+        r.cleared.assign(h.hidden.begin(), h.hidden.end());
+        m.resolved = true;
+        m.finished = true;
+        if (GetConfig().debug || GetConfig().bots.debug)
+            LOG_INFO("module.bossmechanics", "Hide {} (tag {}): {} judged, {} hidden, {} hit; {} blocker(s) live at "
+                "the last of {} placement(s)", m.id, m.tag, judged, h.hidden.size(), r.hits.size(), h.live.size(),
+                h.placements);
         Report(m, r);
     }
 }

@@ -67,6 +67,13 @@ namespace BossMechanics
         bool IsIgnoredNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
             Milliseconds now);
 
+        // Blackrock Depths WP-DS (BD3): does an Interrupts hold keep every kick off `unit` now (Desc::KicksHeld)? The
+        // schools a damaging spell may not come in on (Desc::HeldDamageMask; 0: none). Neither refreshes the view.
+        bool KicksHeldNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+            Milliseconds now);
+        uint32 HeldDamageMaskNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+            Milliseconds now);
+
         // SFK F1: is `unit` a teammate turned against the group for this bot now: a charmed player carrying one of the
         // active descriptor's hostilePlayerAuras (Desc::IsHostilePlayer)? Cheap for anything but a charmed player.
         // Does not refresh the view (the waker does, every map update).

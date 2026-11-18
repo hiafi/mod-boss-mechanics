@@ -851,7 +851,8 @@ namespace BossMechanics::Solver
 
         inline bool HasPlayerKinds(Input const& in)
         {
-            return !in.regions.empty() || !in.carried.empty() || in.freeze.present || in.park.present;
+            return !in.regions.empty() || !in.carried.empty() || in.freeze.present || in.park.present
+                || BossMechanics::DropSpot::AnyStrict(in.bounds);   // WP-DS: strict bounds
         }
 
         // The hazard horizon: a pending freeze extends it to the window's end (a Zone landing while frozen counts).
@@ -1187,6 +1188,9 @@ namespace BossMechanics::Solver
             if (!HasPlayerKinds(in))
                 return true;
             if (!FreezeOk(in, arrival) || !RegionsOk(in, p, arrival) || !ParkOk(in, p))
+                return false;
+            // WP-DS: strict bounds hold every spot, the bot's own included.
+            if (BossMechanics::DropSpot::StrictBreaks(in.bounds, p))
                 return false;
             for (Carried const& c : in.carried)
                 if (CarriedLive(in, c) && arrival > CarriedDue(in, c))
@@ -2078,9 +2082,71 @@ namespace BossMechanics::Solver
             }
         }
 
+        // Blackrock Depths WP-DS: a strict set the bot stands outside offers, per area, the point kStrictInsetYd inside
+        // its edge nearest the bot and the area's middle (a polygon's vertex mean, a circle's center), at the bot's
+        // height kept in the area's z band (the navmesh probe snaps them). The role ring covers spots near the target.
+        constexpr float kStrictInsetYd = 1.5f;
+
+        inline void StrictCandidates(Input const& in, std::vector<Geo::Vec3>& out)
+        {
+            for (Bounds const& b : in.bounds)
+            {
+                if (!b.strict || BossMechanics::DropSpot::InBounds(b, in.bot))
+                    continue;
+                for (BoundsArea const& a : b.areas)
+                {
+                    float const z = std::clamp(in.bot.z, a.zMin, a.zMax);
+                    if (a.polygon.size() >= 3)
+                    {
+                        Geo::Vec3 mid{ 0.f, 0.f, z };
+                        for (Geo::Vec3 const& v : a.polygon)
+                        {
+                            mid.x += v.x / static_cast<float>(a.polygon.size());
+                            mid.y += v.y / static_cast<float>(a.polygon.size());
+                        }
+                        Geo::Vec3 best = mid;
+                        float bestD = kInf;
+                        for (std::size_t i = 0; i < a.polygon.size(); ++i)
+                        {
+                            Geo::Vec3 const& p = a.polygon[i];
+                            Geo::Vec3 const& q = a.polygon[(i + 1) % a.polygon.size()];
+                            float const ex = q.x - p.x;
+                            float const ey = q.y - p.y;
+                            float const len2 = ex * ex + ey * ey;
+                            float const u = len2 > 1e-6f ? std::clamp(((in.bot.x - p.x) * ex + (in.bot.y - p.y) * ey)
+                                / len2, 0.f, 1.f) : 0.f;
+                            Geo::Vec3 const e{ p.x + ex * u, p.y + ey * u, z };
+                            float const d = Geo::Dist2d(e.x, e.y, in.bot.x, in.bot.y);
+                            if (d < bestD)
+                            {
+                                bestD = d;
+                                best = e;
+                            }
+                        }
+                        float const toMid = Geo::Dist2d(best.x, best.y, mid.x, mid.y);
+                        float const step = std::min(kStrictInsetYd, toMid * 0.5f);
+                        if (toMid > 1e-3f)
+                            out.push_back({ best.x + (mid.x - best.x) / toMid * step,
+                                best.y + (mid.y - best.y) / toMid * step, z });
+                        out.push_back(mid);
+                    }
+                    else if (a.radius > 0.f)
+                    {
+                        float const d = Geo::Dist2d(a.center.x, a.center.y, in.bot.x, in.bot.y);
+                        float const r = std::max(0.f, a.radius - kStrictInsetYd);
+                        if (d > 1e-3f)
+                            out.push_back({ a.center.x + (in.bot.x - a.center.x) / d * r,
+                                a.center.y + (in.bot.y - a.center.y) / d * r, z });
+                        out.push_back({ a.center.x, a.center.y, z });
+                    }
+                }
+            }
+        }
+
         // All M3 candidates (targeted: they go before the blanket rings).
         inline void PlayerKindCandidates(Input const& in, float reach, std::vector<Geo::Vec3>& out)
         {
+            StrictCandidates(in, out);  // WP-DS
             for (Region const& r : in.regions)
                 if (RegionLive(in, r))
                     RegionCandidates(in, r, out);
@@ -3681,10 +3747,12 @@ namespace BossMechanics::Solver
                     continue;
                 Geo::Vec3 const& c = cands[i];
                 float const dist = Detail::Dist3(in.bot, c);
-                // F-1b: a target outside the hard bounds ranks like one more broken rule.
+                // F-1b: a target outside the hard bounds ranks like one more broken rule (WP-DS: the bot's own spot
+                // too, outside strict bounds).
                 std::uint32_t const violated = (kinds
                     ? Detail::Violations(in, c, moveStart + Detail::TravelMs(dist, speed)) : 0)
-                    + (i != 0 && !BossMechanics::DropSpot::InBounds(in.bounds, c) ? 1u : 0u);
+                    + ((i != 0 || BossMechanics::DropSpot::StrictBreaks(in.bounds, c))
+                        && !BossMechanics::DropSpot::InBounds(in.bounds, c) ? 1u : 0u);
                 Ms cap = kForever;
                 bool walk = true;
                 // WP-RF: the target's first window (kForever without a front: every candidate ties on it).

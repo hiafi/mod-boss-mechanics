@@ -33,6 +33,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicRoute.h` | Pure route search around hazards (grid A*, string-pulled legs): `Route`, `RouteHandoff` |
 | `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
 | `src/MechanicJump.h` | Pure Jump kind rules (Stratholme X3): the hop's timing and speeds, who counts as in the air |
+| `src/MechanicHide.h` | Pure Hide kind rules (Blackrock Depths WP-HK): spots behind blockers, the spread, the shadow |
 | `src/MechanicFront.h` | Pure rolling fronts (Blackrock Spire WP-RF): specs, gaps, wall segments, placement, markers |
 | `src/MechanicBotView.h/.cpp` | Registry -> solver input and tasks for one bot; reservations; navmesh, sight oracle |
 | `src/MechanicViewRules.h` | Pure player-kind rules of the view: planned spots, margins, separation (host-tested) |
@@ -99,6 +100,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `Bait(owner, rule, othersRange, warn)` | The hit lands on the farthest player; that player taking it is the job |
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Jump(owner, spec, warn)`, `Jump(owner, at, r, warn)` | A sweep that hits who is on the ground (Stratholme X3) |
+| `Hide(owner, spec, warn)` | Hits who the source sees; bots hide behind blockers (Blackrock Depths WP-HK) |
 | `ConeFront`, `LineFront`, `FrontSafe` | Rolling fronts + tank slot ([below](#rolling-fronts-blackrock-spire-wp-rf)) |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
@@ -202,6 +204,7 @@ prints a fresh string to paste after a gear or stat change. The pure rules are
 | HoldStill | none | none | Moved (> 0.3 yd, or `Tolerance`) |
 | Spot | none | disc on each spot | OffSpot |
 | Jump | as Zone on the players inside who are on the ground (players only) | the shape's pieces | Hit |
+| Hide | as Zone on the players in range the source sees at its resolve (players only, line of sight) | none | Hit |
 
 (*) `From(Owner)`: the ring of r sits on the owner (the hitbox) and a small ring
 (`Rules::kRunOutTargetMarkerRadiusYd`, 1.5 yd, same color) follows the target, so the target knows it must run.
@@ -432,8 +435,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech minefield [count=10] [radius=3] [spread=15] [arm=3000] [grace=500] [dmg=1] [seed=]
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
-            |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups> [cycles=3 (alexei 1)]
-            [seed=] [dmg=1] [self=0]
+            |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
+            |blackrock-depths-shapes|blackrock-depths-shapes-2> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -466,6 +469,9 @@ are never touched. Invite the bots you test with.
 | spot | radius | `ring=` (10): one spot per group member on a ring around the anchor point |
 | hunt | catch radius | `speed=` (0.8, x player run speed), `persist=` (the chase, required), `tick=`, `pick=` |
 | jump | radius | a `Jump` circle on the anchor: hits who is on the ground at the end; damage keys as a circle |
+| hide | range | `blockers=` (3, 0-8) game objects `apart=` (8) yd round the selected creature (the source), |
+| | | `r=` (2.5) footprint, `display=` (3711; fallback 5736), `go=` (148503), `behind=` (3), `share=` (2), |
+| | | `eye=` (its collision height), `linger=` (3000 ms after the resolve); damage keys as a circle |
 
 A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
 group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
@@ -572,6 +578,19 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   makes the shape eligible to one player only (players only), drawn with `pick=` (`pick=same`: the member of the last
   pick; not with `at=each`). A cone takes `fix=1` with `to=`: aimed once, at registration, not turning after the unit.
   Drill steps take the plan key `cycle=<k>/<m>` (runs in cycles k, k + m, ...; m 2-12) beside `cycle=even|odd`.
+- Blackrock Depths build (WP-G1 §3.9, drill `blackrock-depths-shapes`): `offset=<deg>` (line, not with `to=` or
+  `follow=1`) turns the line's fixed facing counterclockwise from the GM's (the run's) facing, and `shift=` reads along
+  the turned facing: `offset=90` lays a lane across, `offset=180` points back. Two drill-only steps (in `.mech drill`
+  lines, like `marker`): `walk <yd> <ms> [offset=<deg>]` moves the selected creature `yd` along the run's facing over
+  `ms` (one relocation every 250 ms, its orientation kept; it moves a rooted unit too, so select a creature that does
+  not walk by itself), and `leash <yd> <ms> [role=tank|any] [tick=1000] tag=<n>` posts an OffSpot failure `Zone/<n>` to
+  every alive scope member (role=tank: the tanks) farther than `yd` from the selected unit at each tick. A leash
+  registers nothing: the bots never see it, so it judges whether they keep up with a walking boss on their own.
+- Blackrock Depths build (WP-G2 §3.9, drill `blackrock-depths-shapes-2`): `soak <width> <ms> shape=line
+  to=target|member|me` is a beam Soak from the anchor to that unit (`Shapes::Line(from, to, width)`: it turns with the
+  unit, its length is the distance at registration; not with `length=` or `to=last`), and `at=target` lands a point
+  where the selected unit stands as the repeat registers (a drill parses its steps at its start, so a plain point stays
+  where a walking boss started).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -731,6 +750,40 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     The sweep runs `blackrock-spire-followups:3`, one sweep for this drill alone (never `;`-joined with another):
     `mechanics_sweep.py run --programs blackrock-spire-followups:3 --duration 120 --iterations 5 --step 100 --jobs 6
     --sweep blackrock-spire-followups` (mod-dpssim `tools/`, after the build).
+  - `blackrock-depths-shapes` (Blackrock Depths build §3.9, WP-G1 wave 1; 60 s, two cycles by default = 120 s, heroic
+    numbers in `pct=`). Cycle 0, Lord Roccor RO1 + RO3 and Houndmaster Grebmar GR3 + GR4: a Rampage (a 20 x 8 lane
+    from the creature, 2.5 s, 60%), then the creature walks 30 yd along your facing at 1.5 yd/s, a Rampage back along
+    the route (`offset=180`), 30 yd back home (a 60 yd path); on each leg the tank's leash (8 yd) and everyone's (40
+    yd). 47 s and 50 s, a Sic 'em leap: three 3 yd lines from points 10 yd round the creature to a member's spot
+    (anyone, then a non-tank) and the 5 yd landing there (1.5 s; 25% and 45%). 52.5 s, Bael'Gar BG4 (WP-HK, `hide`):
+    three Boulders 10 yd round the creature, a 5 s Molten Furnace, everyone it sees within 40 yd hit (95%, fire), the
+    Boulders gone by 59.5 s ([Hide](#hide-blackrock-depths-wp-hk)). Cycle
+    1: Gorosh GO2, the axe (3 yd, 2 s) on a member's spot, the return line from it to the creature shown 4 s (no
+    damage) and then locked 2 s (4 yd, 35%); Ok'thor OK1, the Arcane Rupture donut from 8 yd (normal, 30%) and from 6
+    yd (heroic, 45%) to 45 yd, 3 s; Loregrain LG1-LG3, three Fire Tides (a Stack on the ward and a donut from its edge
+    to 45 yd, 4 s, 45%) at three ward spots hugging the creature, radius 5, 3 and 4; Incendius IN8 / IN13 / IN11 on a
+    48 x 22 yd strip round the creature (long axis along your facing): lethal 4 yd bands on all four edges (5 s, then
+    persistent), the next 2 yd of the long edges (5 s), and two 10 yd Arm Sweeps across it (4 s, 30%, lethal), the
+    middle and then the group's side. Weakened on all but the Rampage, the shown return line, the Stack and the sweeps.
+
+    Tags (`Zone/<tag>`, the ward `Stack/11`): 1 Rampage, 2 tank leash, 3 everyone's leash, 4 leap lines, 5 leap
+    landing, 6 axe, 7 shown return, 8 locked return, 9 Rupture, 10 heroic Rupture, 11 the ward's Stack, 12 Fire Tide,
+    13 edge bands, 14 crumble bands, 15 Arm Sweep, 16 Molten Furnace. 1, 6, 7 and 11 are reported; the others are
+    under the sweep's bar (`Drill::kBrdBarTags`). It gates the heroic sign-off of D2 (2, 3), D3 (4, 5), D5 (8-10), D7
+    (12), D11 / D12 (13-15) and D13 (16). The sweep runs `blackrock-depths-shapes:2`, one sweep for this drill alone:
+    `mechanics_sweep.py run --programs blackrock-depths-shapes:2 --duration 120 --iterations 5 --step 100 --jobs 6
+    --sweep blackrock-depths-shapes`.
+  - `blackrock-depths-shapes-2` (Blackrock Depths build §3.9, WP-G2 wave 2; 60 s, two cycles = 120 s, heroic numbers
+    in `pct=`): cycle 0 the Emperor's Nemesis (EM2): three 8 s line Soaks of one body, 2 yd, from Moira's spot 15 yd to
+    the creature's left to the creature (3 s to step in, judged every second for 5 s), the creature walking 6 yd along
+    your facing during the first and back during the second; cycle 1 the Seven's Seething Cold (TS4: anchorless Stack
+    6, cluster 2, 3 s + 10 s), Argelmach's Livewire (AR8: a persistent 8 yd circle on a non-tank, 4% every 2 s, and a
+    30% burst on it at 12 s), Magmus's Crossfire (MG3: a 10 yd lane across a 39 yd hall at the creature's spot, 45% +
+    Weakened, burning 15% a second to 6 s, while the creature walks 12 yd out of it; a second one 12 s later walks it
+    home) and Flame Wall (MG4: a 12 yd strip along the left wall, 8 s, 15% a second). Tags 21 (Soak, group bar 2), 22,
+    25-27 gated, 23-24 reported (`kBrd2BarTags`, `kBrd2GroupTags`). The sweep runs `blackrock-depths-shapes-2:2`, one
+    sweep for this drill alone: `mechanics_sweep.py run --programs blackrock-depths-shapes-2:2 --duration 120
+    --iterations 5 --step 100 --jobs 6 --sweep blackrock-depths-shapes-2`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -1059,6 +1112,7 @@ solving one after another on the map thread never pick colliding spots (decision
 | HoldStill | listed (targets, else eligible) | `Freeze{resolveAt - SafetyMarginMs, expireAt}` |
 | Spot | listed | a region of r at its own spot |
 | Jump | eligible | nothing (not a hazard); a Jumper task: the brain hops for it ([Jump](#jump-stratholme-x3)) |
+| Hide | placed (eligible, in range) | a region at its spot; each live blocker a small hazard (Hide, below) |
 | Zone | anchored on the bot | carried shape (OnBot); a turning cone or line picks the facing nearest its victim |
 | | aimed at the bot (`to`) | carried shape (AimedAtBot, the registered length) |
 | | on another bot with a plan | one more pose at that bot's planned spot (a synthetic copy) |
@@ -1165,6 +1219,30 @@ Mechanic::Circle(me, target, 6.f, 3000ms).AnchorOn(target).DropSpot(DropSpotRule
   circle. The route search walls off every cell outside a `PathInside` set the bot stands in.
 - The bounds do not pick the Park zone's own spot: the script does (the kit's `PickFloorSpot`); it should use the same
   room.
+
+**Role scope and Strict (Blackrock Depths WP-DS, Lord of the Lake).** `SpotBounds::For(bits)` binds some roles only
+(`BoundsFor::Tank`, `Healer`, `Melee`, `Ranged`; default `All`): tank and healer by the module's role provider (the
+owner's victim is the tank), the damage dealers by playerbots' `IsMelee` (`BotViewHooks::selfMelee`; unknown: either
+bit). `SpotBounds::Strict()` makes the bounds hold the bot's own spot too: `Solver::TargetOk` fails outside them
+(`DropSpot::StrictBreaks`), so a bot outside solves and walks in (each area offers the point 1.5 yd inside its edge
+nearest the bot and its middle, `Solver::Detail::StrictCandidates`), Watch re-routes a stock chase that ends outside,
+and the bot stays in Watch (not Idle) while strict bounds bind it. The Fallback counts the own spot's break too.
+Bounds live on a mechanic; a fight-long set rides on a carrier that does nothing else, a Spot with no spots:
+
+```cpp
+// No behind: the melee and the tank stay on the causeway (behind the giant is the lava).
+SpotBounds const causeway = SpotBounds().Polygon({ /* the causeway */ }, floorZ - 3.f, floorZ + 5.f)
+    .For(BoundsFor::Melee | BoundsFor::Tank).Strict();
+_causeway = Mechanic::Spot(me, {}, 600s).NoTelegraph().Within(causeway);   // re-registered if it runs out
+// Keep one player in the reach band: a lasting Soak of 1 on the band (a two-point line), tanks only. The others are
+// not eligible, so it never pushes the melee out of the band; a human tank inside fills it.
+_reach = Mechanic::Soak(me, Shapes::Line(Anchor(bandA), Anchor(bandB), 6.f), 1, 0ms)
+    .Persistent(600s, 1000ms).MissedSoak(MissedSoakMode::Never).Eligible(tanksOnly).NoTelegraph();
+```
+
+The reach band moves in with each crumble: cancel and re-register both with the new geometry (the Soak's line is fixed
+at registration). Firelord's Breath itself stays the script's (no player in reach for 3 s); the Soak only places the
+bot. `.mech bots` shows the strict break as an unsafe spot in Watch; host tests `tests/descriptor_ds_test.cpp`.
 
 ### Lethal (Stratholme X4)
 
@@ -1294,6 +1372,67 @@ Drill: `stratholme-jump` (above). Tests: `tests/jump_test.cpp` (the filter, the 
 who counts as in the air, a 400 ms late resolve tick, the hop along a walk under three back-to-back skips plus a
 RunOut, a brain-tick and resolve-tick timing model, chained 1.5 s skips over the whole config range, and the drill's
 rows).
+
+### Hide (Blackrock Depths WP-HK)
+
+Bael'Gar's Molten Furnace (Blackrock Depths BG4; hub BD1, library L31): a 5 s cast, then a wave of heat hits everyone
+he can see; only line of sight behind a Boulder saves you. `Mechanic::Hide(owner, spec, warn)` is that wave: at
+`now + warn` the resolve spell hits every eligible **player** within `spec.rangeYd` of `spec.source` (on the plane;
+the shape's `zTolerance`, default 10 yd, in height) whom the source can see, with the Zone options (`Damage`,
+`TankDamage`, `School`, `Spell`, `Rider`, `Weakened`, `OnHit`, `OnResolve`, `Tag`, `Eligible`, `Within`,
+`ZTolerance`). Pets are never judged (bots cannot hide them). No marker: the blockers are the tell, the script plays
+its cast and emote. `onResolve`'s `hits` are the players seen, its `cleared` the ones that were hidden.
+`Mechanic::Contains` / `ContainsPoint` answer "in range and seen now".
+
+```cpp
+// BG4: the live Boulders as blockers, Bael'Gar the source (the owner when none is given).
+HideSpec furnace(me);
+for (ObjectGuid const& g : _boulders)
+    if (GameObject* go = me->GetMap()->GetGameObject(g))
+        furnace.Blocker(go->GetGUID(), go->GetPosition(), 2.5f);
+_furnace = Mechanic::Hide(me, furnace.Range(60.f), 5000ms).Damage(IsHeroic() ? 95.f : 80.f)
+    .School(SPELL_SCHOOL_FIRE).Spell(SPELL_MOLTEN_FURNACE_RESOLVE).Tag(BG4);
+```
+
+**The judge is real line of sight** (`Registry::HideSees`): `source->IsWithinLOSInMap(player, ..., eyeHeight,
+reachYd)`, all checks, so the map's dynamic tree counts and a game object whose display has a collision model blocks
+it (Boulder display 3711 Lavarock01, about 5 by 5 by 10 yd; `GameObjectModels.dtree`). It is judged once per player at
+the resolve, before the cast, so the filter, the result and the log agree. `eyeHeight` (`HideSpec::Eye`; default the
+source's collision height) is where the ray starts above the source's feet: a giant taller than the rock sees over it.
+`reachYd` (`Reach`, default 0) starts the ray that far toward the target; the core's default for spells is the
+caster's combat reach, which for a giant next to a Boulder would start the ray past it. A source that is gone judges
+from its last pose. **Not yet confirmed in game** (HANDOFF §10): that a summoned GO with display 3711 blocks the ray on
+map 230. If it does not, the blocker's display is a parameter (`display=` on `.mech test hide`; the script's own GO
+template): the fallback is 5736 (Lavarock02).
+
+**The blockers are for the bots** (`HideSpec::Blocker`: a game object's guid, read live and dropped once it is gone,
+a melted Boulder; or a fixed point; each with its footprint radius). The registry places every eligible player in
+range behind one (`Registry::PlaceHide`, pure `Hide::Assign` in `src/MechanicHide.h`) at the commit, and again before
+the resolve when a blocker is gone, the players in range change, or the source moved 2 yd:
+
+- each blocker takes at most `share` (2) players while there are enough blockers, more when there are too few
+  (`Hide::Capacity`: three Boulders for five players hold 2 + 2 + 1);
+- players take the nearest blocker greedily, then moves and swaps lower the longest walk (the last player to reach
+  cover sets the pace), then the total (`Hide::AssignBlockers`);
+- behind one blocker the spots stand side by side across the shadow (at most 1.5 yd apart, within 80% of its width),
+  `behindYd` (3) past its far edge on the line from the source through its centre, sorted by the side each player
+  comes from, so nobody crosses; each spot is put on the floor and judged with a real ray: one the source sees, one on
+  a lasting zone (a lava crack, a mine: the bot would stand in it) or one off the floor is moved closer (half depth),
+  farther (+1.5 yd) or straight behind the centre, and a blocker whose spots are all bad is left for the others.
+
+The bot view (`HideKind`) gives a placed bot a region of `spotRadiusYd` (1.5) round its spot over the judge window
+and a Member task (it holds there through the wave), and makes every live blocker a small hazard until then (its
+footprint plus 0.5 yd): a bot on the source's side cannot walk straight through the rock, so its solve breaks the
+region and the region route (M4) walks it round. Host check (`tests/hide_test.cpp`): 200 random rooms, five bots
+within 20 yd of the boss and three Boulders 8-12 yd out, a 5 s cast: every bot reaches its spot in the shadow by the
+wave, none walks through a rock, none plans late.
+
+`.mech test hide <range> <ms>` summons the blockers (the stock Fire Plume Ridge Hot Spot 148503, display 3711) round
+the selected creature and registers the Hide from it; `.mech list` adds the blockers alive and the spots placed. The
+drill row is `blackrock-depths-shapes`'s tag 16 (Bael'Gar BG4 heroic, cycle 0 at 52.5 s: three blockers 10 yd out, a
+5 s cast, 95% fire, the blockers gone by 59.5 s; gated). The bot rule generalizes mod-playerbots' hand-made hides
+(`NaxxActions_Sapphiron.cpp`, Sapphiron's ice blocks; `ICCActions_SG.cpp`, Sindragosa's tombs): no code is taken
+from them.
 
 ### Rolling fronts (Blackrock Spire WP-RF)
 
@@ -1628,6 +1767,50 @@ at a throw over 120 s: normal 5 (6 s holds, Scorched 15 s) 2 / 2.2; normal 10 (4
 **Limits**: one holder per entry (a second player with the aura is ignored while the first holds); the counted zones
 are circles and donuts by their outer radius; a human holder is never thrown for; a lost holder (nobody holds) gives
 nothing to the bots (the boss's Soak pickup is the script's, SK7).
+
+### Holds and the dispel rank key (Blackrock Depths WP-DS)
+
+Shared doc BD3: one generic boss data rule, "hold action A on unit U while U has aura X" (`HoldEntry`,
+`src/MechanicDescriptor.h`), instead of one-off rules per boss. The unit is a guid (`OnUnit`), an entry, or entry 0
+(any non-player unit); the aura (0: always) and an optional `when` are judged on it; a dead unit is never held.
+
+```cpp
+Descriptor d;
+// Eviscerator's Spell Eater: no magic damage on him while the shell is up (a Purge of the shell is the reward).
+d.holds.push_back(HoldEntry::Damage(NPC_EVISCERATOR, SPELL_SPELL_EATER, kSchoolMaskMagic));
+d.purges.emplace_back(NPC_EVISCERATOR, SPELL_SPELL_EATER, 2);
+// Angerforge's Commanding Aura: no kick on an add that has it.
+d.holds.push_back(HoldEntry::Interrupts(NPC_ANVILRAGE_OFFICER, SPELL_COMMANDING_AURA));
+// The Seven's shades: not attacked at all while incorporeal (the kill order skips them).
+d.holds.push_back(HoldEntry::Attacks(0, SPELL_INCORPOREAL));
+// Gerstahn: Shadow Word: Pain on the player with the most Doubt first.
+d.dispels.push_back(DispelEntry(SPELL_SHADOW_WORD_PAIN, 2).MostStacksFirst(SPELL_DOUBT));
+```
+
+- `Damage` (school mask): the focus multiplier zeroes a cast aimed at the unit whose spell deals damage (direct,
+  weapon, leech, power burn, periodic damage or leech) in a held school; a wand's Shoot counts by the wand's damage
+  school; a cast or channel already going when the hold comes up is stopped (the waker's `AfterTick`). Kicks, slows
+  and curses without damage go on, and so do white swings.
+- `Interrupts`: `boss kick` leaves the unit's casts out (and its due casts out of the overload hold); the kick
+  multiplier drops a stock kick on it, and a stun or silence while it is casting, with or without an interrupt list.
+- `Attacks`: the unit is ignored (`Desc::IsIgnored`, `TargetRules::MayBeIgnored`): every ignore-list rule applies (no
+  damage, pets pulled off, no AoE count, no kick, out of the kill order).
+
+`MostStacksFirst(aura)`: among afflictions of equal urgency and priority, the member with the most stacks of `aura`
+(any caster, `Unit::GetAuraCount`) goes first, then the time-left order. Entries without it are unchanged.
+
+`NearPlayer(yd)` (Livewire's `when = Not(NearPlayer(8))`, wave 2) counts the candidate's allies: the view takes the
+nearest other live player on the unit's map (in a dungeon, the group), on the plane and within 6 yd of height; pets
+and creatures never count, and 8 yd exactly is near.
+
+**Check**: `.mech desc` prints each hold (the action, the school mask, the aura, the condition, and the live encounter
+units it covers by its aura now) and the rank key after a dispel entry; `.mech bots` adds "holds: damage casts blocked
+n, stopped n" to the targets line and "(held n)" to the stock kicks dropped. **Drills** (descriptor drills, not in the
+loops): `hold-magic` (two adds shelled with the purgeable buff), `hold-kicks` (two casters, the one with Aiming never
+kicked), `dispel-stacks` (Magic Affliction cured on the member with the most Taunt Swap stacks first); presets of the
+same names. **Limits**: a hold binds the bots only (a human may still hit or kick); pets' own spells on a Damage-held
+unit are not stopped (only an `Attacks` hold pulls pets off); an AoE centered elsewhere that clips a held unit is not
+held. Host tests: `tests/descriptor_ds_test.cpp`.
 
 ### Gate
 

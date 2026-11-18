@@ -149,6 +149,11 @@ namespace BossMechanics::Ids
     constexpr std::uint32_t NPC_DRILL_PRISON = 300407;          // holds a player (break-out)
     constexpr std::uint32_t NPC_BLOCK_FIRST = 300400;
     constexpr std::uint32_t NPC_BLOCK_LAST = 300419;
+    // Game objects (Blackrock Depths WP-HK): `.mech test hide` summons the stock Fire Plume Ridge Hot Spot (type 8,
+    // display 3711 Lavarock01, a collision model) as its blocker and sets the display from `display=` (MechanicHide.h
+    // kDisplayLavaRock; fallback 5736). No module row: the stock template is enough for a test.
+    constexpr std::uint32_t GO_HIDE_TEST_BLOCKER = 148503;
+
     // The reworked bosses' CreatureImmunitiesId (stun, fear, root, silence ...; not interrupt), as 300403 carries it.
     // M5 WP-F (R M-2): the sim's descriptor slice gives it to its owner, so stuns and silences stop no program cast.
     constexpr std::int32_t REWORKED_BOSS_IMMUNITIES = -273;

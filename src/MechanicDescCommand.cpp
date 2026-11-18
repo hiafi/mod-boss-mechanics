@@ -132,18 +132,20 @@ namespace BossMechanics
             Descriptor const& d = e.descriptor;
             Milliseconds const now = GameTime::GetGameTimeMS();
             handler->PSendSysMessage("Descriptor of {}: phase {}, {} interrupt(s), {} dispel(s), {} purge(s), "
-                "{} target(s), {} ignore(s), {} taunt swap(s), {} pass(es), stamp {}", UnitLabel(map,
+                "{} target(s), {} ignore(s), {} taunt swap(s), {} pass(es), {} hold(s), stamp {}", UnitLabel(map,
                 e.owner.GetRawValue()), d.phase, d.interrupts.size(), d.dispels.size(), d.purges.size(),
-                d.targets.size(), d.ignores.size(), d.tauntSwaps.size(), d.passes.size(), e.descriptorStamp);
+                d.targets.size(), d.ignores.size(), d.tauntSwaps.size(), d.passes.size(), d.holds.size(),
+                e.descriptorStamp);
             for (InterruptEntry const& i : d.interrupts)
                 handler->PSendSysMessage("  kick {} by {}: {}{}{}", SpellLabel(i.spellId), UnitOrEntry(map,
                     i.casterEntry, 0), i.priority ? Acore::StringFormat("priority {}", int32(i.priority))
                     : std::string("DO NOT KICK"), i.every.count() ? Acore::StringFormat(", every {} ms",
                     i.every.count()) : std::string(), When(i.when));
             for (DispelEntry const& x : d.dispels)
-                handler->PSendSysMessage("  dispel {}: priority {}{}{}{}", SpellLabel(x.auraId), int32(x.priority),
+                handler->PSendSysMessage("  dispel {}: priority {}{}{}{}{}", SpellLabel(x.auraId), int32(x.priority),
                     x.urgent ? ", urgent" : "", x.deadline.count() ? Acore::StringFormat(", deadline {} ms",
-                    x.deadline.count()) : std::string(), When(x.when));
+                    x.deadline.count()) : std::string(), x.rankAura ? ", most stacks of " + SpellLabel(x.rankAura)
+                    + " first" : std::string(), When(x.when));
             for (PurgeEntry const& x : d.purges)
                 handler->PSendSysMessage("  purge {} on {}: priority {}", SpellLabel(x.auraId), UnitOrEntry(map,
                     x.unitEntry, 0), int32(x.priority));
@@ -155,6 +157,30 @@ namespace BossMechanics
                     : std::string(), t.breakOut ? ", break-out" : "", When(t.when));
             for (IgnoreEntry const& x : d.ignores)
                 handler->PSendSysMessage("  ignore {}{}", UnitOrEntry(map, x.entry, x.guid), When(x.when));
+            // Blackrock Depths WP-DS (BD3): each hold, and the encounter's live units it covers now by its aura (the
+            // `when` part is judged by the bots' view, not here).
+            for (HoldEntry const& h : d.holds)
+            {
+                std::string const what = h.action == HoldEntry::Action::Damage ? Acore::StringFormat(
+                    "damage (school mask 0x{:02X})", h.schoolMask) : h.action == HoldEntry::Action::Interrupts
+                    ? std::string("interrupts") : std::string("all attacks");
+                std::string covered;
+                std::vector<ObjectGuid> units{ e.owner };
+                for (EncounterUnit const& u : e.units)
+                    units.push_back(u.guid);
+                for (ObjectGuid const& g : units)
+                {
+                    Creature const* c = map->GetCreature(g);
+                    if (!c || !c->IsAlive()
+                        || (h.guid ? h.guid != g.GetRawValue() : h.entry && h.entry != c->GetEntry())
+                        || (h.auraId && !c->HasAura(h.auraId)))
+                        continue;
+                    covered += (covered.empty() ? "" : ", ") + UnitLabel(map, g.GetRawValue());
+                }
+                handler->PSendSysMessage("  hold {} on {}{}{}: now on {}", what, UnitOrEntry(map, h.entry, h.guid),
+                    h.auraId ? " while aura " + SpellLabel(h.auraId) : std::string(), When(h.when),
+                    covered.empty() ? std::string("-") : covered);
+            }
             // Blackrock Spire WP-TS: each swap boss now, with its victim and the victim's stacks.
             for (TauntSwapEntry const& t : d.tauntSwaps)
             {

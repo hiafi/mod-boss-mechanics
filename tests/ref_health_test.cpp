@@ -374,6 +374,54 @@ namespace
         CHECK(RefFlatSpec(-10.f, false).pctTank < 0.f);
         CHECK(RefFlatSpec(-10.f, true).pctTank == 0.f);
     }
+
+    // The shipped conf rows with the Blackrock Depths normal rows (REF, 2026-11-17: 52, 53, 55, 56 measured on top of the
+    // E3 anchors): each section level reads its own row, 54 and 51 interpolate, the anchors are untouched, and the
+    // 230h:60 pin sends heroic to the 60h row whatever the boss's level (normal is unpinned: one number per section).
+    void TestBrdNormalRows()
+    {
+        std::string err;
+        Table t;
+        CHECK(ParseTable("20:1300:1290 52:3032:3126 53:3182:3266 55:3362:3629 56:3456:3727 60:3670:3710 60h:4120:4110",
+                         t, err));
+        MapLevels pins;
+        CHECK(ParseMapLevels("36:20 36h:60 229:60 229h:60 230h:60", pins, err));
+
+        struct Row { std::uint8_t level; std::uint32_t nonTank; std::uint32_t tank; };
+        for (Row const& row : { Row{ 52, 3032, 3126 }, Row{ 53, 3182, 3266 }, Row{ 55, 3362, 3629 },
+                                Row{ 56, 3456, 3727 }, Row{ 20, 1300, 1290 }, Row{ 60, 3670, 3710 } })
+        {
+            ContentInputs brd;
+            brd.hasMap = true;
+            brd.mapId = 230;
+            brd.ownerLevel = row.level;
+            brd.heroic = false;
+            ContentKey const k = ResolveContentKey(brd, pins);
+            CHECK(k.level == row.level && !k.heroic);
+            ReferenceHealth const h = Lookup(t, k).health;
+            CHECK(h.nonTank == row.nonTank);
+            CHECK(h.tank == row.tank);
+        }
+        // No row at 54 or 51: between the neighbors (54 is the midpoint of 53 and 55).
+        ReferenceHealth const h54 = Lookup(t, Key(54)).health;
+        CHECK(h54.nonTank >= 3271 && h54.nonTank <= 3273);
+        CHECK(h54.tank >= 3447 && h54.tank <= 3448);
+        ReferenceHealth const h51 = Lookup(t, Key(51)).health;
+        CHECK(h51.nonTank > 1300 && h51.nonTank < 3032);
+        // Heroic Blackrock Depths: the pin reads the 60h row at any owner level.
+        for (std::uint8_t owner : { std::uint8_t(52), std::uint8_t(56), std::uint8_t(60) })
+        {
+            ContentInputs brd;
+            brd.hasMap = true;
+            brd.mapId = 230;
+            brd.ownerLevel = owner;
+            brd.heroic = true;
+            ContentKey const k = ResolveContentKey(brd, pins);
+            CHECK(k.level == 60 && k.heroic);
+            CHECK(Lookup(t, k).health.nonTank == 4120);
+            CHECK(Lookup(t, k).health.tank == 4110);
+        }
+    }
 }
 
 int main()
@@ -387,5 +435,6 @@ int main()
     TestContentKey();
     TestMapLevelsPerDifficulty();
     TestRefFlat();
+    TestBrdNormalRows();
     return Report("ref_health_test");
 }

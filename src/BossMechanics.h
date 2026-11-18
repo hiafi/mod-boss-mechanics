@@ -281,6 +281,14 @@ namespace Mechanic
     // resolve (BossMechanics.Bots.Jump.*). Drawn like a Zone; onResolve's `cleared` lists who was in the air.
     MechanicRef Jump(Unit* owner, BossMechanics::ZoneSpec const& spec, Milliseconds warn);
     MechanicRef Jump(Unit* owner, Anchor const& at, float r, Milliseconds warn);
+    // Blackrock Depths BD1 (Bael'Gar's Molten Furnace; MechanicHide.h, README "Hide"): at now + warn everyone eligible
+    // within spec.rangeYd of spec.source (the owner when none is given) whom the source can see is hit (players only;
+    // damage, Weakened, rider and onHit as a Zone). The judge is real line of sight (IsWithinLOSInMap from the source's
+    // centre at spec.eyeHeight), so a game object with a collision model blocks it. spec.blockers are for the bots:
+    // each eligible player gets a spot behind one, spread across them. No marker (the blockers are the tell); the
+    // height band is the shape's zTolerance (default Hide::kDefaultZToleranceYd, `.ZTolerance()`); onResolve's
+    // `cleared` lists who was hidden. Contains / ContainsPoint answer "the source sees it now".
+    MechanicRef Hide(Unit* owner, BossMechanics::HideSpec const& spec, Milliseconds warn);
 
     // Blackrock Spire WP-RF (rolling fronts, MechanicFront.h; README "Rolling fronts"). A Zone whose band rolls over
     // the floor from now + warn: everyone eligible it passes over is hit once (Damage, Weakened, School, Rider, OnHit

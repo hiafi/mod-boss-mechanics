@@ -16,6 +16,8 @@
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GameTime.h"
+#include "GenericSpellActions.h"
+#include "Item.h"
 #include "Log.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
@@ -31,6 +33,8 @@
 #include "PlayerbotAI.h"
 #include "Playerbots.h"
 #include "Spell.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "StringFormat.h"
 #include "UnitScript.h"
 #include <algorithm>
@@ -56,9 +60,77 @@ namespace
         return unit ? unit->GetGUID().GetRawValue() : 0;
     }
 
+    // WP-DS: an Attacks hold is an ignore entry too (Desc::IsIgnored).
     bool HasIgnores(DescriptorView const& v)
     {
-        return v.Active() && !v.descriptor.ignores.empty();
+        return v.Active() && (!v.descriptor.ignores.empty()
+            || Desc::HasHolds(v.descriptor, HoldEntry::Action::Attacks));
+    }
+
+    bool HasDamageHolds(DescriptorView const& v)
+    {
+        return v.Active() && Desc::HasHolds(v.descriptor, HoldEntry::Action::Damage);
+    }
+
+    uint32 CastSpellIdOf(PlayerbotAI* botAI, CastSpellAction* cast)
+    {
+#if defined(PLAYERBOTS_HAS_CAST_SPELL_ID)
+        (void)botAI;
+        return cast->GetCastSpellId();
+#else
+        AiObjectContext* context = botAI->GetAiObjectContext();
+        return AI_VALUE2(uint32, "spell id", cast->getSpell());
+#endif
+    }
+
+    // WP-DS: does the spell deal damage (direct, weapon, leech, power burn, or a periodic damage or leech aura)? A
+    // Damage hold keeps only these off its unit: a kick, a slow or a curse with no damage still goes.
+    bool DealsDamage(SpellInfo const* info)
+    {
+        for (SpellEffectInfo const& eff : info->GetEffects())
+        {
+            switch (eff.Effect)
+            {
+                case SPELL_EFFECT_SCHOOL_DAMAGE:
+                case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
+                case SPELL_EFFECT_HEALTH_LEECH:
+                case SPELL_EFFECT_WEAPON_DAMAGE:
+                case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
+                case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
+                case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
+                case SPELL_EFFECT_POWER_BURN:
+                    return true;
+                case SPELL_EFFECT_APPLY_AURA:
+                    if (eff.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE
+                        || eff.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH
+                        || eff.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT)
+                        return true;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+
+    // The schools the bot's cast of `info` hits with: a wand's Shoot by the wand's damage school (the spell itself is
+    // physical), anything else by its own school mask.
+    uint32 HitSchoolMask(Player const* bot, SpellInfo const* info)
+    {
+        if (info->Id == 5019)   // Shoot (wands)
+            if (Item const* wand = bot->GetWeaponForAttack(RANGED_ATTACK, true))
+                return 1u << wand->GetTemplate()->Damage[0].DamageType;
+        return info->GetSchoolMask();
+    }
+
+    // A damaging cast of `info` by the bot on `target` is held now (a Damage or Attacks hold whose schools it meets).
+    bool CastHeld(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* target,
+        SpellInfo const* info, Milliseconds now)
+    {
+        if (!info || info->IsPositive() || !DealsDamage(info))
+            return false;
+        uint32 const held = BotTargets::HeldDamageMaskNow(st, reg, bot, target, now);
+        return held && (held & HitSchoolMask(bot, info));
     }
 
     bool HasHostilePlayers(DescriptorView const& v)
@@ -263,6 +335,26 @@ namespace
         }
     }
 
+    // WP-DS: a damaging cast or channel in progress whose target a Damage hold now covers (the shell came up mid-cast)
+    // is stopped, as an ignored target's is.
+    void DropHeldCasts(PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Registry const& reg, Milliseconds now)
+    {
+        for (CurrentSpellTypes type : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+            if (Spell const* spell = bot->GetCurrentSpell(type))
+            {
+                Unit const* target = spell->m_targets.GetUnitTarget();
+                if (!target || target == bot || !target->IsCreature()
+                    || !CastHeld(st, reg, bot, target, spell->GetSpellInfo(), now))
+                    continue;
+                botAI->RequestSpellInterrupt();
+                ++st.counters.holdDrops;
+                if (GetConfig().bots.debug)
+                    LOG_INFO(kLog, "Bot {}: stopped {} on {} (damage hold)", bot->GetName(),
+                        spell->GetSpellInfo()->Id, target->GetName());
+                break;
+            }
+    }
+
     // Damage the bot and its minions deal to ignored units (the WP-S counters). OnDamage runs for every damage event
     // on the server: a creature victim and a player behind the attacker are tested before anything is looked up.
     class BossMechanicsBotTargetsUnitScript : public UnitScript
@@ -336,6 +428,24 @@ bool BotTargets::IsIgnoredNow(MechanicBotState& st, Registry const& reg, Player 
     return Desc::IsIgnored(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
 }
 
+bool BotTargets::KicksHeldNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+    Milliseconds now)
+{
+    DescriptorView& v = st.descriptor;
+    if (!unit || !v.Active() || !Desc::HasHolds(v.descriptor, HoldEntry::Action::Interrupts))
+        return false;
+    return Desc::KicksHeld(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
+}
+
+uint32 BotTargets::HeldDamageMaskNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+    Milliseconds now)
+{
+    DescriptorView& v = st.descriptor;
+    if (!unit || !v.Active() || v.descriptor.holds.empty())
+        return 0;
+    return Desc::HeldDamageMask(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
+}
+
 void BotTargets::AfterTick(PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Registry const& reg,
     Milliseconds now)
 {
@@ -387,6 +497,8 @@ void BotTargets::AfterTick(PlayerbotAI* botAI, Player* bot, MechanicBotState& st
 
     if (HasIgnores(v))
         DropIgnored(botAI, bot, st, reg, now);
+    if (HasDamageHolds(v))
+        DropHeldCasts(botAI, bot, st, reg, now);
     if (HasHostilePlayers(v))
         DropReleased(botAI, bot, st);
 }
@@ -443,9 +555,9 @@ std::string BotTargets::ReportLine(MechanicBotState const& st)
         : std::string("-");
     return Acore::StringFormat("m5 targets: focus {} | switches {}, on lower targets {} ms, break-out max {} ms | "
         "ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, minions pulled "
-        "off {} | turned teammates released {}", focus, c.focusSwitches, c.msLowerTarget, c.breakOutMsMax,
-        c.ignoredHits, c.ignoredDamage, c.petIgnoredHits, c.petIgnoredDamage, c.ignoreBlocks, c.ignoreDrops,
-        c.petRecalls, c.hostileReleases);
+        "off {} | turned teammates released {} | holds: damage casts blocked {}, stopped {}", focus, c.focusSwitches,
+        c.msLowerTarget, c.breakOutMsMax, c.ignoredHits, c.ignoredDamage, c.petIgnoredHits, c.petIgnoredDamage,
+        c.ignoreBlocks, c.ignoreDrops, c.petRecalls, c.hostileReleases, c.holdBlocks, c.holdDrops);
 }
 
 void AddSC_boss_mechanics_bot_targets()
@@ -616,11 +728,27 @@ float MechanicBotFocusMultiplier::GetValue(Action* action)
         return TargetRules::SuppressPicker(picker, CurrentFocus(botAI)) ? 0.f : 1.f;
     }
 
-    // The ignore list: an action aimed at an ignored unit (an unknown target value name has no target).
-    if (!HasIgnores(st->descriptor) || action->GetTargetName() == "self target" || !action->GetTargetValue())
+    // The ignore list: an action aimed at an ignored unit (an unknown target value name has no target). WP-DS: a
+    // damaging cast whose schools a Damage hold on the target covers.
+    bool const ignores = HasIgnores(st->descriptor);
+    bool const damageHolds = HasDamageHolds(st->descriptor);
+    if ((!ignores && !damageHolds) || action->GetTargetName() == "self target" || !action->GetTargetValue())
         return 1.f;
     Unit* target = action->GetTarget();
     if (!target || target == bot || !target->IsCreature() || bot->IsFriendlyTo(target))
+        return 1.f;
+    if (damageHolds)
+        if (CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action))
+            if (Registry const* reg = Registry::Get(bot->GetMap()))
+            {
+                uint32 const spellId = CastSpellIdOf(botAI, cast);
+                if (spellId && CastHeld(*st, *reg, bot, target, sSpellMgr->GetSpellInfo(spellId), Now()))
+                {
+                    ++st->counters.holdBlocks;
+                    return 0.f;
+                }
+            }
+    if (!ignores)
         return 1.f;
     Registry const* reg = Registry::Get(bot->GetMap());
     if (!reg || !BotTargets::IsIgnoredNow(*st, *reg, bot, target, Now()))

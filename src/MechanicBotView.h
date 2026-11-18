@@ -24,6 +24,7 @@
 #include "MechanicSolver.h"
 #include "ObjectGuid.h"
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,9 @@ namespace BossMechanics
         // there (its orientation when it has no chosen facing). false = no plan.
         std::function<bool(ObjectGuid, Geo::Vec3& spot, float& facing)> plannedSpot;
         std::function<bool(ObjectGuid)> isBot;
+        // Blackrock Depths WP-DS: is the bot itself a melee damage dealer (playerbots' IsMelee), for SpotBounds::For
+        // (BoundsFor::Melee / Ranged)? Empty: unknown (a damage dealer then fits either bit).
+        std::optional<bool> selfMelee;
     };
 
     // What the bot is asked to do for one mechanic (§3.4).
