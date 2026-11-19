@@ -207,16 +207,26 @@ namespace
     void TestParseLeash()
     {
         std::optional<Drill::LeashStep> l = Drill::ParseLeash("leash 8 20000 role=tank tag=2");
-        CHECK(l && l->yd == 8.f && l->ms == 20000u && l->tanksOnly && l->ledgerTag == 2u
-            && l->tickMs == Drill::kDefaultLeashTickMs);
+        CHECK(l && l->yd == 8.f && l->ms == 20000u && l->role == Drill::LeashRole::Tank && l->ledgerTag == 2u
+            && l->tickMs == Drill::kDefaultLeashTickMs && l->anchor == Drill::LeashAnchor::Unit);
         l = Drill::ParseLeash("leash 40 20000 tag=3");
-        CHECK(l && !l->tanksOnly && l->ledgerTag == 3u);
+        CHECK(l && l->role == Drill::LeashRole::Any && l->anchor == Drill::LeashAnchor::Unit && l->ledgerTag == 3u);
         l = Drill::ParseLeash("leash 40 20000 role=any tick=500 tag=3");
-        CHECK(l && !l->tanksOnly && l->tickMs == 500u);
+        CHECK(l && l->role == Drill::LeashRole::Any && l->tickMs == 500u);
+        // The healer split (ruling 2026-11-18): non-healers on the boss, healers on the tank.
+        l = Drill::ParseLeash("leash 40 20000 role=nonhealer tag=3");
+        CHECK(l && l->role == Drill::LeashRole::NonHealer && l->anchor == Drill::LeashAnchor::Unit);
+        l = Drill::ParseLeash("leash 40 20000 role=healer anchor=tank tag=3");
+        CHECK(l && l->role == Drill::LeashRole::Healer && l->anchor == Drill::LeashAnchor::Tank && l->yd == 40.f
+            && l->ledgerTag == 3u);
+        l = Drill::ParseLeash("leash 40 20000 anchor=tank role=healer tick=500 tag=3");     // keys in any order
+        CHECK(l && l->role == Drill::LeashRole::Healer && l->anchor == Drill::LeashAnchor::Tank && l->tickMs == 500u);
         for (char const* bad : { "leash 8 20000", "leash 8 20000 tag=0", "leash 8 20000 tag=1.5", "leash 0 20000 tag=1",
-            "leash 8 0 tag=1", "leash 8 20000 role=healer tag=1", "leash 8 20000 tick=100 tag=1",
-            "leash 8 1000 tick=2000 tag=1", "leash 8 500 tag=1", "leash 8 20000 tag=1 pct=10",
-            "leash 8 20000 tag=1 tag=2", "walk 8 20000 tag=1" })
+            "leash 8 0 tag=1", "leash 8 20000 role=dps tag=1", "leash 8 20000 role=healers tag=1",
+            "leash 8 20000 role= tag=1", "leash 8 20000 anchor=boss tag=1", "leash 8 20000 anchor=healer tag=1",
+            "leash 8 20000 anchor=tank anchor=tank tag=1", "leash 8 20000 role=healer role=tank tag=1",
+            "leash 8 20000 tick=100 tag=1", "leash 8 1000 tick=2000 tag=1", "leash 8 500 tag=1",
+            "leash 8 20000 tag=1 pct=10", "leash 8 20000 tag=1 tag=2", "walk 8 20000 tag=1" })
             CHECK(!Drill::ParseLeash(bad));
         CHECK(Drill::LeashTicks(20000, 1000) == 20u && Drill::LeashTicks(20000, 3000) == 6u
             && Drill::LeashTicks(5, 0) == 0u);
@@ -224,6 +234,44 @@ namespace
         CHECK(!Drill::OutOfLeash(o, { 8.f, 0.f, 0.f }, 8.f));
         CHECK(Drill::OutOfLeash(o, { 8.01f, 0.f, 0.f }, 8.f));
         CHECK(!Drill::OutOfLeash(o, { 6.f, 5.29f, 30.f }, 8.f));    // the ground plane: height is ignored
+    }
+
+    // Who a leash judges: role= over the role provider's tank / healer bits (a tank-healer hybrid is a healer).
+    void TestLeashJudges()
+    {
+        using R = Drill::LeashRole;
+        for (bool tank : { false, true })
+            for (bool healer : { false, true })
+            {
+                CHECK(Drill::LeashJudges(R::Any, tank, healer));
+                CHECK(Drill::LeashJudges(R::Tank, tank, healer) == tank);
+                CHECK(Drill::LeashJudges(R::Healer, tank, healer) == healer);
+                CHECK(Drill::LeashJudges(R::NonHealer, tank, healer) == !healer);
+                // healer and nonhealer split the group: each member is judged by exactly one of tag 3's two lines
+                CHECK(Drill::LeashJudges(R::Healer, tank, healer) != Drill::LeashJudges(R::NonHealer, tank, healer));
+            }
+    }
+
+    // anchor=tank: in reach of any one tank passes; out of reach of every tank fails; no tank skips (nullopt).
+    void TestTankLeash()
+    {
+        Vec3 const healer{ 0.f, 0.f, 0.f };
+        CHECK(!Drill::OutOfTankLeash({}, healer, 40.f).has_value());
+        std::optional<bool> r = Drill::OutOfTankLeash({ { 40.f, 0.f, 0.f } }, healer, 40.f);
+        CHECK(r && !*r);
+        r = Drill::OutOfTankLeash({ { 40.01f, 0.f, 0.f } }, healer, 40.f);
+        CHECK(r && *r);
+        r = Drill::OutOfTankLeash({ { 50.f, 0.f, 0.f }, { 0.f, -30.f, 20.f } }, healer, 40.f);  // the second in reach
+        CHECK(r && !*r);
+        r = Drill::OutOfTankLeash({ { 50.f, 0.f, 0.f }, { 0.f, -41.f, 0.f } }, healer, 40.f);
+        CHECK(r && *r);
+        // The report's geometry (STAGE-ROCCOR-CHASE point 6): a healer at the bots' heal reach (39.5 yd) of a tank
+        // standing 4.5 yd short of the walking boss is 44 yd from him: the boss leash fails it, the tank's keeps it.
+        Vec3 const tank{ 39.5f, 0.f, 0.f };
+        Vec3 const boss{ 44.f, 0.f, 0.f };
+        CHECK(Drill::OutOfLeash(boss, healer, Drill::kRangeLeashYd));
+        r = Drill::OutOfTankLeash({ tank }, healer, Drill::kRangeLeashYd);
+        CHECK(r && !*r);
     }
 
     void TestWalkGeometry()
@@ -252,15 +300,15 @@ namespace
         }
     }
 
-    // RO1 + RO3: a Rampage, the out leg with both leashes, a Rampage back, the back leg with both leashes, home again.
+    // RO1 + RO3: a Rampage, the out leg with its leashes, a Rampage back, the back leg with its leashes, home again.
     void TestWalkRow()
     {
         std::vector<At> const walks = WithShape(0, "walk");
         std::vector<At> const leashes = WithShape(0, "leash");
         std::vector<At> const rampages = WithTag(0, Drill::kBrdTagRampage);
-        CHECK(walks.size() == 2 && leashes.size() == 4 && rampages.size() == 2);
+        CHECK(walks.size() == 2 && leashes.size() == 6 && rampages.size() == 2);
         CHECK(WithShape(1, "walk").empty() && WithShape(1, "leash").empty());
-        if (walks.size() != 2 || rampages.size() != 2 || leashes.size() != 4)
+        if (walks.size() != 2 || rampages.size() != 2 || leashes.size() != 6)
             return;
         std::optional<Drill::WalkStep> const out = Drill::ParseWalk(Drill::StripPlanKeys(walks[0].line));
         std::optional<Drill::WalkStep> const back = Drill::ParseWalk(Drill::StripPlanKeys(walks[1].line));
@@ -281,18 +329,24 @@ namespace
         // The legs start as each Rampage resolves and never overlap a Rampage.
         CHECK(walks[0].startMs == rampages[0].endMs && walks[1].startMs == rampages[1].endMs);
         CHECK(rampages[1].startMs >= walks[0].endMs);
-        // Each leg has a tank leash and an everyone leash over exactly its length.
+        // Each leg has the tank's 8 yd leash on him and tag 3's two 40 yd ones over exactly its length: the
+        // non-healers on him, the healers on the tank (ruling 2026-11-18).
         for (std::size_t i = 0; i < leashes.size(); ++i)
         {
             std::optional<Drill::LeashStep> const l = Drill::ParseLeash(Drill::StripPlanKeys(leashes[i].line));
             CHECK(l.has_value());
             if (!l)
                 continue;
-            At const& leg = walks[i / 2];
+            At const& leg = walks[i / 3];
             CHECK(leashes[i].startMs == leg.startMs && l->ms == Drill::ParseWalk(Drill::StripPlanKeys(leg.line))->ms);
-            CHECK(l->tanksOnly == (i % 2 == 0));
-            CHECK(l->yd == (l->tanksOnly ? Drill::kTankLeashYd : Drill::kRangeLeashYd));
-            CHECK(l->ledgerTag == (l->tanksOnly ? Drill::kBrdTagTankLeash : Drill::kBrdTagRangeLeash));
+            Drill::LeashRole const role[] = { Drill::LeashRole::Tank, Drill::LeashRole::NonHealer,
+                Drill::LeashRole::Healer };
+            CHECK(l->role == role[i % 3]);
+            CHECK(l->anchor == (l->role == Drill::LeashRole::Healer ? Drill::LeashAnchor::Tank
+                : Drill::LeashAnchor::Unit));
+            bool const tank = l->role == Drill::LeashRole::Tank;
+            CHECK(l->yd == (tank ? Drill::kTankLeashYd : Drill::kRangeLeashYd));
+            CHECK(l->ledgerTag == (tank ? Drill::kBrdTagTankLeash : Drill::kBrdTagRangeLeash));
         }
         // The Rampage: a 20 x 8 lane from him, 2.5 s, 60% (heroic), no Weakened; the first along the route out, the
         // second back along it (offset=180), toward the group trailing him.
@@ -351,8 +405,8 @@ namespace
         CHECK(LeashFailures(kSimTankYd, Drill::kTankLeashYd, 500, 5.f, false) >= 16u);
         // A re-path as slow as 2 s still holds it (5 yd + 3 yd of walking).
         CHECK(LeashFailures(kSimTankYd, Drill::kTankLeashYd, 2000, 5.f, true) == 0u);
-        // A healer at 18 yd that never moves leaves the 40 yd leash after about 14.7 s: the leash catches it on every
-        // leg; one that keeps 30 yd (spell range) never fails.
+        // A member at the healer's 18 yd that never moves leaves the 40 yd boss leash after about 14.7 s; one that
+        // keeps 30 yd (spell range) never fails. (A healer is judged on the tank instead: TestTankLeash.)
         std::uint32_t const still = LeashFailures(kSimHealerYd, Drill::kRangeLeashYd, 1000, 30.f, false);
         CHECK(still >= 5u && still <= 6u);
         CHECK(LeashFailures(kSimHealerYd, Drill::kRangeLeashYd, 1000, 30.f, true) == 0u);
@@ -1070,6 +1124,8 @@ int main()
     TestTable();
     TestParseWalk();
     TestParseLeash();
+    TestLeashJudges();
+    TestTankLeash();
     TestWalkGeometry();
     TestWalkRow();
     TestLeashModel();

@@ -95,8 +95,9 @@
  * Blackrock Depths build (WP-G1 §3.9, drill `blackrock-depths-shapes`): `offset=<deg>` on a line turns its fixed
  * facing (and shift='s axes) counterclockwise, and two drill-only steps (RunDrillWith, MechanicDrill.h "Blackrock
  * Depths shapes"): `walk <yd> <ms> [offset=]` relocates the selected creature along the run's facing (ScheduleWalk; a
- * boss with combat movement off) and `leash <yd> <ms> [role=tank] [tick=] tag=<n>` posts an OffSpot failure for each
- * scope member left farther than <yd> from it (ScheduleLeash; nothing registers, so the bots never see it).
+ * boss with combat movement off) and `leash <yd> <ms> [role=tank|healer|nonhealer] [anchor=tank] [tick=] tag=<n>`
+ * posts an OffSpot failure for each scope member left farther than <yd> from it, or with anchor=tank from its nearest
+ * alive tank (ScheduleLeash; nothing registers, so the bots never see it).
  *
  * Blackrock Depths build (WP-G2 §3.9, drill `blackrock-depths-shapes-2`): `soak <width> <ms> shape=line
  * to=target|member|me` is a beam from the anchor to that unit (Shapes::Line(from, to, width): it turns with the unit,
@@ -2523,9 +2524,10 @@ namespace
         }
     }
 
-    // Drill step `leash` (Blackrock Depths WP-G1): every tick for `l.ms`, each alive scope member (role=tank: the ones
-    // the role provider calls tanks for the selected unit) farther than `l.yd` from the selected unit takes an OffSpot
-    // failure on the owner's encounter (ledger key Zone/<tag>). No mechanic registers: the bots never see it.
+    // Drill step `leash` (Blackrock Depths WP-G1): every tick for `l.ms`, each alive scope member (role=: the ones the
+    // role provider calls tanks / healers / not healers for the selected unit) farther than `l.yd` from the selected
+    // unit (anchor=tank: from every other alive scope tank; none: skipped) takes an OffSpot failure on the owner's
+    // encounter (ledger key Zone/<tag>). No mechanic registers: the bots never see it.
     void ScheduleLeash(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
         Drill::LeashStep const& l)
     {
@@ -2539,11 +2541,29 @@ namespace
                 Registry& reg = Registry::GetOrCreate(testOwner->GetMap());
                 reg.AddScopePlayer(testOwner->GetGUID(), spec.gm);
                 Geo::Vec3 const at{ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() };
-                for (Player const* p : GroupMembers(testOwner, spec.gm, spec.includeGm))
+                std::vector<Player*> const members = GroupMembers(testOwner, spec.gm, spec.includeGm);
+                std::vector<Role> roles;
+                roles.reserve(members.size());
+                for (Player const* p : members)
+                    roles.push_back(GetRoleProvider().Get(unit, p));
+                for (std::size_t i = 0; i < members.size(); ++i)
                 {
-                    if (l.tanksOnly && !HasRole(GetRoleProvider().Get(unit, p), Role::Tank))
+                    Player const* p = members[i];
+                    if (!Drill::LeashJudges(l.role, HasRole(roles[i], Role::Tank), HasRole(roles[i], Role::Healer)))
                         continue;
-                    if (!Drill::OutOfLeash(at, { p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() }, l.yd))
+                    Geo::Vec3 const pos{ p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() };
+                    if (l.anchor == Drill::LeashAnchor::Tank)
+                    {
+                        std::vector<Geo::Vec3> tanks;
+                        for (std::size_t j = 0; j < members.size(); ++j)
+                            if (j != i && HasRole(roles[j], Role::Tank))
+                                tanks.push_back({ members[j]->GetPositionX(), members[j]->GetPositionY(),
+                                    members[j]->GetPositionZ() });
+                        std::optional<bool> const out = Drill::OutOfTankLeash(tanks, pos, l.yd);
+                        if (!out || !*out)
+                            continue;
+                    }
+                    else if (!Drill::OutOfLeash(at, pos, l.yd))
                         continue;
                     FailureEvent e;
                     e.encounter = testOwner->GetGUID();
@@ -2644,7 +2664,8 @@ namespace
                 if (!p.walk && !p.leash)
                 {
                     err = Acore::StringFormat("Drill {}: bad step '{}' (walk <yd> <ms> [offset=<deg>], leash <yd> "
-                        "<ms> [role=tank|any] [tick=<ms>] tag=<n>)", def.name, step.line);
+                        "<ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>)", def.name,
+                        step.line);
                     return false;
                 }
                 p.spec.gm = scopeGuid;

@@ -690,11 +690,14 @@ namespace BossMechanics::Drill
     //                                   counterclockwise) over <ms>, relocated every kWalkStepMs (WalkPoint): a boss
     //                                   with combat movement off (Roccor's Restless March). Works on a rooted unit (the
     //                                   sim's boss stand-in); it keeps its orientation.
-    //   leash <yd> <ms> [role=tank|any] [tick=<ms>] tag=<n>
+    //   leash <yd> <ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>
     //                                   for <ms>, every tick (default 1000), each alive scope member farther than <yd>
-    //                                   from the selected unit (2D; role=tank: the members the role provider calls
-    //                                   tanks) takes a ledger failure `Zone/<n>` (OffSpot). Nothing is registered, so
-    //                                   the bots never see it: it judges whether they keep up on their own.
+    //                                   from the selected unit (2D; role=: only the members the role provider calls
+    //                                   tanks / healers / not healers) takes a ledger failure `Zone/<n>` (OffSpot).
+    //                                   anchor=tank measures from the member's nearest alive tank of the scope instead
+    //                                   (not itself; no such tank: the member is skipped), as a healer's real reach
+    //                                   is to the tank (ruling 2026-11-18). Nothing is registered, so the bots never
+    //                                   see it: it judges whether they keep up on their own.
     // And on `.mech test` lines: `offset=<deg>` turns a line's fixed facing (and the axes of its shift=) from the run's
     // facing, counterclockwise (not with to= or follow=1): a lane across the strip (offset=90), a Rampage back along
     // the route (offset=180).
@@ -740,10 +743,54 @@ namespace BossMechanics::Drill
         return dx * dx + dy * dy > yd * yd;
     }
 
+    // Who a leash judges (role=) and what it measures from (anchor=; see the step's comment above).
+    enum class LeashRole : std::uint8_t
+    {
+        Any,
+        Tank,
+        Healer,
+        NonHealer
+    };
+
+    enum class LeashAnchor : std::uint8_t
+    {
+        Unit,           // the selected unit (the walking boss)
+        Tank            // anchor=tank: the member's nearest alive tank of the scope
+    };
+
+    // Does a leash of `role` judge a member the role provider calls a tank / a healer?
+    constexpr bool LeashJudges(LeashRole role, bool tank, bool healer)
+    {
+        switch (role)
+        {
+            case LeashRole::Tank:
+                return tank;
+            case LeashRole::Healer:
+                return healer;
+            case LeashRole::NonHealer:
+                return !healer;
+            default:
+                return true;
+        }
+    }
+
+    // anchor=tank: is `member` farther than `yd` from every one of `tanks` (the scope's alive tanks other than the
+    // member)? nullopt with no tank: the member is skipped, not failed.
+    inline std::optional<bool> OutOfTankLeash(std::vector<Geo::Vec3> const& tanks, Geo::Vec3 const& member, float yd)
+    {
+        if (tanks.empty())
+            return std::nullopt;
+        for (Geo::Vec3 const& t : tanks)
+            if (!OutOfLeash(t, member, yd))
+                return false;
+        return true;
+    }
+
     // Ledger tags of `blackrock-depths-shapes` (sweep keys `Zone/<tag>`, the ward's `Stack/11`).
     constexpr std::uint32_t kBrdTagRampage = 1;         // RO3 heroic: 20 x 8 lane from him at each route end, 2.5 s
     constexpr std::uint32_t kBrdTagTankLeash = 2;       // RO1: the tank more than 8 yd from the walking boss
-    constexpr std::uint32_t kBrdTagRangeLeash = 3;      // RO1: anyone more than 40 yd from him (ranged reposition)
+    constexpr std::uint32_t kBrdTagRangeLeash = 3;      // RO1: a non-healer more than 40 yd from him (ranged
+                                                        // reposition), a healer more than 40 yd from the tank
     constexpr std::uint32_t kBrdTagLeapLine = 4;        // GR4 heroic: three 3 yd hound-to-landing lines, 1.5 s
     constexpr std::uint32_t kBrdTagLeapLanding = 5;     // GR3 heroic: the 5 yd landing at the marked spot, 1.5 s
     constexpr std::uint32_t kBrdTagAxe = 6;             // GO2 heroic: the 3 yd axe landing on a player's spot, 2 s
@@ -768,12 +815,12 @@ namespace BossMechanics::Drill
     }
 
     // Cycle 0 (cycle=0/2): Lord Roccor RO1 + RO3 heroic: a Rampage lane, then 30 yd out at 1.5 yd/s (speed_walk 0.6),
-    // a Rampage back along the route, 30 yd back (a 60 yd path), the two leashes on each leg; then Houndmaster Grebmar
-    // GR3 + GR4 heroic twice (a member, then a non-tank, as the double whistle below 30%): three hound lines from 10
-    // yd round him to the marked spot and the 5 yd landing there. Cycle 1 (cycle=1/2): Gorosh GO2 heroic (axe, shown
-    // return, locked return), Ok'thor OK1 normal then heroic, Loregrain LG1-LG3 heroic (three tides at three ward
-    // spots hugging him, radius 5, 3, 4), Incendius IN8 / IN13 / IN11 on a 48 x 22 strip round him (long axis along
-    // the run's facing).
+    // a Rampage back along the route, 30 yd back (a 60 yd path), the three leashes on each leg (the tank on him, the
+    // non-healers on him, the healers on the tank); then Houndmaster Grebmar GR3 + GR4 heroic twice (a member, then a
+    // non-tank, as the double whistle below 30%): three hound lines from 10 yd round him to the marked spot and the 5
+    // yd landing there. Cycle 1 (cycle=1/2): Gorosh GO2 heroic (axe, shown return, locked return), Ok'thor OK1
+    // normal then heroic, Loregrain LG1-LG3 heroic (three tides at three ward spots hugging him, radius 5, 3, 4),
+    // Incendius IN8 / IN13 / IN11 on a 48 x 22 strip round him (long axis along the run's facing).
     constexpr std::uint32_t kBrdCycleMs = 60000;
     constexpr std::uint32_t kBrdCycles = 2;
     constexpr float kRoccorWalkYd = 30.f;
@@ -1245,7 +1292,8 @@ namespace BossMechanics::Drill
                 }, 3 },     // three cycles a run (120 s): the sweep runs rolling-fronts:3
 
             // Blackrock Depths build §3.9 (WP-G1, wave 1): see kBrdTagRampage above. Cycle 0 (0/2): Roccor walks 30
-            // yd out and back (Rampage lanes at the route ends, the tank's and everyone's leash on each leg), then
+            // yd out and back (Rampage lanes at the route ends, on each leg the tank's leash and tag 3's two: the
+            // non-healers on him, the healers on the tank, ruling 2026-11-18), then
             // Grebmar's two Sic 'em leaps. Cycle 1 (1/2): Gorosh's Returning Axe, Ok'thor's Arcane Rupture normal and
             // heroic, Loregrain's three Fire Tides round a moving ward, Incendius's edge bands, crumble and Arm Sweeps.
             { "blackrock-depths-shapes", "a walking boss with leashes, hound leap lines, axe and its locked return, "
@@ -1254,11 +1302,13 @@ namespace BossMechanics::Drill
                     { 0, "line 20 2500 width=8 anchor=target cycle=0/2 pct=60 tag=1" },
                     { 2500, "walk 30 20000 cycle=0/2" },
                     { 2500, "leash 8 20000 role=tank cycle=0/2 tag=2" },
-                    { 2500, "leash 40 20000 cycle=0/2 tag=3" },
+                    { 2500, "leash 40 20000 role=nonhealer cycle=0/2 tag=3" },
+                    { 2500, "leash 40 20000 role=healer anchor=tank cycle=0/2 tag=3" },
                     { 22500, "line 20 2500 width=8 anchor=target offset=180 cycle=0/2 pct=60 tag=1" },
                     { 25000, "walk 30 20000 offset=180 cycle=0/2" },
                     { 25000, "leash 8 20000 role=tank cycle=0/2 tag=2" },
-                    { 25000, "leash 40 20000 cycle=0/2 tag=3" },
+                    { 25000, "leash 40 20000 role=nonhealer cycle=0/2 tag=3" },
+                    { 25000, "leash 40 20000 role=healer anchor=tank cycle=0/2 tag=3" },
                     // leap: Grebmar GR3 + GR4 heroic (the first on anyone, the second on a non-tank)
                     { 47000, "line 1 1500 width=3 away=10 to=member pick=any reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
                     { 47000, "line 1 1500 width=3 away=10 to=member pick=same reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
@@ -1686,7 +1736,8 @@ namespace BossMechanics::Drill
         float yd = 0.f;
         std::uint32_t ms = 0;
         std::uint32_t tickMs = kDefaultLeashTickMs;
-        bool tanksOnly = false;         // role=tank
+        LeashRole role = LeashRole::Any;
+        LeashAnchor anchor = LeashAnchor::Unit;
         std::uint32_t ledgerTag = 0;
     };
 
@@ -1733,12 +1784,12 @@ namespace BossMechanics::Drill
         return w;
     }
 
-    // `leash <yd> <ms> [role=tank|any] [tick=<ms>] tag=<n>` (plan keys stripped): yd > 0, ms up to kMaxWalkMs, tick
-    // from kMinLeashTickMs to ms, a whole tag >= 1; nullopt otherwise.
+    // `leash <yd> <ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>` (plan keys stripped): yd >
+    // 0, ms up to kMaxWalkMs, tick from kMinLeashTickMs to ms, a whole tag >= 1; nullopt otherwise.
     inline std::optional<LeashStep> ParseLeash(std::string_view line)
     {
         std::vector<std::string_view> const t = Tokens(line);
-        if (t.size() < 3 || t[0] != "leash" || !OnlyKeys(t, { "role", "tick", "tag" }))
+        if (t.size() < 3 || t[0] != "leash" || !OnlyKeys(t, { "role", "anchor", "tick", "tag" }))
             return std::nullopt;
         std::optional<float> const yd = Number(t[1]);
         std::optional<float> const ms = Number(t[2]);
@@ -1749,9 +1800,20 @@ namespace BossMechanics::Drill
         l.ms = static_cast<std::uint32_t>(*ms);
         if (std::optional<std::string_view> const role = Value(line, "role"))
         {
-            if (*role != "tank" && *role != "any")
+            if (*role == "tank")
+                l.role = LeashRole::Tank;
+            else if (*role == "healer")
+                l.role = LeashRole::Healer;
+            else if (*role == "nonhealer")
+                l.role = LeashRole::NonHealer;
+            else if (*role != "any")
                 return std::nullopt;
-            l.tanksOnly = *role == "tank";
+        }
+        if (std::optional<std::string_view> const anchor = Value(line, "anchor"))
+        {
+            if (*anchor != "tank")
+                return std::nullopt;
+            l.anchor = LeashAnchor::Tank;
         }
         if (std::optional<std::string_view> const v = Value(line, "tick"))
         {
