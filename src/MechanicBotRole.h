@@ -40,6 +40,13 @@ namespace BossMechanics
         // The nearest alive group tank on the bot's map (healers anchor on it), or nullptr.
         Player* NearestGroupTank(Player* bot);
 
+        // Healer reach: HealDistance - 2 (Solver::Reach maxYd, FillSightReach).
+        float HealerReachYd();
+
+        // A healer in combat: its 2-D distance to NearestGroupTank. -1 for anyone else, out of combat, or with no
+        // live tank on its map (STAGE-HEALER-RANGE: LockRules::HealerReachRelevant).
+        float HealerTankYd(Player* bot);
+
         // The role band (§3.8 role band v2). Empty out of combat without a master or group leader on the map.
         Solver::RoleBand RoleBandOf(PlayerbotAI* botAI, Player* bot, BotConfig const& cfg);
 

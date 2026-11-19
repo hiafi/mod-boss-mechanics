@@ -137,6 +137,8 @@ namespace BossMechanics
         Milliseconds lastTrackAt{ 0 };                      // region tracking re-solves (MovingAnchorRecheckMs)
         Milliseconds lastSightAt{ 0 };                      // healer line-of-sight checks
         Milliseconds nextSightAt{ 0 };                      // ...none before this (a role solve that stayed backs off)
+        bool reachWalk = false;                             // the Escape walks a healer back within reach of its
+                                                            // tank (STAGE-HEALER-RANGE; ends with the Escape)
         // Stratholme X2: the drop rule's solves (the carried shape's id solved for, and the last one's time).
         uint32 dropSolvedFor = 0;
         Milliseconds lastDropSolveAt{ 0 };
