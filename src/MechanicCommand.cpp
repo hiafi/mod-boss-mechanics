@@ -964,7 +964,12 @@ namespace
             hide.Range(spec.size).Behind(spec.hideBehind).Share(spec.hideShare);
             if (spec.hideEye >= 0.f)
                 hide.Eye(spec.hideEye);
-            uint32 const lifeSecs = static_cast<uint32>(((spec.warn + spec.hideLinger).count() + 999) / 1000);
+            // The Boulders outlive the resolve by at least kHideResolveSlack, even at linger=0: a despawn on the
+            // resolve's own map tick could run first (GameObject::Update before the registry), and the resolve would
+            // find no blocker and read everyone as Seen (R-FIXES MN-4).
+            Milliseconds constexpr kHideResolveSlack(500);
+            Milliseconds const life = spec.warn + std::max(spec.hideLinger, kHideResolveSlack);
+            uint32 const lifeSecs = static_cast<uint32>((life.count() + 999) / 1000);
             for (uint32 i = 0; i < spec.hideBlockers; ++i)
             {
                 float const a = Geo::WrapPi(spec.facing + Geo::kTwoPi * static_cast<float>(i)
@@ -982,6 +987,14 @@ namespace
                 }
                 if (spec.hideDisplay && go->GetDisplayId() != spec.hideDisplay)
                     go->SetDisplayId(spec.hideDisplay);     // recreates its collision model (GameObject::UpdateModel)
+                // The respawn timer above runs on GameTime::GetGameTime(), wall-clock seconds even under the sim's
+                // clock override, so in an accelerated sim a 7 s Boulder outlived its run by minutes of sim time and
+                // stood on the next iteration's Roccor road, breaking the bots' line of sight to the walking boss
+                // (Roccor chase report). The despawn delay counts down in GameObject::Update's diff: the map's clock.
+                // That delete relies on the default entry's type (148503, SPELL_FOCUS): a `go=` CHEST or GOOBER has a
+                // respawn time, so the despawn only resets it to READY (gone for clients, still blocking LOS on the
+                // server, and back on the wall clock in a sim). Use a non-lootable, non-usable entry for go=.
+                go->DespawnOrUnsummon(life);
                 hide.Blocker(go->GetGUID(), go->GetPosition(), spec.hideRadius);
             }
             MechanicRef ref = Mechanic::Hide(owner, hide, spec.warn);
