@@ -1,10 +1,13 @@
 // Standalone tests for src/MechanicTargetRules.h (STAGE-M5-HANDOFF §3.5, WP-T): when the focus engages and which
 // stock pickers it stands down, the lower-priority clock's test, the ignore list's name pre-check, the minion step
-// and the break-out clock. Desc::PickTarget and Desc::IsIgnored themselves are covered by descriptor_test.
+// and the break-out clock, the line-of-sight re-pick (an unseen pick kept) and the sight walk's samples.
+// Desc::PickTarget and Desc::IsIgnored themselves are covered by descriptor_test.
 // Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicTargetRules.h"
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 using namespace BossMechanics;
@@ -370,6 +373,114 @@ namespace
         CHECK(focus.target == kOwner && !focus.Engaged());
     }
 
+namespace
+{
+    // Blackrock Depths 2026-11-19: Hurley's kill order, the marked keg (3), the Cronies (2), him (0).
+    void TestUnseenFocus()
+    {
+        constexpr std::uint32_t kKeg = 300839;
+        constexpr std::uint32_t kCrony = 9541;
+        Descriptor d;
+        d.targets.push_back(TargetEntry(kKeg, 3));
+        d.targets.push_back(TargetEntry(kCrony, 2));
+        std::vector<UnitFacts> f{ Facts(kOwner, kBoss), Facts(10, kKeg), Facts(20, kCrony) };
+        std::vector<Key> hidden;
+        float far = 30.f;
+        auto sees = [&hidden](Key k) { return std::find(hidden.begin(), hidden.end(), k) == hidden.end(); };
+        auto yd = [&far](Key k) { return k == 10 ? far : 10.f; };
+        auto pick = [&](Key current)
+        {
+            return DecideFocusInSight(d, Candidates(f), kOwner, Dps(), current, {}, 3, sees, yd);
+        };
+
+        // In sight: the plain pick.
+        Focus r = pick(kOwner);
+        CHECK(r.target == 10 && r.Engaged() && !r.unseen);
+
+        // The keg out of sight, a Crony in sight: the keg stays the focus (it ranks above), unseen.
+        hidden = { 10 };
+        r = pick(kOwner);
+        CHECK(r.target == 10 && r.priority == 3 && r.Engaged() && r.outranksBoss && r.unseen);
+        CHECK(SuppressPicker(Picker::Assist, r));
+
+        // The keg out of sight and too far: the best pick in sight (the Crony).
+        far = kUnseenFocusYd + 1.f;
+        r = pick(kOwner);
+        CHECK(r.target == 20 && r.Engaged() && !r.unseen);
+        far = kUnseenFocusYd;
+        CHECK(pick(kOwner).unseen);
+
+        // No Crony left: the keg unseen over the boss in sight.
+        f[2].alive = false;
+        r = pick(kOwner);
+        CHECK(r.target == 10 && r.unseen && r.Engaged());
+
+        // Nothing in sight at all: still the keg.
+        hidden = { 10, kOwner };
+        r = pick(kOwner);
+        CHECK(r.target == 10 && r.unseen);
+
+        // An unseen pick that does not outrank the boss is never kept: the boss out of sight, an add below it in
+        // sight -> the add (the old re-pick).
+        Descriptor below;
+        below.targets.push_back(TargetEntry(kAdd, -1));
+        std::vector<UnitFacts> g{ Facts(kOwner, kBoss), Facts(30, kAdd) };
+        hidden = { kOwner };
+        Focus b = DecideFocusInSight(below, Candidates(g), kOwner, Dps(), 0, {}, 3, sees, yd);
+        CHECK(b.target == 30 && !b.unseen);
+
+        // Two listed units of the keg's rank, one out of sight: the one in sight, not a walk.
+        f[2] = Facts(11, kKeg);
+        hidden = { 10 };
+        r = pick(kOwner);
+        CHECK(r.target == 11 && !r.unseen && r.Engaged());
+
+        // A tank or a healer under Dps entries: the owner, never engaged, never a walk.
+        hidden = { 10, 11 };
+        r = DecideFocusInSight(d, Candidates(f), kOwner, Tank(), kOwner, {}, 3, sees, yd);
+        CHECK(r.target == kOwner && !r.Engaged() && !r.unseen);
+
+        // The repicks run out with nothing in sight: the first unseen pick.
+        Descriptor many;
+        for (std::uint32_t e = 1; e <= 6; ++e)
+            many.targets.push_back(TargetEntry(1000 + e, static_cast<std::int8_t>(e)));
+        std::vector<UnitFacts> m{ Facts(kOwner, kBoss) };
+        for (std::uint32_t e = 1; e <= 6; ++e)
+            m.push_back(Facts(100 + e, 1000 + e));
+        hidden = { 101, 102, 103, 104, 105, 106, kOwner };
+        r = DecideFocusInSight(many, Candidates(m), kOwner, Dps(), 0, {}, 3, sees, yd);
+        CHECK(r.target == 106 && r.priority == 6 && r.unseen);
+    }
+
+    void TestSightSamples()
+    {
+        // Too short a path: nothing.
+        CHECK(SightSamples({}).empty());
+        CHECK(SightSamples({ { 0.f, 0.f, 0.f } }).empty());
+        // A 5 yd leg: 2, 4 and the end.
+        std::vector<PathPoint> s = SightSamples({ { 0.f, 0.f, 0.f }, { 5.f, 0.f, 0.f } });
+        CHECK(s.size() == 3);
+        CHECK(s[0].x == 2.f && s[1].x == 4.f && s[2].x == 5.f);
+        // A corner: the step carries over it (3 yd east, then 3 yd north: 2, then 1 yd past the corner, the end).
+        s = SightSamples({ { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 3.f, 3.f, 0.f } });
+        CHECK(s.size() == 3);
+        CHECK(s[0].x == 2.f && s[0].y == 0.f);
+        CHECK(s[1].x == 3.f && std::fabs(s[1].y - 1.f) < 1e-4f);
+        CHECK(s[2].x == 3.f && s[2].y == 3.f);
+        // The end exactly on a step is not doubled.
+        s = SightSamples({ { 0.f, 0.f, 0.f }, { 4.f, 0.f, 0.f } });
+        CHECK(s.size() == 2 && s[1].x == 4.f);
+        // A long path: at most kSightSamples, the end last.
+        s = SightSamples({ { 0.f, 0.f, 0.f }, { 200.f, 0.f, 0.f } });
+        CHECK(s.size() == kSightSamples);
+        CHECK(s.back().x == 200.f);
+        CHECK(s[kSightSamples - 2].x == 2.f * static_cast<float>(kSightSamples - 1));
+        // A duplicate point (a zero-length leg) is harmless.
+        s = SightSamples({ { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, { 2.f, 0.f, 0.f } });
+        CHECK(s.size() == 1 && s[0].x == 2.f);
+    }
+}
+
 int main()
 {
     TestNoList();
@@ -383,5 +494,7 @@ int main()
     TestMinion();
     TestClocks();
     TestTurnedPlayers();
+    TestUnseenFocus();
+    TestSightSamples();
     return Report("target_rules_test");
 }

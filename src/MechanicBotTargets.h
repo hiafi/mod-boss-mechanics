@@ -6,7 +6,8 @@
  * | value      | attackers        | MechanicBotAttackersValue   | stock attackers minus ignored units (override)    |
  * | value      | boss kill target | MechanicBotKillTargetValue  | the focus (TargetRules::Focus), 100 ms cache      |
  * | trigger    | boss focus       | MechanicBotFocusTrigger     | an engaged focus that is not the current target   |
- * | action     | boss focus       | MechanicBotFocusAction      | ACTION_RAID + 2: Attack() the pick                |
+ * | action     | boss focus       | MechanicBotFocusAction      | ACTION_RAID + 2: Attack() the pick; an unseen     |
+ * |            |                  |                             | pick: walk into its sight first                   |
  * | multiplier | boss focus       | MechanicBotFocusMultiplier  | stands the stock pickers down; zeroes actions on  |
  * |            |                  |                             | ignored units                                     |
  *
@@ -140,6 +141,8 @@ public:
 
 private:
     BossMechanics::MechanicBotStateRef _state;
+    ObjectGuid _sightTarget;         // the unseen pick the bot last walked toward (TargetRules::Focus::unseen)...
+    Milliseconds _sightRetryAt{ 0 }; // ...and when that walk may be planned again
 };
 
 class MechanicBotFocusMultiplier : public Multiplier

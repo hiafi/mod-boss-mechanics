@@ -142,6 +142,7 @@ namespace BossMechanics
         uint32 forcedTurns = 0;
         // M5 WP-T (targets and the ignore list, MechanicBotTargets.cpp).
         uint32 focusSwitches = 0;       // `boss focus` attacks that moved the bot onto its pick
+        uint32 focusSightMoves = 0;     // walks into sight of a pick out of the bot's line of sight (`unseen`)
         uint32 msLowerTarget = 0;       // ms attacking something else while an engaged pick lived (waker samples)
         uint32 breakOutMsMax = 0;       // longest a prison held its player, as this bot saw it (open ones included)
         uint32 ignoredHits = 0;         // damage events the bot dealt to ignored units (UnitScript OnDamage)...

@@ -27,6 +27,7 @@
 #include "MechanicDescriptorView.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
+#include "PathGenerator.h"
 #include "Pet.h"
 #include "PetDefines.h"
 #include "Player.h"
@@ -49,6 +50,8 @@ namespace
     constexpr float kMaxPickYd = 80.f;
     // Picks out of the bot's line of sight are skipped (Attack refuses them): at most this many re-picks per value.
     constexpr int kMaxRepicks = 3;
+    // While the bot walks into sight of an unseen pick, the walk is planned again at most this often.
+    constexpr Milliseconds kSightRetry{ 1000 };
 
     Milliseconds Now()
     {
@@ -58,6 +61,34 @@ namespace
     Desc::Key KeyOf(Unit const* unit)
     {
         return unit ? unit->GetGUID().GetRawValue() : 0;
+    }
+
+    // The first point of the bot's path to `target` that sees it (TargetRules::SightSamples, at the bot's eye height),
+    // else the path's end. False: no path.
+    bool SightPoint(Player* bot, Unit* target, TargetRules::PathPoint& out)
+    {
+        PathGenerator path(bot);
+        path.CalculatePath(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(), false);
+        PathType const type = path.GetPathType();
+        if ((type & PATHFIND_NOPATH) || !(type & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE)))
+            return false;
+        std::vector<TargetRules::PathPoint> points;
+        points.reserve(path.GetPath().size());
+        for (G3D::Vector3 const& p : path.GetPath())
+            points.push_back({ p.x, p.y, p.z });
+        std::vector<TargetRules::PathPoint> const samples = TargetRules::SightSamples(points);
+        if (samples.empty())
+            return false;
+        // IsWithinLOS adds the target's own height to the point: this lands it at the bot's eye.
+        float const eye = bot->GetCollisionHeight() - target->GetCollisionHeight();
+        out = samples.back();
+        for (TargetRules::PathPoint const& sample : samples)
+            if (target->IsWithinLOS(sample.x, sample.y, sample.z + eye))
+            {
+                out = sample;
+                break;
+            }
+        return true;
     }
 
     // WP-DS: an Attacks hold is an ignore entry too (Desc::IsIgnored).
@@ -552,12 +583,14 @@ std::string BotTargets::ReportLine(MechanicBotState const& st)
     MechanicBotCounters const& c = st.counters;
     std::string const focus = f.target ? Acore::StringFormat("{} prio {}{}{}", ObjectGuid(f.target).ToString(),
         f.priority, f.Engaged() ? " engaged" : "", f.aoeOk ? " aoe ok" : "") + (f.swapHold ? " (swap hold)" : "")
+        + (f.unseen ? " (out of sight)" : "")
         : std::string("-");
-    return Acore::StringFormat("m5 targets: focus {} | switches {}, on lower targets {} ms, break-out max {} ms | "
-        "ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, minions pulled "
-        "off {} | turned teammates released {} | holds: damage casts blocked {}, stopped {}", focus, c.focusSwitches,
-        c.msLowerTarget, c.breakOutMsMax, c.ignoredHits, c.ignoredDamage, c.petIgnoredHits, c.petIgnoredDamage,
-        c.ignoreBlocks, c.ignoreDrops, c.petRecalls, c.hostileReleases, c.holdBlocks, c.holdDrops);
+    return Acore::StringFormat("m5 targets: focus {} | switches {}, sight walks {}, on lower targets {} ms, break-out "
+        "max {} ms | ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, "
+        "minions pulled off {} | turned teammates released {} | holds: damage casts blocked {}, stopped {}", focus,
+        c.focusSwitches, c.focusSightMoves, c.msLowerTarget, c.breakOutMsMax, c.ignoredHits, c.ignoredDamage,
+        c.petIgnoredHits, c.petIgnoredDamage, c.ignoreBlocks, c.ignoreDrops, c.petRecalls, c.hostileReleases,
+        c.holdBlocks, c.holdDrops);
 }
 
 void AddSC_boss_mechanics_bot_targets()
@@ -650,23 +683,25 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
     facts.mainTank = facts.tank && PlayerbotAI::IsMainTank(bot);   // WP-TS: Who::MainTank / Who::AssistTank
     facts.guid = bot->GetGUID().GetRawValue();
     Desc::Context const ctx = ContextOf(v, bot);
-    TargetRules::Focus f;
-    for (int i = 0; i <= kMaxRepicks; ++i)
+    auto unitOf = [&candidates, &units](Desc::Key key) -> Unit*
     {
-        f = TargetRules::DecideFocus(v.descriptor, candidates, v.owner.GetRawValue(), facts, KeyOf(current), ctx);
-        if (!f.target)
-            break;
-        std::size_t const at = static_cast<std::size_t>(std::distance(candidates.begin(),
-            std::find_if(candidates.begin(), candidates.end(), [&f](Desc::TargetCandidate const& c)
-            {
-                return c.facts->guid == f.target;
-            })));
-        if (at >= units.size() || bot->IsWithinLOSInMap(units[at]))
-            break;
-        candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(at));
-        units.erase(units.begin() + static_cast<std::ptrdiff_t>(at));
-        f = TargetRules::Focus();
-    }
+        for (std::size_t i = 0; i < candidates.size(); ++i)
+            if (candidates[i].facts->guid == key)
+                return units[i];
+        return nullptr;
+    };
+    // Picks out of the bot's sight are ranked again without them (Attack refuses them); one that outranks the boss
+    // nearby stays the focus, `unseen`, and the focus action walks the bot into sight (DecideFocusInSight).
+    TargetRules::Focus f = TargetRules::DecideFocusInSight(v.descriptor, candidates, v.owner.GetRawValue(), facts,
+        KeyOf(current), ctx, kMaxRepicks, [&](Desc::Key key)
+        {
+            Unit* unit = unitOf(key);
+            return !unit || bot->IsWithinLOSInMap(unit);
+        }, [&](Desc::Key key)
+        {
+            Unit* unit = unitOf(key);
+            return unit ? bot->GetDistance(unit) : 0.f;
+        });
     // WP-TS: a tank keeps the swap boss it holds, whatever the list ranks above it (the assist tank's add entry).
     if (Desc::Key const held = TauntSwap::HeldFocus(swap, KeyOf(current)); held && f.target != held)
     {
@@ -701,6 +736,26 @@ bool MechanicBotFocusAction::Execute(Event /*event*/)
     Unit* current = AI_VALUE(Unit*, "current target");
     if (!target || current == target)
         return false;
+    if (f.unseen && !bot->IsWithinLOSInMap(target))
+    {
+        // Out of sight (Attack refuses it): walk to the first point of the path that sees it, and keep the tick
+        // while the walk runs (a cast on the old target would stop it).
+        Milliseconds const now = Now();
+        if (bot->isMoving() && _sightTarget == target->GetGUID() && now < _sightRetryAt)
+            return true;
+        TargetRules::PathPoint to;
+        if (!SightPoint(bot, target, to) || !MoveTo(target->GetMapId(), to.x, to.y, to.z))
+            return bot->isMoving() && _sightTarget == target->GetGUID();
+        _sightTarget = target->GetGUID();
+        _sightRetryAt = now + kSightRetry;
+        if (MechanicBotState* st = _state.Get(botAI))
+            ++st->counters.focusSightMoves;
+        if (GetConfig().bots.debug)
+            LOG_INFO(kLog, "Bot {}: focus {} out of sight at {:.1f} yd, walking {:.1f} yd into sight (priority {})",
+                bot->GetName(), target->GetName(), bot->GetDistance(target), bot->GetExactDist(to.x, to.y, to.z),
+                f.priority);
+        return true;
+    }
     if (!Attack(target))
         return false;
     if (MechanicBotState* st = _state.Get(botAI))
