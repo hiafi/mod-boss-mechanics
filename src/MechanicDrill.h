@@ -105,10 +105,11 @@ namespace BossMechanics::Drill
     };
 
     // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage (a bell soak's
-    // landing does: DamageStep).
+    // landing does: DamageStep), nor the drill-only steps marker, walk and leash.
     inline bool DamageShape(std::string_view shape)
     {
-        return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker";
+        return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker"
+            && shape != "walk" && shape != "leash";
     }
 
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
@@ -681,6 +682,251 @@ namespace BossMechanics::Drill
         return false;
     }
 
+    // ---- Blackrock Depths shapes (Blackrock Depths build §3.9, WP-G1, drill `blackrock-depths-shapes`) ------------
+    // The wave 1 shapes no drill had run, on the heroic numbers of their bosses (pct= in the percent mode). Two
+    // drill-only steps (the runner handles them like `marker`, MechanicCommand.cpp RunDrillWith; ParseWalk / ParseLeash
+    // below):
+    //   walk <yd> <ms> [offset=<deg>]   the selected unit walks <yd> along the run's facing (turned by offset=,
+    //                                   counterclockwise) over <ms>, relocated every kWalkStepMs (WalkPoint): a boss
+    //                                   with combat movement off (Roccor's Restless March). Works on a rooted unit (the
+    //                                   sim's boss stand-in); it keeps its orientation.
+    //   leash <yd> <ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>
+    //                                   for <ms>, every tick (default 1000), each alive scope member farther than <yd>
+    //                                   from the selected unit (2D; role=: only the members the role provider calls
+    //                                   tanks / healers / not healers) takes a ledger failure `Zone/<n>` (OffSpot).
+    //                                   anchor=tank measures from the member's nearest alive tank of the scope instead
+    //                                   (not itself; no such tank: the member is skipped), as a healer's real reach
+    //                                   is to the tank (ruling 2026-11-18). Nothing is registered, so the bots never
+    //                                   see it: it judges whether they keep up on their own.
+    // And on `.mech test` lines: `offset=<deg>` turns a line's fixed facing (and the axes of its shift=) from the run's
+    // facing, counterclockwise (not with to= or follow=1): a lane across the strip (offset=90), a Rampage back along
+    // the route (offset=180).
+    // Hide (D13 Bael'Gar) is WP-HK's row, in cycle 0 from 52.5 s to 59.5 s (kBrdTagHide): `hide <range> <ms>
+    // [blockers=3] [apart=8] [r=2.5] [display=3711] [go=148503] [behind=3] [share=2] [eye=<yd>] [linger=3000]` (the
+    // Hide kind, MechanicHide.h): game objects summoned on a ring round the selected unit, which is the source.
+    constexpr std::uint32_t kWalkStepMs = 250;          // one relocation per 250 ms (1.5 yd/s: 0.375 yd a step)
+    constexpr float kMaxWalkYd = 60.f;
+    constexpr std::uint32_t kDefaultLeashTickMs = 1000;
+
+    // The relocations of a walk of `ms` after the start (one every kWalkStepMs, the last at `ms`): at least 1.
+    constexpr std::uint32_t WalkSteps(std::uint32_t ms)
+    {
+        return ms < kWalkStepMs ? 1u : (ms + kWalkStepMs - 1) / kWalkStepMs;
+    }
+
+    // When relocation k (1..WalkSteps) of a walk of `ms` lands (ms after the walk starts).
+    constexpr std::uint32_t WalkStepAt(std::uint32_t k, std::uint32_t ms)
+    {
+        return k * kWalkStepMs < ms ? k * kWalkStepMs : ms;
+    }
+
+    // Where the walker stands `elapsedMs` into a walk of `yd` over `ms` from `start` along `heading` (radians): a
+    // straight line at an even pace, held at the end (z is the start's; the runtime snaps it to the floor).
+    inline Geo::Vec3 WalkPoint(Geo::Vec3 const& start, float heading, float yd, std::uint32_t ms,
+        std::uint32_t elapsedMs)
+    {
+        float const f = ms ? std::min(1.f, static_cast<float>(elapsedMs) / static_cast<float>(ms)) : 1.f;
+        return Shifted(start, heading, yd * f, 0.f);
+    }
+
+    // The judge passes of a leash of `ms` (at tick, 2 x tick, ... while within `ms`).
+    constexpr std::uint32_t LeashTicks(std::uint32_t ms, std::uint32_t tickMs)
+    {
+        return tickMs ? ms / tickMs : 0u;
+    }
+
+    // Is `member` farther than `yd` from `unit` on the ground plane?
+    inline bool OutOfLeash(Geo::Vec3 const& unit, Geo::Vec3 const& member, float yd)
+    {
+        float const dx = member.x - unit.x;
+        float const dy = member.y - unit.y;
+        return dx * dx + dy * dy > yd * yd;
+    }
+
+    // Who a leash judges (role=) and what it measures from (anchor=; see the step's comment above).
+    enum class LeashRole : std::uint8_t
+    {
+        Any,
+        Tank,
+        Healer,
+        NonHealer
+    };
+
+    enum class LeashAnchor : std::uint8_t
+    {
+        Unit,           // the selected unit (the walking boss)
+        Tank            // anchor=tank: the member's nearest alive tank of the scope
+    };
+
+    // Does a leash of `role` judge a member the role provider calls a tank / a healer?
+    constexpr bool LeashJudges(LeashRole role, bool tank, bool healer)
+    {
+        switch (role)
+        {
+            case LeashRole::Tank:
+                return tank;
+            case LeashRole::Healer:
+                return healer;
+            case LeashRole::NonHealer:
+                return !healer;
+            default:
+                return true;
+        }
+    }
+
+    // anchor=tank: is `member` farther than `yd` from every one of `tanks` (the scope's alive tanks other than the
+    // member)? nullopt with no tank: the member is skipped, not failed.
+    inline std::optional<bool> OutOfTankLeash(std::vector<Geo::Vec3> const& tanks, Geo::Vec3 const& member, float yd)
+    {
+        if (tanks.empty())
+            return std::nullopt;
+        for (Geo::Vec3 const& t : tanks)
+            if (!OutOfLeash(t, member, yd))
+                return false;
+        return true;
+    }
+
+    // Ledger tags of `blackrock-depths-shapes` (sweep keys `Zone/<tag>`, the ward's `Stack/11`).
+    constexpr std::uint32_t kBrdTagRampage = 1;         // RO3 heroic: 20 x 8 lane from him at each route end, 2.5 s
+    constexpr std::uint32_t kBrdTagTankLeash = 2;       // RO1: the tank more than 8 yd from the walking boss
+    constexpr std::uint32_t kBrdTagRangeLeash = 3;      // RO1: a non-healer more than 40 yd from him (ranged
+                                                        // reposition), a healer more than 40 yd from the tank
+    constexpr std::uint32_t kBrdTagLeapLine = 4;        // GR4 heroic: three 3 yd hound-to-landing lines, 1.5 s
+    constexpr std::uint32_t kBrdTagLeapLanding = 5;     // GR3 heroic: the 5 yd landing at the marked spot, 1.5 s
+    constexpr std::uint32_t kBrdTagAxe = 6;             // GO2 heroic: the 3 yd axe landing on a player's spot, 2 s
+    constexpr std::uint32_t kBrdTagAxeShown = 7;        // GO2: the return line shown before its lock (4 s, no damage)
+    constexpr std::uint32_t kBrdTagAxeReturn = 8;       // GO2 heroic: the locked return line axe to him, 2 s
+    constexpr std::uint32_t kBrdTagRupture = 9;         // OK1 normal: donut from 8 yd to the arena, 3 s
+    constexpr std::uint32_t kBrdTagRuptureHeroic = 10;  // OK1 heroic: donut from 6 yd, 3 s
+    constexpr std::uint32_t kBrdTagWard = 11;           // LG1: the ward's Stack (Stack/11)
+    constexpr std::uint32_t kBrdTagTide = 12;           // LG1 heroic: Fire Tide, donut from the ward's edge, 4 s
+    constexpr std::uint32_t kBrdTagEdgeBand = 13;       // IN8 / the necks: 4 yd lethal bands on the strip's edges, 5 s
+    constexpr std::uint32_t kBrdTagCrumble = 14;        // IN13 (§7 #14 A): the next 2 yd of the long edges, 5 s
+    constexpr std::uint32_t kBrdTagSweep = 15;          // IN11: the 10 yd Arm Sweep band across the strip, 4 s
+    constexpr std::uint32_t kBrdTagHide = 16;           // BG4 heroic: Molten Furnace, hide behind 3 blockers, 5 s
+    constexpr std::uint32_t kBrdBarTags[] = { 2, 3, 4, 5, 8, 9, 10, 12, 13, 14, 15, 16 };
+
+    inline bool BrdBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kBrdBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // Cycle 0 (cycle=0/2): Lord Roccor RO1 + RO3 heroic: a Rampage lane, then 30 yd out at 1.5 yd/s (speed_walk 0.6),
+    // a Rampage back along the route, 30 yd back (a 60 yd path), the three leashes on each leg (the tank on him, the
+    // non-healers on him, the healers on the tank); then Houndmaster Grebmar GR3 + GR4 heroic twice (a member, then a
+    // non-tank, as the double whistle below 30%): three hound lines from 10 yd round him to the marked spot and the 5
+    // yd landing there. Cycle 1 (cycle=1/2): Gorosh GO2 heroic (axe, shown return, locked return), Ok'thor OK1
+    // normal then heroic, Loregrain LG1-LG3 heroic (three tides at three ward spots hugging him, radius 5, 3, 4),
+    // Incendius IN8 / IN13 / IN11 on a 48 x 22 strip round him (long axis along the run's facing).
+    constexpr std::uint32_t kBrdCycleMs = 60000;
+    constexpr std::uint32_t kBrdCycles = 2;
+    constexpr float kRoccorWalkYd = 30.f;
+    constexpr std::uint32_t kRoccorWalkMs = 20000;      // 30 yd at 1.5 yd/s
+    constexpr float kRoccorWalkYdS = 1.5f;
+    constexpr float kRampageLength = 20.f;
+    constexpr float kRampageWidth = 8.f;
+    constexpr std::uint32_t kRampageMs = 2500;
+    constexpr float kTankLeashYd = 8.f;
+    constexpr float kRangeLeashYd = 40.f;
+    constexpr float kLeapLineWidth = 3.f;
+    constexpr float kLeapLandingYd = 5.f;
+    constexpr std::uint32_t kLeapMs = 1500;
+    constexpr float kHoundAwayYd = 10.f;
+    constexpr std::uint32_t kHounds = 3;
+    constexpr float kAxeLandingYd = 3.f;
+    constexpr std::uint32_t kAxeLandingMs = 2000;
+    constexpr std::uint32_t kAxeStuckMs = 6000;         // the return line shows this long, locked for the last 2 s
+    constexpr std::uint32_t kAxeLockMs = 2000;
+    constexpr float kAxeReturnWidth = 4.f;              // §7 #21 default (S1 846: unset)
+    constexpr float kRuptureOuterYd = 45.f;             // §7 #21 default (S1 922: "the whole arena")
+    constexpr float kRuptureInnerYd = 8.f;
+    constexpr float kRuptureInnerHeroicYd = 6.f;
+    constexpr std::uint32_t kRuptureMs = 3000;
+    constexpr float kTideOuterYd = 45.f;                // §7 #21 default (S2 182: unset)
+    constexpr std::uint32_t kTideMs = 4000;
+    constexpr float kStripLength = 48.f;                // §7 #14 A: the Anvil bulge, s -24 to +24
+    constexpr float kStripWidth = 22.f;
+    constexpr float kEdgeBandYd = 4.f;
+    constexpr float kCrumbleBandYd = 2.f;
+    constexpr std::uint32_t kBandWarnMs = 5000;
+    constexpr float kSweepWidth = 10.f;
+    constexpr std::uint32_t kSweepMs = 4000;
+
+    // ---- Blackrock Depths shapes, wave 2 (Blackrock Depths build §3.9, WP-G2, drill `blackrock-depths-shapes-2`) --
+    // A second drill rather than more rows in `blackrock-depths-shapes`: both of its 60 s cycles are full (cycle 0 to
+    // 59.5 s with the hide, cycle 1 to 58 s with the bands), and a third cycle would retime every wave 1 row, its
+    // tests and its 120 s sweep. One sweep per drill (§3.9), so the wave 2 sweep runs on its own. Tags 21-27 never
+    // meet the wave 1 tags 1-16. Two keys of `.mech test` added for it (MechanicCommand.cpp):
+    //   soak <width> <ms> shape=line to=target|member|me
+    //                                   a beam from the anchor to that unit: Shapes::Line(from, to, width), the
+    //                                   D23 call. It turns with the unit live; its length is the distance at the
+    //                                   registration (BossMechanics.h), so a unit that drifts along the beam leaves
+    //                                   it short or long by the drift (BeamLengthError below).
+    //   at=target                       the point is where the selected unit stands as the step registers. A drill
+    //                                   parses every step at its start, so a plain point stays where a walking boss
+    //                                   stood then (Moira's spot, the hall's axis); at=target follows him.
+    constexpr std::uint32_t kBrd2TagBeam = 21;          // EM2 heroic: Nemesis, a 2 yd line Soak Moira to him (group)
+    constexpr std::uint32_t kBrd2TagLoner = 22;         // TS4 heroic: Seething Cold, 2 others within 6 yd (Stack/22)
+    constexpr std::uint32_t kBrd2TagLivewire = 23;      // AR8 heroic: 8 yd round a carrier, 4% every 2 s
+    constexpr std::uint32_t kBrd2TagLivewireBurst = 24; // AR8: the burst at the dispel, 30% within 8 yd
+    constexpr std::uint32_t kBrd2TagCrossfire = 25;     // MG3 heroic: the 10 yd lane across the hall at his spot
+    constexpr std::uint32_t kBrd2TagCrossfireBurn = 26; // MG3: the lane burning on, 15% a second
+    constexpr std::uint32_t kBrd2TagFlameWall = 27;     // MG4 heroic: the 12 yd strip along a wall, 15% a second
+    // Gated per member: the loner and the three fire shapes. The beam's MissedSoak is a group failure (the sweep's
+    // "group" bar); Livewire (AR8, no §3.9 row) is reported.
+    constexpr std::uint32_t kBrd2BarTags[] = { 22, 25, 26, 27 };
+    constexpr std::uint32_t kBrd2GroupTags[] = { 21 };
+
+    inline bool Brd2BarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kBrd2BarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // Cycle 0 (cycle=0/2): the Emperor EM2 heroic: three Nemesis channels 20 s apart from Moira's spot, rooted 15 yd
+    // to the left of his start (§7 #19), the first while the tank drifts him 6 yd along the run's facing, the second
+    // while he drifts back, the third standing. Cycle 1 (cycle=1/2): the Seven TS4 heroic (Seething Cold), Argelmach
+    // AR8 heroic (Livewire and its burst), then Magmus MG3 + MG4 heroic in a 39 yd hall whose axis is the run's
+    // facing: a Crossfire at his spot while the tank walks him 12 yd out of it, a Flame Wall along the left wall, a
+    // second Crossfire 12 s after the first that walks him home.
+    constexpr std::uint32_t kBrd2CycleMs = 60000;
+    constexpr std::uint32_t kBrd2Cycles = 2;
+    constexpr float kBeamWidth = 2.f;                   // §7 #19 default (S4: unset; DG34 gap 12)
+    constexpr float kMoiraYd = 15.f;                    // §7 #19: Dagran held 12-20 yd from Moira
+    constexpr std::uint32_t kBeamWarnMs = 3000;         // from the channel start to the first judged second
+    constexpr std::uint32_t kNemesisMs = 8000;          // EM2: the 8 s channel
+    constexpr std::uint32_t kNemesisEveryMs = 20000;    // EM2 heroic
+    constexpr float kDagranDriftYd = 6.f;               // the tank's drift during one channel
+    constexpr float kLonerYd = 6.f;
+    constexpr std::uint32_t kLonerOthers = 2;
+    constexpr std::uint32_t kLonerCastMs = 3000;        // TS4: the 3 s mood cast
+    constexpr std::uint32_t kLonerMs = 10000;
+    constexpr float kLivewireYd = 8.f;
+    constexpr std::uint32_t kLivewireMs = 12000;        // AR8: the 12 s debuff
+    constexpr std::uint32_t kLivewireTickMs = 2000;
+    constexpr float kHallWidth = 39.f;                  // NAVMESH §4.5: x 1361.2-1400.2 (spec 34)
+    constexpr float kCrossfireWidth = 10.f;
+    constexpr std::uint32_t kCrossfireGlowMs = 3000;
+    constexpr std::uint32_t kCrossfireBurnMs = 6000;    // the ignition second and five more
+    constexpr std::uint32_t kCrossfireEveryMs = 12000;  // MG3 heroic
+    constexpr float kMagmusDragYd = 12.f;               // S4 1182: the tank walks him at least 10 yd out
+    constexpr float kFlameWallWidth = 12.f;
+    constexpr float kFlameWallLength = 40.f;
+    constexpr std::uint32_t kFlameWallMs = 8000;
+    constexpr std::uint32_t kFlameWallGlowMs = 3000;
+
+    // A beam Shapes::Line(from, to) after `to` drifted: its length is still the distance at the registration, its
+    // direction the live one. > 0: it stops that far short of `to`; < 0: it runs that far past it.
+    inline float BeamLengthError(Geo::Vec3 const& from, Geo::Vec3 const& toAtStart, Geo::Vec3 const& toNow)
+    {
+        return Geo::Dist2d(from.x, from.y, toNow.x, toNow.y) - Geo::Dist2d(from.x, from.y, toAtStart.x, toAtStart.y);
+    }
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -1044,6 +1290,105 @@ namespace BossMechanics::Drill
                     { 27500, "linefront 50 3000 width=30 gap=8 school=frost pct=25 weak=1 tag=7" },
                     { 27500, "linefront 50 6000 width=30 gap=8 side=other apart=20 school=frost pct=25 weak=1 tag=8" },
                 }, 3 },     // three cycles a run (120 s): the sweep runs rolling-fronts:3
+
+            // Blackrock Depths build §3.9 (WP-G1, wave 1): see kBrdTagRampage above. Cycle 0 (0/2): Roccor walks 30
+            // yd out and back (Rampage lanes at the route ends, on each leg the tank's leash and tag 3's two: the
+            // non-healers on him, the healers on the tank, ruling 2026-11-18), then
+            // Grebmar's two Sic 'em leaps. Cycle 1 (1/2): Gorosh's Returning Axe, Ok'thor's Arcane Rupture normal and
+            // heroic, Loregrain's three Fire Tides round a moving ward, Incendius's edge bands, crumble and Arm Sweeps.
+            { "blackrock-depths-shapes", "a walking boss with leashes, hound leap lines, axe and its locked return, "
+                "rupture donuts, tides round a moving ward, lethal edge bands and an arm sweep", 60000, false, {
+                    // walk: Roccor RO1 + RO3 heroic
+                    { 0, "line 20 2500 width=8 anchor=target cycle=0/2 pct=60 tag=1" },
+                    { 2500, "walk 30 20000 cycle=0/2" },
+                    { 2500, "leash 8 20000 role=tank cycle=0/2 tag=2" },
+                    { 2500, "leash 40 20000 role=nonhealer cycle=0/2 tag=3" },
+                    { 2500, "leash 40 20000 role=healer anchor=tank cycle=0/2 tag=3" },
+                    { 22500, "line 20 2500 width=8 anchor=target offset=180 cycle=0/2 pct=60 tag=1" },
+                    { 25000, "walk 30 20000 offset=180 cycle=0/2" },
+                    { 25000, "leash 8 20000 role=tank cycle=0/2 tag=2" },
+                    { 25000, "leash 40 20000 role=nonhealer cycle=0/2 tag=3" },
+                    { 25000, "leash 40 20000 role=healer anchor=tank cycle=0/2 tag=3" },
+                    // leap: Grebmar GR3 + GR4 heroic (the first on anyone, the second on a non-tank)
+                    { 47000, "line 1 1500 width=3 away=10 to=member pick=any reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
+                    { 47000, "line 1 1500 width=3 away=10 to=member pick=same reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
+                    { 47000, "line 1 1500 width=3 away=10 to=member pick=same reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
+                    { 47000, "circle 5 1500 at=last pct=45 weak=1 cycle=0/2 tag=5" },
+                    { 50000, "line 1 1500 width=3 away=10 to=member pick=nontank reach=1 pct=25 weak=1 cycle=0/2 "
+                        "tag=4" },
+                    { 50000, "line 1 1500 width=3 away=10 to=member pick=same reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
+                    { 50000, "line 1 1500 width=3 away=10 to=member pick=same reach=1 pct=25 weak=1 cycle=0/2 tag=4" },
+                    { 50000, "circle 5 1500 at=last pct=45 weak=1 cycle=0/2 tag=5" },
+                    // hide (WP-HK): Bael'Gar BG4 heroic, the Molten Furnace: three Boulders (display 3711) 10 yd round
+                    // him, a 5 s cast, everyone he sees within 40 yd hit for 95%; the Boulders gone by 59.5 s
+                    { 52500, "hide 40 5000 blockers=3 apart=10 linger=2000 school=fire pct=95 cycle=0/2 tag=16" },
+                    // axe-return: Gorosh GO2 heroic
+                    { 0, "circle 3 2000 at=member pick=any pct=25 weak=1 cycle=1/2 tag=6" },
+                    { 2000, "line 1 4000 width=4 at=prev to=target reach=1 pct=0 cycle=1/2 tag=7" },
+                    { 6000, "line 1 2000 width=4 at=prev to=target reach=1 pct=35 weak=1 cycle=1/2 tag=8" },
+                    // rupture: Ok'thor OK1, normal then heroic
+                    { 10000, "donut 45 3000 inner=8 anchor=target school=arcane pct=30 weak=1 cycle=1/2 tag=9" },
+                    { 15000, "donut 45 3000 inner=6 anchor=target school=arcane pct=45 weak=1 cycle=1/2 tag=10" },
+                    // ward: Loregrain LG1-LG3 heroic, the ward moved and its radius locked per tide
+                    { 20000, "stack 5 4000 anchor=point shift=0:6 cycle=1/2 tag=11" },
+                    { 20000, "donut 45 4000 inner=5 shift=0:6 school=fire pct=45 weak=1 cycle=1/2 tag=12" },
+                    { 26000, "stack 3 4000 anchor=point shift=0:-4 cycle=1/2 tag=11" },
+                    { 26000, "donut 45 4000 inner=3 shift=0:-4 school=fire pct=45 weak=1 cycle=1/2 tag=12" },
+                    { 32000, "stack 4 4000 anchor=point shift=-5:0 cycle=1/2 tag=11" },
+                    { 32000, "donut 45 4000 inner=4 shift=-5:0 school=fire pct=45 weak=1 cycle=1/2 tag=12" },
+                    // bands: Incendius IN8 (4 yd, all four edges), IN13 (the next 2 yd of the long edges), IN11
+                    { 38000, "line 48 5000 width=4 shift=-24:9 lethal=1 persist=15000 tick=500 school=fire pct=50 "
+                        "weak=1 cycle=1/2 tag=13" },
+                    { 38000, "line 48 5000 width=4 shift=-24:-9 lethal=1 persist=15000 tick=500 school=fire pct=50 "
+                        "weak=1 cycle=1/2 tag=13" },
+                    { 38000, "line 22 5000 width=4 offset=90 shift=-11:-22 lethal=1 persist=15000 tick=500 "
+                        "school=fire pct=50 weak=1 cycle=1/2 tag=13" },
+                    { 38000, "line 22 5000 width=4 offset=90 shift=-11:22 lethal=1 persist=15000 tick=500 "
+                        "school=fire pct=50 weak=1 cycle=1/2 tag=13" },
+                    { 44000, "line 48 5000 width=2 shift=-24:6 lethal=1 persist=9000 tick=500 school=fire pct=50 "
+                        "weak=1 cycle=1/2 tag=14" },
+                    { 44000, "line 48 5000 width=2 shift=-24:-6 lethal=1 persist=9000 tick=500 school=fire pct=50 "
+                        "weak=1 cycle=1/2 tag=14" },
+                    { 49000, "line 22 4000 width=10 offset=90 shift=-11:0 lethal=1 school=fire pct=30 cycle=1/2 "
+                        "tag=15" },
+                    { 54000, "line 22 4000 width=10 offset=90 shift=-11:12 lethal=1 school=fire pct=30 cycle=1/2 "
+                        "tag=15" },
+                }, 2 },     // two cycles a run (120 s): the sweep runs blackrock-depths-shapes:2
+
+            // Blackrock Depths build §3.9 (WP-G2, wave 2): see kBrd2TagBeam above. Cycle 0 (0/2): the Emperor's
+            // Nemesis beam from Moira's fixed spot to him, drifting out, drifting back, standing. Cycle 1 (1/2): the
+            // Seven's Seething Cold, Argelmach's Livewire, Magmus's Crossfire (walked out), Flame Wall, Crossfire.
+            { "blackrock-depths-shapes-2", "a beam soak to a drifting boss, an anchorless loner stack, a carrier "
+                "ring and its burst, crossfire lanes at a walking boss's spot and a wall strip", 60000, false, {
+                    // beam-block: the Emperor EM2 heroic (8 s channel: 3 s to step in, judged every second for 5 s)
+                    { 0, "soak 2 3000 shape=line to=target shift=0:15 need=1 persist=5000 tick=1000 cycle=0/2 "
+                        "tag=21" },
+                    { 0, "walk 6 8000 cycle=0/2" },
+                    { 20000, "soak 2 3000 shape=line to=target shift=0:15 need=1 persist=5000 tick=1000 cycle=0/2 "
+                        "tag=21" },
+                    { 20000, "walk 6 8000 offset=180 cycle=0/2" },
+                    { 40000, "soak 2 3000 shape=line to=target shift=0:15 need=1 persist=5000 tick=1000 cycle=0/2 "
+                        "tag=21" },
+                    // loner: the Seven TS4 heroic, Seething Cold (3 s mood cast, 10 s)
+                    { 0, "stack 6 3000 cluster=2 persist=10000 tick=1000 cycle=1/2 tag=22" },
+                    // Livewire: Argelmach AR8 heroic (12 s on a non-tank, 4% every 2 s round it, the burst at the end)
+                    { 15000, "circle 8 2000 anchor=member pick=nontank persist=10000 tick=2000 school=nature pct=4 "
+                        "cycle=1/2 tag=23" },
+                    { 26000, "circle 8 1000 anchor=member pick=same school=nature pct=30 cycle=1/2 tag=24" },
+                    // crossfire: Magmus MG3 + MG4 heroic, the hall's axis along the run's facing through his start
+                    { 30000, "line 39 3000 width=10 offset=90 at=target shift=-19.5:0 school=fire pct=45 weak=1 "
+                        "cycle=1/2 tag=25" },
+                    { 30000, "line 39 4000 width=10 offset=90 at=target shift=-19.5:0 persist=5000 tick=1000 "
+                        "school=fire pct=15 cycle=1/2 tag=26" },
+                    { 30000, "walk 12 3000 cycle=1/2" },
+                    { 38000, "line 40 3000 width=12 at=target shift=-20:13.5 persist=8000 tick=1000 school=fire "
+                        "pct=15 cycle=1/2 tag=27" },
+                    { 42000, "line 39 3000 width=10 offset=90 at=target shift=-19.5:0 school=fire pct=45 weak=1 "
+                        "cycle=1/2 tag=25" },
+                    { 42000, "line 39 4000 width=10 offset=90 at=target shift=-19.5:0 persist=5000 tick=1000 "
+                        "school=fire pct=15 cycle=1/2 tag=26" },
+                    { 42000, "walk 12 3000 offset=180 cycle=1/2" },
+                }, 2 },     // two cycles a run (120 s): the sweep runs blackrock-depths-shapes-2:2
         };
         return drills;
     }
@@ -1372,6 +1717,119 @@ namespace BossMechanics::Drill
     inline Geo::Vec3 LineEnd(Geo::Vec3 const& source, float facing, float length)
     {
         return Shifted(source, facing, length, 0.f);
+    }
+
+    // ---- the drill-only walk and leash steps (Blackrock Depths build WP-G1; see kWalkStepMs) -----------------------
+
+    constexpr std::uint32_t kMaxWalkMs = 120000;
+    constexpr std::uint32_t kMinLeashTickMs = 250;
+
+    struct WalkStep
+    {
+        float yd = 0.f;
+        std::uint32_t ms = 0;
+        float offsetDeg = 0.f;          // counterclockwise from the run's facing
+    };
+
+    struct LeashStep
+    {
+        float yd = 0.f;
+        std::uint32_t ms = 0;
+        std::uint32_t tickMs = kDefaultLeashTickMs;
+        LeashRole role = LeashRole::Any;
+        LeashAnchor anchor = LeashAnchor::Unit;
+        std::uint32_t ledgerTag = 0;
+    };
+
+    // Every token after the third is key=value with one of `keys`, each at most once.
+    inline bool OnlyKeys(std::vector<std::string_view> const& t, std::vector<std::string_view> const& keys)
+    {
+        std::vector<std::string_view> seen;
+        for (std::size_t i = 3; i < t.size(); ++i)
+        {
+            std::size_t const eq = t[i].find('=');
+            if (eq == std::string_view::npos || eq == 0 || eq + 1 == t[i].size())
+                return false;
+            std::string_view const key = t[i].substr(0, eq);
+            if (std::find(keys.begin(), keys.end(), key) == keys.end()
+                || std::find(seen.begin(), seen.end(), key) != seen.end())
+                return false;
+            seen.push_back(key);
+        }
+        return true;
+    }
+
+    // `walk <yd> <ms> [offset=<deg>]` (plan keys stripped): yd in (0, kMaxWalkYd], ms from kWalkStepMs to
+    // kMaxWalkMs, offset 0-360; nullopt otherwise.
+    inline std::optional<WalkStep> ParseWalk(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "walk" || !OnlyKeys(t, { "offset" }))
+            return std::nullopt;
+        std::optional<float> const yd = Number(t[1]);
+        std::optional<float> const ms = Number(t[2]);
+        if (!yd || *yd <= 0.f || *yd > kMaxWalkYd || !ms || *ms < static_cast<float>(kWalkStepMs)
+            || *ms > static_cast<float>(kMaxWalkMs))
+            return std::nullopt;
+        WalkStep w;
+        w.yd = *yd;
+        w.ms = static_cast<std::uint32_t>(*ms);
+        if (std::optional<std::string_view> const v = Value(line, "offset"))
+        {
+            std::optional<float> const deg = Number(*v);
+            if (!deg || *deg > 360.f)
+                return std::nullopt;
+            w.offsetDeg = *deg;
+        }
+        return w;
+    }
+
+    // `leash <yd> <ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>` (plan keys stripped): yd >
+    // 0, ms up to kMaxWalkMs, tick from kMinLeashTickMs to ms, a whole tag >= 1; nullopt otherwise.
+    inline std::optional<LeashStep> ParseLeash(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "leash" || !OnlyKeys(t, { "role", "anchor", "tick", "tag" }))
+            return std::nullopt;
+        std::optional<float> const yd = Number(t[1]);
+        std::optional<float> const ms = Number(t[2]);
+        if (!yd || *yd <= 0.f || !ms || *ms <= 0.f || *ms > static_cast<float>(kMaxWalkMs))
+            return std::nullopt;
+        LeashStep l;
+        l.yd = *yd;
+        l.ms = static_cast<std::uint32_t>(*ms);
+        if (std::optional<std::string_view> const role = Value(line, "role"))
+        {
+            if (*role == "tank")
+                l.role = LeashRole::Tank;
+            else if (*role == "healer")
+                l.role = LeashRole::Healer;
+            else if (*role == "nonhealer")
+                l.role = LeashRole::NonHealer;
+            else if (*role != "any")
+                return std::nullopt;
+        }
+        if (std::optional<std::string_view> const anchor = Value(line, "anchor"))
+        {
+            if (*anchor != "tank")
+                return std::nullopt;
+            l.anchor = LeashAnchor::Tank;
+        }
+        if (std::optional<std::string_view> const v = Value(line, "tick"))
+        {
+            std::optional<float> const tick = Number(*v);
+            if (!tick || *tick < static_cast<float>(kMinLeashTickMs) || *tick > *ms)
+                return std::nullopt;
+            l.tickMs = static_cast<std::uint32_t>(*tick);
+        }
+        else if (l.tickMs > l.ms)
+            return std::nullopt;
+        std::optional<std::string_view> const tag = Value(line, "tag");
+        std::optional<float> const n = tag ? Number(*tag) : std::nullopt;
+        if (!n || *n < 1.f || *n != std::floor(*n))
+            return std::nullopt;
+        l.ledgerTag = static_cast<std::uint32_t>(*n);
+        return l;
     }
 }
 

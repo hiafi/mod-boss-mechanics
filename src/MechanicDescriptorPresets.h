@@ -198,6 +198,37 @@ namespace BossMechanics::Desc
             return d;
         }
 
+        // Blackrock Depths WP-DS (BD3), Spell Eater's shape: the Drill Adds rank above the dummy; while one carries the
+        // purgeable Magic buff (the shell) no bot casts magic damage on it (physical spells and white swings go on),
+        // and the buff is on the purge list (the shell's reward).
+        inline Descriptor HoldMagic()
+        {
+            Descriptor d;
+            d.targets.emplace_back(I::NPC_DRILL_ADD, 1);
+            d.holds.push_back(HoldEntry::Damage(I::NPC_DRILL_ADD, I::SPELL_DRILL_PURGEABLE, kSchoolMaskMagic));
+            d.purges.emplace_back(I::NPC_DRILL_ADD, I::SPELL_DRILL_PURGEABLE, 2);
+            return d;
+        }
+
+        // WP-DS, Commanding Aura's shape: the casters' high cast is on the kick list, but no kick lands on a caster
+        // with Aiming (the aura that holds interrupts); the other caster is kicked as usual.
+        inline Descriptor HoldKicks()
+        {
+            Descriptor d;
+            d.interrupts.emplace_back(I::NPC_DRILL_CASTER, I::SPELL_DRILL_CAST_HIGH, 3);
+            d.holds.push_back(HoldEntry::Interrupts(I::NPC_DRILL_CASTER, I::SPELL_DRILL_AIMING));
+            return d;
+        }
+
+        // WP-DS, Gerstahn's Doubt: Magic Affliction is cured on the member with the most Taunt Swap (drill) stacks
+        // first (the stacking stand-in for Doubt).
+        inline Descriptor DispelStacks()
+        {
+            Descriptor d;
+            d.dispels.push_back(DispelEntry(I::SPELL_DRILL_DEBUFF_MAGIC, 1).MostStacksFirst(I::SPELL_DRILL_TAUNT_SWAP));
+            return d;
+        }
+
         // Every list at once (the `descriptor` drill): kicks, dispels, purges; prisons (3) before the aiming add
         // (2) before the casters (1) before the dummy; the purge adds below the dummy; the copies ignored.
         inline Descriptor All()
@@ -240,6 +271,11 @@ namespace BossMechanics::Desc
                 &DrillPresets::TauntSwapDrill },
             { "pass", "Marked is the hot potato: thrown on near the dummy or after 5 s, away from the dummy and the "
                 "egg circles; the thrower is Baited for 8 s", &DrillPresets::PassDrill },
+            { "hold-magic", "no magic damage on an add with the purgeable buff (the shell); purge it",
+                &DrillPresets::HoldMagic },
+            { "hold-kicks", "kick the casters' high cast, never on a caster with Aiming", &DrillPresets::HoldKicks },
+            { "dispel-stacks", "Magic Affliction cured on the member with the most Taunt Swap stacks first",
+                &DrillPresets::DispelStacks },
             { "descriptor", "every list at once: kicks, dispels, purges, prisons > aiming add > casters, copies "
                 "ignored", &DrillPresets::All },
         };

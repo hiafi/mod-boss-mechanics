@@ -382,8 +382,9 @@ namespace
             if (stockSkip && !Desc::IsUrgent(e, left)
                 && DispelRules::NormalSkipped(Ms(aura->GetDuration()), StockSkip()))
                 continue;
+            // Blackrock Depths WP-DS: MostStacksFirst ranks on the member's stacks of another aura (any caster).
             afflictions.push_back({ member->GetGUID().GetRawValue(), e.auraId, left, static_cast<uint8>(rank),
-                judge(member, i) });
+                judge(member, i), e.rankAura ? member->GetAuraCount(e.rankAura) : 0u });
             where.push_back({ member, info->Dispel, aura });
         }
     }

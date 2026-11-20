@@ -7,6 +7,10 @@
  *   order does. It engages while the pick outranks the boss (a listed unit above priority 0) or while a live listed
  *   unit ranks below the pick for this bot (an add below the boss: the bot keeps the boss). A bot no entry names (a
  *   tank or a healer under Dps entries) has the owner as its pick and nothing below it: never engaged, stock.
+ * - DecideFocusInSight: DecideFocus with the line-of-sight re-pick. A pick the bot cannot see is set aside and the
+ *   list ranked again; the first one set aside stays the focus (`unseen`: the bot walks into sight before it attacks)
+ *   when it outranks the boss, stands within kUnseenFocusYd and nothing in sight ranks as high. SightSamples: the
+ *   points along the bot's path to such a pick where the focus action looks for sight.
  * - MayBeIgnored: the cheap name test the target filter runs before it builds a unit's facts.
  * - DecideMinion: what to do with a pet, guardian or totem whose victim is ignored.
  * - BreakOutClock: how long each prison held its player, as one bot saw it (the break-out time counter).
@@ -19,6 +23,7 @@
 
 #include "MechanicDescriptor.h"
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -40,6 +45,8 @@ namespace BossMechanics::TargetRules
         bool lowerListed = false;       // a live, not ignored candidate listed for this bot ranks below the pick
         bool swapHold = false;          // a tank keeps the taunt swap boss it holds (TauntSwap::HeldFocus), whatever
                                         // the list says (WP-TS)
+        bool unseen = false;            // the pick is out of the bot's line of sight: it walks into sight first
+                                        // (DecideFocusInSight)
 
         bool Engaged() const { return target && (outranksBoss || lowerListed || swapHold); }
     };
@@ -76,6 +83,89 @@ namespace BossMechanics::TargetRules
         return f;
     }
 
+    // An unseen pick further than this from the bot is not kept (DecideFocusInSight): a listed unit in another room
+    // or behind a far wall is not worth the walk.
+    constexpr float kUnseenFocusYd = 40.f;
+
+    // DecideFocus with the line-of-sight re-pick (MechanicBotKillTargetValue). `sees(key)`: the bot has the pick in
+    // its line of sight (playerbots' Attack refuses a unit it does not); `distanceYd(key)`: how far the pick stands.
+    // A pick out of sight is set aside and the list ranked again without it, at most `maxRepicks` times. The first one
+    // set aside stays the focus, marked `unseen` (the bot walks into sight before it attacks), when it outranks the
+    // boss, stands within kUnseenFocusYd and the best pick in sight ranks below it; otherwise the best pick in sight
+    // (none once the repicks run out). Before this a kill-order add behind an obstacle left every bot that could not
+    // see it on the boss (Blackrock Depths 2026-11-19: Hurley's marked keg K1 behind the cellar's barrels, two of
+    // three DPS bots never switched and he drank it).
+    template <class Sees, class DistanceYd>
+    Focus DecideFocusInSight(Descriptor const& d, std::vector<Desc::TargetCandidate> candidates, Key owner,
+        Desc::BotFacts const& bot, Key current, Desc::Context const& ctx, int maxRepicks, Sees&& sees,
+        DistanceYd&& distanceYd)
+    {
+        Focus f;
+        Focus unseen;
+        for (int i = 0; i <= maxRepicks; ++i)
+        {
+            f = DecideFocus(d, candidates, owner, bot, current, ctx);
+            if (!f.target || sees(f.target))
+                break;
+            if (!unseen.target && f.outranksBoss && distanceYd(f.target) <= kUnseenFocusYd)
+            {
+                unseen = f;
+                unseen.unseen = true;
+            }
+            Key const gone = f.target;
+            candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [gone](Desc::TargetCandidate const& c)
+            {
+                return c.facts && c.facts->guid == gone;
+            }), candidates.end());
+            f = Focus();
+        }
+        if (unseen.target && (!f.target || f.priority < unseen.priority))
+            return unseen;
+        return f;
+    }
+
+    // The focus action's walk into sight of an `unseen` pick (MechanicBotFocusAction): points along the bot's path to
+    // the pick, every kSightStepYd from the bot's end (the first one kSightStepYd out), at most kSightSamples; the
+    // path's end is always the last one. The action walks to the first point that sees the pick.
+    constexpr float kSightStepYd = 2.f;
+    constexpr std::size_t kSightSamples = 30;
+
+    struct PathPoint
+    {
+        float x = 0.f;
+        float y = 0.f;
+        float z = 0.f;
+    };
+
+    inline std::vector<PathPoint> SightSamples(std::vector<PathPoint> const& path)
+    {
+        std::vector<PathPoint> out;
+        if (path.size() < 2)
+            return out;
+        float next = kSightStepYd;  // the distance along the path of the next sample
+        float walked = 0.f;
+        for (std::size_t i = 1; i < path.size() && out.size() + 1 < kSightSamples; ++i)
+        {
+            PathPoint const& a = path[i - 1];
+            PathPoint const& b = path[i];
+            float const dx = b.x - a.x;
+            float const dy = b.y - a.y;
+            float const dz = b.z - a.z;
+            float const len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            while (len > 0.f && next <= walked + len && out.size() + 1 < kSightSamples)
+            {
+                float const t = (next - walked) / len;
+                out.push_back({ a.x + dx * t, a.y + dy * t, a.z + dz * t });
+                next += kSightStepYd;
+            }
+            walked += len;
+        }
+        PathPoint const& end = path.back();
+        if (out.empty() || out.back().x != end.x || out.back().y != end.y || out.back().z != end.z)
+            out.push_back(end);
+        return out;
+    }
+
     // The stock target pickers the focus stands down.
     enum class Picker : std::uint8_t
     {
@@ -104,6 +194,10 @@ namespace BossMechanics::TargetRules
     {
         for (IgnoreEntry const& e : d.ignores)
             if (e.guid ? e.guid == guid : e.entry && e.entry == entry)
+                return true;
+        // WP-DS: an Attacks hold acts as an ignore entry (entry 0: any non-player unit; the facts tell players apart).
+        for (HoldEntry const& e : d.holds)
+            if (e.action == HoldEntry::Action::Attacks && (e.guid ? e.guid == guid : !e.entry || e.entry == entry))
                 return true;
         return false;
     }

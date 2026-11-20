@@ -6,7 +6,8 @@
  * | value      | attackers        | MechanicBotAttackersValue   | stock attackers minus ignored units (override)    |
  * | value      | boss kill target | MechanicBotKillTargetValue  | the focus (TargetRules::Focus), 100 ms cache      |
  * | trigger    | boss focus       | MechanicBotFocusTrigger     | an engaged focus that is not the current target   |
- * | action     | boss focus       | MechanicBotFocusAction      | ACTION_RAID + 2: Attack() the pick                |
+ * | action     | boss focus       | MechanicBotFocusAction      | ACTION_RAID + 2: Attack() the pick; an unseen     |
+ * |            |                  |                             | pick: walk into its sight first                   |
  * | multiplier | boss focus       | MechanicBotFocusMultiplier  | stands the stock pickers down; zeroes actions on  |
  * |            |                  |                             | ignored units                                     |
  *
@@ -65,6 +66,13 @@ namespace BossMechanics
     {
         // Is `unit` on the active descriptor's ignore list now, for this bot's view? Does not refresh the view.
         bool IsIgnoredNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+            Milliseconds now);
+
+        // Blackrock Depths WP-DS (BD3): does an Interrupts hold keep every kick off `unit` now (Desc::KicksHeld)? The
+        // schools a damaging spell may not come in on (Desc::HeldDamageMask; 0: none). Neither refreshes the view.
+        bool KicksHeldNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+            Milliseconds now);
+        uint32 HeldDamageMaskNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
             Milliseconds now);
 
         // SFK F1: is `unit` a teammate turned against the group for this bot now: a charmed player carrying one of the
@@ -133,6 +141,8 @@ public:
 
 private:
     BossMechanics::MechanicBotStateRef _state;
+    ObjectGuid _sightTarget;         // the unseen pick the bot last walked toward (TargetRules::Focus::unseen)...
+    Milliseconds _sightRetryAt{ 0 }; // ...and when that walk may be planned again
 };
 
 class MechanicBotFocusMultiplier : public Multiplier

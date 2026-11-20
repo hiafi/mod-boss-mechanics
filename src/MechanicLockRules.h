@@ -525,6 +525,32 @@ namespace BossMechanics::LockRules
     {
         return active && seenRevision != 0 && seenRevision != revision;
     }
+
+    // Healer range (STAGE-HEALER-RANGE, user ruling 2026-11-19): a healer in combat steps back in whenever its nearest
+    // alive group tank on the map is past healer reach (Solver::Reach maxYd, HealDistance - 2 = 36.5 yd), between
+    // mechanics as well as during them. `tankYd` < 0: not a healer in combat, or no live tank on its map (nothing).
+    // Out of reach is a role solve trigger beside lost sight (StepHealerSight).
+    inline bool HealerOutOfReach(float tankYd, float reachYd)
+    {
+        return tankYd >= 0.f && reachYd > 0.f && tankYd > reachYd;
+    }
+
+    // ...and keeps the brain step relevant with no mechanic live: while out of reach, and while the walk back in it
+    // started (`reachWalk`, an Escape) runs, so the walk is not dropped the moment the healer crosses reachYd. It ends
+    // with that Escape; the solve's role band (tank-anchored, its far edge ~8 yd inside reach) is the hysteresis.
+    inline bool HealerReachRelevant(float tankYd, float reachYd, bool reachWalk)
+    {
+        return tankYd >= 0.f && reachYd > 0.f && (reachWalk || tankYd > reachYd);
+    }
+
+    // A walk back in is taken only when it ends at least kHealerReachGainYd nearer the tank than the healer stands:
+    // a solve that found nothing nearer (a live hazard in the way) backs off instead of shuffling on the spot.
+    inline constexpr float kHealerReachGainYd = 3.f;
+
+    inline bool HealerReachWalkGains(float awayYd, float targetYd)
+    {
+        return targetYd <= awayYd - kHealerReachGainYd;
+    }
 }
 
 #endif

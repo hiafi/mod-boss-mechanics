@@ -76,12 +76,14 @@ namespace BossMechanics::Solver
     // (doors, leash points). `pathInside`: the walked path too, once it is inside (a bot starting outside walks in;
     // the navmesh ignores doors, so a path that leaves the room through one is refused). Hard for the clean passes:
     // Solve drops a candidate (and a path) that breaks it; the Fallback ranks one that does after every one that
-    // does not. The bot's own spot is never refused for it (a bot already outside may stay where it is).
+    // does not. The bot's own spot is never refused for it (a bot already outside may stay where it is), unless
+    // `strict` (Blackrock Depths WP-DS): then TargetOk itself needs p inside, the bot's own spot included.
     struct Bounds
     {
         std::vector<BoundsArea> areas;
         std::vector<DropCircle> keepOut;
         bool pathInside = false;
+        bool strict = false;
     };
 }
 
@@ -288,6 +290,21 @@ namespace BossMechanics::DropSpot
         return true;
     }
 
+    // WP-DS: the strict sets p breaks (TargetOk and the Fallback's violations; the bot's own spot counts too).
+    inline std::uint32_t StrictBreaks(std::vector<Solver::Bounds> const& all, Geo::Vec3 const& p)
+    {
+        std::uint32_t n = 0;
+        for (Solver::Bounds const& b : all)
+            if (b.strict && !InBounds(b, p))
+                ++n;
+        return n;
+    }
+
+    inline bool AnyStrict(std::vector<Solver::Bounds> const& all)
+    {
+        return std::any_of(all.begin(), all.end(), [](Solver::Bounds const& b) { return b.strict; });
+    }
+
     // Path samples this far apart for the pathInside check.
     constexpr float kBoundsPathStepYd = 1.f;
 
@@ -330,7 +347,8 @@ namespace BossMechanics::DropSpot
     inline bool SameBounds(Solver::Bounds const& a, Solver::Bounds const& b)
     {
         auto same = [](Geo::Vec3 const& p, Geo::Vec3 const& q) { return p.x == q.x && p.y == q.y && p.z == q.z; };
-        if (a.pathInside != b.pathInside || a.areas.size() != b.areas.size() || a.keepOut.size() != b.keepOut.size())
+        if (a.pathInside != b.pathInside || a.strict != b.strict || a.areas.size() != b.areas.size()
+            || a.keepOut.size() != b.keepOut.size())
             return false;
         for (std::size_t i = 0; i < a.areas.size(); ++i)
         {

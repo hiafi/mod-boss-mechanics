@@ -138,6 +138,25 @@ namespace BossMechanics::Drill
             { "pass", "Marked is passed between members away from the dummy and 40 egg circles; the thrower is Baited "
                 "8 s", "describe pass,debuff 205009 n=1,pass-eggs" },
 
+            // ---- holds and the stacks rank key (Blackrock Depths WP-DS, shared doc BD3) ----
+            // Spell Eater's shape: two Drill Adds above the dummy; at 6 s and 18 s they take the purgeable Magic buff
+            // (the shell): no bot magic damage on a shelled add (`.mech bots`: "damage casts blocked", "stopped"),
+            // physical goes on, and a purger takes the shell off. Not in the loops.
+            { "hold-magic", "two adds shelled twice (the purgeable buff): no magic damage on a shelled add, purge it",
+                "describe hold-magic,add 300405 n=2,wait:6,buff 300405 205021,wait:12,buff 300405 205021,wait:12" },
+            // Commanding Aura's shape: two Drill Casters cast the listed high cast every 4 s; one has Aiming (the held
+            // one): its casts go through, the other's are kicked (`.mech bots`: "stock kicks dropped ... (held n)").
+            // Not in the loops.
+            { "hold-kicks", "two casters cast high every 4 s; the one with Aiming is never kicked",
+                "describe hold-kicks,add 300404 n=1 aura=205023,add 300404 n=1,cast 205012 unit=300404 every=4000,"
+                "wait:24" },
+            // Gerstahn's Doubt: one member takes three Taunt Swap (drill) stacks (the Doubt stand-in, 15 s); then Magic
+            // Affliction on three members, and again 10 s later with the stacked member among them: it is cured first.
+            // Not in the loops.
+            { "dispel-stacks", "Magic Affliction on three members: the one with the most Taunt Swap stacks is cured "
+                "first", "describe dispel-stacks,debuff 205024 n=1,debuff 205024 with=205024,debuff 205024 with=205024,"
+                "wait:1,debuff 205014 n=3,wait:10,debuff 205014 n=3 with=205024,wait:10" },
+
             // ---- everything ----
             // The dummy's default loop and the sim slice: every list at once in 60 s, on the combined preset.
             { "descriptor", "every list at once (60 s): kicks, dispels, purges, targets, prisons, copies",

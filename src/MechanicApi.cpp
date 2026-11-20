@@ -20,7 +20,7 @@ namespace
     bool IsDamageKind(Kind k)
     {
         return k == Kind::Zone || k == Kind::Frontal || k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait
-            || k == Kind::Jump;
+            || k == Kind::Jump || k == Kind::Hide;
     }
 
     bool IsShapeKind(Kind k)
@@ -1184,6 +1184,36 @@ namespace Mechanic
         if (!SizeOk(r > 0.f, "Jump", owner))
             return MechanicRef();
         return Register(owner, "Jump", Kind::Jump, at, Shape::Circle(r), warn);
+    }
+
+    MechanicRef Hide(Unit* owner, HideSpec const& spec, Milliseconds warn)
+    {
+        if (!SizeOk(spec.rangeYd > 0.f, "Hide", owner))
+            return MechanicRef();
+        HideSpec s = spec;
+        if (s.rangeYd > BossMechanics::Hide::kMaxRangeYd)
+        {
+            LOG_WARN(kLog, "Mechanic::Hide from {}: range {:.1f} yd is past the resolve's search; clamped to {:.0f}",
+                owner ? owner->GetGUID().ToString() : "?", s.rangeYd, BossMechanics::Hide::kMaxRangeYd);
+            s.rangeYd = BossMechanics::Hide::kMaxRangeYd;
+        }
+        // No source given (a default point at the origin): the owner's sight.
+        Position const& o = s.source.point;
+        if (!s.source.IsUnit() && o.GetPositionX() == 0.f && o.GetPositionY() == 0.f && o.GetPositionZ() == 0.f)
+            s.source = Anchor(owner);
+        s.behindYd = std::max(0.f, s.behindYd);
+        s.spotRadiusYd = std::max(0.5f, s.spotRadiusYd);
+        s.share = std::max<uint8>(1, s.share);
+        s.reachYd = std::max(0.f, s.reachYd);
+        Shape range = Shape::Circle(s.rangeYd);
+        range.zTolerance = BossMechanics::Hide::kDefaultZToleranceYd;
+        Anchor const source = s.source;
+        return Register(owner, "Hide", Kind::Hide, source, range, warn, [&s](ActiveMechanic& m)
+        {
+            m.hide.emplace();
+            m.hide->spec = std::move(s);
+            m.telegraph = false;    // the blockers are the tell; the script draws its own cast and emote
+        });
     }
 
     void Cancel(Unit* owner, MechanicHandle h)

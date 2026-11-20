@@ -354,6 +354,7 @@ namespace BossMechanics
                 else
                     _st.perception.clear();
                 Player* bot = _bot;
+                _hooks.selfMelee = PlayerbotAI::IsMelee(bot);   // WP-DS: SpotBounds::For's Melee / Ranged
                 _hooks.plannedSpot = [bot](ObjectGuid guid, Geo::Vec3& spot, float& facing)
                 {
                     Player const* member = ObjectAccessor::GetPlayer(*bot, guid);
@@ -765,6 +766,7 @@ namespace BossMechanics
             st.walkInUntil = Milliseconds(0);
             st.lastInRangeAt = Milliseconds(0);
             st.nextHopAt = Solver::kForever;    // X3: no Jump left (a hop in flight still lands, BotBrain::Hopping)
+            st.reachWalk = false;
         }
 
         // Gives the bot back to the stock AI for `duration` (STAGE-M2-REVIEW M1): mode Watch, no plan, nothing
@@ -1018,6 +1020,7 @@ namespace BossMechanics
             st.routePending = false;
             st.refacing = false;
             st.regionRoute = false;
+            st.reachWalk = false;
         }
 
         // Solve and take the plan: Move/GraceMove/Fallback/NoPath -> Escape; Safe -> Watch.
@@ -1261,26 +1264,43 @@ namespace BossMechanics
 
         // Healer line of sight (§3.8 role band v2): a ray to the tank now and then; out of sight -> a role solve
         // (Input::roleSolve) that lets the Sight score move it. Soft (decision §7.11): a Safe answer means stay.
+        // STAGE-HEALER-RANGE (user ruling 2026-11-19): the tank past reach (LockRules::HealerOutOfReach) is a trigger
+        // too, with or without a mechanic live (Update keeps the step relevant); the Reach and role band scores pull
+        // the healer in, the solver's hazard checks keep it out of every live mechanic, and a walk that does not end
+        // LockRules::kHealerReachGainYd nearer the tank backs off.
         bool StepHealerSight(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
             ViewCtx& ctx)
         {
             Solver::Input& in = st.input;
-            if (in.sight.points.empty() || now - st.lastSightAt < kSightCheckEvery || now < st.nextSightAt)
+            bool const sightOn = !in.sight.points.empty();
+            bool const reachOn = in.reach.maxYd > 0.f && !in.reach.points.empty();
+            if ((!sightOn && !reachOn) || now - st.lastSightAt < kSightCheckEvery || now < st.nextSightAt)
                 return false;
             st.lastSightAt = now;
             Player* tank = BotRole::NearestGroupTank(bot);
-            if (!tank || bot->IsWithinLOSInMap(tank))
+            if (!tank)
+                return false;
+            float const away = bot->GetExactDist2d(tank);
+            bool const outOfReach = reachOn && LockRules::HealerOutOfReach(away, in.reach.maxYd);
+            if (!outOfReach && (!sightOn || bot->IsWithinLOSInMap(tank)))
                 return false;
             if (!CanSolve(bot, st, now, cfg))
                 return false;
             Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true);
-            if (plan.outcome != Solver::Outcome::Move && plan.outcome != Solver::Outcome::GraceMove)
+            bool moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
+            if (moving && outOfReach)
+                moving = LockRules::HealerReachWalkGains(away, Dist2d(plan.target, PosOf(tank)));
+            if (!moving)
             {
                 // Nothing in sight worth the walk: do not pay a solve every second for the same answer.
                 st.nextSightAt = now + kSightBackoff;
                 return false;
             }
+            if (cfg.debug && outOfReach)
+                LOG_INFO(kLog, "Bot {}: {:.1f} yd from tank {} (reach {:.1f}), walks back in to ({:.1f}, {:.1f})",
+                    bot->GetName(), away, tank->GetName(), in.reach.maxYd, plan.target.x, plan.target.y);
             BeginEscape(st, std::move(plan), now);
+            st.reachWalk = outOfReach;
             return true;
         }
 
@@ -2308,8 +2328,15 @@ namespace BossMechanics
         if (st.reserved && st.viewInfo.tasks.empty())
             DropBoard(reg, bot, st);
         BotRole::UpdateFrontalSources(bot, *reg, st, cfg);
+        // Blackrock Depths WP-DS: strict bounds bind the bot (its owner fights it): Watch keeps its spot and its stock
+        // motions inside them.
+        // STAGE-HEALER-RANGE: a healer whose tank is past reach (or who walks back in) is relevant with no mechanic
+        // live; the walk-back flag ends with its Escape (arrived: Hold; released: Watch).
+        if (st.mode != MechanicBotMode::Escape)
+            st.reachWalk = false;
         bool const relevant = AnyRelevant(in) || AnyTask(st, now) || now <= st.freezeUntil
-            || (cfg.tankFacingEnable && !st.frontalSources.empty());
+            || (cfg.tankFacingEnable && !st.frontalSources.empty()) || DropSpot::AnyStrict(in.bounds)
+            || LockRules::HealerReachRelevant(BotRole::HealerTankYd(bot), BotRole::HealerReachYd(), st.reachWalk);
         if (!relevant)
         {
             DropBoard(reg, bot, st);

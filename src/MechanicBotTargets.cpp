@@ -16,6 +16,8 @@
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GameTime.h"
+#include "GenericSpellActions.h"
+#include "Item.h"
 #include "Log.h"
 #include "Map.h"
 #include "MechanicBotBrain.h"
@@ -25,12 +27,15 @@
 #include "MechanicDescriptorView.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
+#include "PathGenerator.h"
 #include "Pet.h"
 #include "PetDefines.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "Playerbots.h"
 #include "Spell.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "StringFormat.h"
 #include "UnitScript.h"
 #include <algorithm>
@@ -45,6 +50,8 @@ namespace
     constexpr float kMaxPickYd = 80.f;
     // Picks out of the bot's line of sight are skipped (Attack refuses them): at most this many re-picks per value.
     constexpr int kMaxRepicks = 3;
+    // While the bot walks into sight of an unseen pick, the walk is planned again at most this often.
+    constexpr Milliseconds kSightRetry{ 1000 };
 
     Milliseconds Now()
     {
@@ -56,9 +63,105 @@ namespace
         return unit ? unit->GetGUID().GetRawValue() : 0;
     }
 
+    // The first point of the bot's path to `target` that sees it (TargetRules::SightSamples, at the bot's eye height),
+    // else the path's end. False: no path.
+    bool SightPoint(Player* bot, Unit* target, TargetRules::PathPoint& out)
+    {
+        PathGenerator path(bot);
+        path.CalculatePath(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(), false);
+        PathType const type = path.GetPathType();
+        if ((type & PATHFIND_NOPATH) || !(type & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE)))
+            return false;
+        std::vector<TargetRules::PathPoint> points;
+        points.reserve(path.GetPath().size());
+        for (G3D::Vector3 const& p : path.GetPath())
+            points.push_back({ p.x, p.y, p.z });
+        std::vector<TargetRules::PathPoint> const samples = TargetRules::SightSamples(points);
+        if (samples.empty())
+            return false;
+        // IsWithinLOS adds the target's own height to the point: this lands it at the bot's eye.
+        float const eye = bot->GetCollisionHeight() - target->GetCollisionHeight();
+        out = samples.back();
+        for (TargetRules::PathPoint const& sample : samples)
+            if (target->IsWithinLOS(sample.x, sample.y, sample.z + eye))
+            {
+                out = sample;
+                break;
+            }
+        return true;
+    }
+
+    // WP-DS: an Attacks hold is an ignore entry too (Desc::IsIgnored).
     bool HasIgnores(DescriptorView const& v)
     {
-        return v.Active() && !v.descriptor.ignores.empty();
+        return v.Active() && (!v.descriptor.ignores.empty()
+            || Desc::HasHolds(v.descriptor, HoldEntry::Action::Attacks));
+    }
+
+    bool HasDamageHolds(DescriptorView const& v)
+    {
+        return v.Active() && Desc::HasHolds(v.descriptor, HoldEntry::Action::Damage);
+    }
+
+    uint32 CastSpellIdOf(PlayerbotAI* botAI, CastSpellAction* cast)
+    {
+#if defined(PLAYERBOTS_HAS_CAST_SPELL_ID)
+        (void)botAI;
+        return cast->GetCastSpellId();
+#else
+        AiObjectContext* context = botAI->GetAiObjectContext();
+        return AI_VALUE2(uint32, "spell id", cast->getSpell());
+#endif
+    }
+
+    // WP-DS: does the spell deal damage (direct, weapon, leech, power burn, or a periodic damage or leech aura)? A
+    // Damage hold keeps only these off its unit: a kick, a slow or a curse with no damage still goes.
+    bool DealsDamage(SpellInfo const* info)
+    {
+        for (SpellEffectInfo const& eff : info->GetEffects())
+        {
+            switch (eff.Effect)
+            {
+                case SPELL_EFFECT_SCHOOL_DAMAGE:
+                case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
+                case SPELL_EFFECT_HEALTH_LEECH:
+                case SPELL_EFFECT_WEAPON_DAMAGE:
+                case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
+                case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
+                case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
+                case SPELL_EFFECT_POWER_BURN:
+                    return true;
+                case SPELL_EFFECT_APPLY_AURA:
+                    if (eff.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE
+                        || eff.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH
+                        || eff.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT)
+                        return true;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+
+    // The schools the bot's cast of `info` hits with: a wand's Shoot by the wand's damage school (the spell itself is
+    // physical), anything else by its own school mask.
+    uint32 HitSchoolMask(Player const* bot, SpellInfo const* info)
+    {
+        if (info->Id == 5019)   // Shoot (wands)
+            if (Item const* wand = bot->GetWeaponForAttack(RANGED_ATTACK, true))
+                return 1u << wand->GetTemplate()->Damage[0].DamageType;
+        return info->GetSchoolMask();
+    }
+
+    // A damaging cast of `info` by the bot on `target` is held now (a Damage or Attacks hold whose schools it meets).
+    bool CastHeld(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* target,
+        SpellInfo const* info, Milliseconds now)
+    {
+        if (!info || info->IsPositive() || !DealsDamage(info))
+            return false;
+        uint32 const held = BotTargets::HeldDamageMaskNow(st, reg, bot, target, now);
+        return held && (held & HitSchoolMask(bot, info));
     }
 
     bool HasHostilePlayers(DescriptorView const& v)
@@ -263,6 +366,26 @@ namespace
         }
     }
 
+    // WP-DS: a damaging cast or channel in progress whose target a Damage hold now covers (the shell came up mid-cast)
+    // is stopped, as an ignored target's is.
+    void DropHeldCasts(PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Registry const& reg, Milliseconds now)
+    {
+        for (CurrentSpellTypes type : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+            if (Spell const* spell = bot->GetCurrentSpell(type))
+            {
+                Unit const* target = spell->m_targets.GetUnitTarget();
+                if (!target || target == bot || !target->IsCreature()
+                    || !CastHeld(st, reg, bot, target, spell->GetSpellInfo(), now))
+                    continue;
+                botAI->RequestSpellInterrupt();
+                ++st.counters.holdDrops;
+                if (GetConfig().bots.debug)
+                    LOG_INFO(kLog, "Bot {}: stopped {} on {} (damage hold)", bot->GetName(),
+                        spell->GetSpellInfo()->Id, target->GetName());
+                break;
+            }
+    }
+
     // Damage the bot and its minions deal to ignored units (the WP-S counters). OnDamage runs for every damage event
     // on the server: a creature victim and a player behind the attacker are tested before anything is looked up.
     class BossMechanicsBotTargetsUnitScript : public UnitScript
@@ -336,6 +459,24 @@ bool BotTargets::IsIgnoredNow(MechanicBotState& st, Registry const& reg, Player 
     return Desc::IsIgnored(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
 }
 
+bool BotTargets::KicksHeldNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+    Milliseconds now)
+{
+    DescriptorView& v = st.descriptor;
+    if (!unit || !v.Active() || !Desc::HasHolds(v.descriptor, HoldEntry::Action::Interrupts))
+        return false;
+    return Desc::KicksHeld(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
+}
+
+uint32 BotTargets::HeldDamageMaskNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
+    Milliseconds now)
+{
+    DescriptorView& v = st.descriptor;
+    if (!unit || !v.Active() || v.descriptor.holds.empty())
+        return 0;
+    return Desc::HeldDamageMask(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
+}
+
 void BotTargets::AfterTick(PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Registry const& reg,
     Milliseconds now)
 {
@@ -387,6 +528,8 @@ void BotTargets::AfterTick(PlayerbotAI* botAI, Player* bot, MechanicBotState& st
 
     if (HasIgnores(v))
         DropIgnored(botAI, bot, st, reg, now);
+    if (HasDamageHolds(v))
+        DropHeldCasts(botAI, bot, st, reg, now);
     if (HasHostilePlayers(v))
         DropReleased(botAI, bot, st);
 }
@@ -440,12 +583,14 @@ std::string BotTargets::ReportLine(MechanicBotState const& st)
     MechanicBotCounters const& c = st.counters;
     std::string const focus = f.target ? Acore::StringFormat("{} prio {}{}{}", ObjectGuid(f.target).ToString(),
         f.priority, f.Engaged() ? " engaged" : "", f.aoeOk ? " aoe ok" : "") + (f.swapHold ? " (swap hold)" : "")
+        + (f.unseen ? " (out of sight)" : "")
         : std::string("-");
-    return Acore::StringFormat("m5 targets: focus {} | switches {}, on lower targets {} ms, break-out max {} ms | "
-        "ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, minions pulled "
-        "off {} | turned teammates released {}", focus, c.focusSwitches, c.msLowerTarget, c.breakOutMsMax,
-        c.ignoredHits, c.ignoredDamage, c.petIgnoredHits, c.petIgnoredDamage, c.ignoreBlocks, c.ignoreDrops,
-        c.petRecalls, c.hostileReleases);
+    return Acore::StringFormat("m5 targets: focus {} | switches {}, sight walks {}, on lower targets {} ms, break-out "
+        "max {} ms | ignored: bot hits {} ({} dmg), pet hits {} ({} dmg), actions blocked {}, targets dropped {}, "
+        "minions pulled off {} | turned teammates released {} | holds: damage casts blocked {}, stopped {}", focus,
+        c.focusSwitches, c.focusSightMoves, c.msLowerTarget, c.breakOutMsMax, c.ignoredHits, c.ignoredDamage,
+        c.petIgnoredHits, c.petIgnoredDamage, c.ignoreBlocks, c.ignoreDrops, c.petRecalls, c.hostileReleases,
+        c.holdBlocks, c.holdDrops);
 }
 
 void AddSC_boss_mechanics_bot_targets()
@@ -538,23 +683,25 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
     facts.mainTank = facts.tank && PlayerbotAI::IsMainTank(bot);   // WP-TS: Who::MainTank / Who::AssistTank
     facts.guid = bot->GetGUID().GetRawValue();
     Desc::Context const ctx = ContextOf(v, bot);
-    TargetRules::Focus f;
-    for (int i = 0; i <= kMaxRepicks; ++i)
+    auto unitOf = [&candidates, &units](Desc::Key key) -> Unit*
     {
-        f = TargetRules::DecideFocus(v.descriptor, candidates, v.owner.GetRawValue(), facts, KeyOf(current), ctx);
-        if (!f.target)
-            break;
-        std::size_t const at = static_cast<std::size_t>(std::distance(candidates.begin(),
-            std::find_if(candidates.begin(), candidates.end(), [&f](Desc::TargetCandidate const& c)
-            {
-                return c.facts->guid == f.target;
-            })));
-        if (at >= units.size() || bot->IsWithinLOSInMap(units[at]))
-            break;
-        candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(at));
-        units.erase(units.begin() + static_cast<std::ptrdiff_t>(at));
-        f = TargetRules::Focus();
-    }
+        for (std::size_t i = 0; i < candidates.size(); ++i)
+            if (candidates[i].facts->guid == key)
+                return units[i];
+        return nullptr;
+    };
+    // Picks out of the bot's sight are ranked again without them (Attack refuses them); one that outranks the boss
+    // nearby stays the focus, `unseen`, and the focus action walks the bot into sight (DecideFocusInSight).
+    TargetRules::Focus f = TargetRules::DecideFocusInSight(v.descriptor, candidates, v.owner.GetRawValue(), facts,
+        KeyOf(current), ctx, kMaxRepicks, [&](Desc::Key key)
+        {
+            Unit* unit = unitOf(key);
+            return !unit || bot->IsWithinLOSInMap(unit);
+        }, [&](Desc::Key key)
+        {
+            Unit* unit = unitOf(key);
+            return unit ? bot->GetDistance(unit) : 0.f;
+        });
     // WP-TS: a tank keeps the swap boss it holds, whatever the list ranks above it (the assist tank's add entry).
     if (Desc::Key const held = TauntSwap::HeldFocus(swap, KeyOf(current)); held && f.target != held)
     {
@@ -589,6 +736,26 @@ bool MechanicBotFocusAction::Execute(Event /*event*/)
     Unit* current = AI_VALUE(Unit*, "current target");
     if (!target || current == target)
         return false;
+    if (f.unseen && !bot->IsWithinLOSInMap(target))
+    {
+        // Out of sight (Attack refuses it): walk to the first point of the path that sees it, and keep the tick
+        // while the walk runs (a cast on the old target would stop it).
+        Milliseconds const now = Now();
+        if (bot->isMoving() && _sightTarget == target->GetGUID() && now < _sightRetryAt)
+            return true;
+        TargetRules::PathPoint to;
+        if (!SightPoint(bot, target, to) || !MoveTo(target->GetMapId(), to.x, to.y, to.z))
+            return bot->isMoving() && _sightTarget == target->GetGUID();
+        _sightTarget = target->GetGUID();
+        _sightRetryAt = now + kSightRetry;
+        if (MechanicBotState* st = _state.Get(botAI))
+            ++st->counters.focusSightMoves;
+        if (GetConfig().bots.debug)
+            LOG_INFO(kLog, "Bot {}: focus {} out of sight at {:.1f} yd, walking {:.1f} yd into sight (priority {})",
+                bot->GetName(), target->GetName(), bot->GetDistance(target), bot->GetExactDist(to.x, to.y, to.z),
+                f.priority);
+        return true;
+    }
     if (!Attack(target))
         return false;
     if (MechanicBotState* st = _state.Get(botAI))
@@ -616,11 +783,27 @@ float MechanicBotFocusMultiplier::GetValue(Action* action)
         return TargetRules::SuppressPicker(picker, CurrentFocus(botAI)) ? 0.f : 1.f;
     }
 
-    // The ignore list: an action aimed at an ignored unit (an unknown target value name has no target).
-    if (!HasIgnores(st->descriptor) || action->GetTargetName() == "self target" || !action->GetTargetValue())
+    // The ignore list: an action aimed at an ignored unit (an unknown target value name has no target). WP-DS: a
+    // damaging cast whose schools a Damage hold on the target covers.
+    bool const ignores = HasIgnores(st->descriptor);
+    bool const damageHolds = HasDamageHolds(st->descriptor);
+    if ((!ignores && !damageHolds) || action->GetTargetName() == "self target" || !action->GetTargetValue())
         return 1.f;
     Unit* target = action->GetTarget();
     if (!target || target == bot || !target->IsCreature() || bot->IsFriendlyTo(target))
+        return 1.f;
+    if (damageHolds)
+        if (CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action))
+            if (Registry const* reg = Registry::Get(bot->GetMap()))
+            {
+                uint32 const spellId = CastSpellIdOf(botAI, cast);
+                if (spellId && CastHeld(*st, *reg, bot, target, sSpellMgr->GetSpellInfo(spellId), Now()))
+                {
+                    ++st->counters.holdBlocks;
+                    return 0.f;
+                }
+            }
+    if (!ignores)
         return 1.f;
     Registry const* reg = Registry::Get(bot->GetMap());
     if (!reg || !BotTargets::IsIgnoredNow(*st, *reg, bot, target, Now()))

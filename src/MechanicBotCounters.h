@@ -142,6 +142,7 @@ namespace BossMechanics
         uint32 forcedTurns = 0;
         // M5 WP-T (targets and the ignore list, MechanicBotTargets.cpp).
         uint32 focusSwitches = 0;       // `boss focus` attacks that moved the bot onto its pick
+        uint32 focusSightMoves = 0;     // walks into sight of a pick out of the bot's line of sight (`unseen`)
         uint32 msLowerTarget = 0;       // ms attacking something else while an engaged pick lived (waker samples)
         uint32 breakOutMsMax = 0;       // longest a prison held its player, as this bot saw it (open ones included)
         uint32 ignoredHits = 0;         // damage events the bot dealt to ignored units (UnitScript OnDamage)...
@@ -153,6 +154,10 @@ namespace BossMechanics
         uint32 petRecalls = 0;          // minions pulled off an ignored victim (onto the bot's target, or recalled)
         // SFK F1 (turned teammates, MechanicBotTargets.cpp).
         uint32 hostileReleases = 0;     // targets, melee victims and casts dropped: a teammate no longer turned
+        // Blackrock Depths WP-DS (holds, MechanicBotTargets.cpp / MechanicBotInterrupt.cpp).
+        uint32 holdBlocks = 0;          // damaging casts the focus multiplier zeroed: a Damage hold on the target
+        uint32 holdDrops = 0;           // casts in progress stopped: a Damage hold came up on their target
+        uint32 holdKicksDropped = 0;    // kicks and stock cast-stoppers dropped: an Interrupts hold on the caster
         // M5 WP-P (dispels and purges, MechanicBotDispel.cpp), whichever row cast them. M5 WP-F (R M-1): a dispel
         // removes a random aura of its type, so the cures and purges are counted on the dispeller when the listed
         // aura is removed by its cast (the aura hook, AURA_REMOVE_BY_ENEMY_SPELL), not at the cast; a dispel that

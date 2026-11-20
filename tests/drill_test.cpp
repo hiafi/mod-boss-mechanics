@@ -26,7 +26,7 @@ namespace
 
     std::set<std::string_view> const kTestShapes = { "circle", "donut", "cone", "rearcone", "line", "projectile",
         "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
-        "conefront", "linefront" };
+        "conefront", "linefront", "hide" };
 
     struct Parsed
     {
@@ -197,6 +197,14 @@ namespace
                     CHECK(p.size >= 0.f && p.size <= static_cast<float>(Ids::MARKED_DRILL_MAX_STACKS));
                     continue;
                 }
+                if (p.shape == "walk" || p.shape == "leash")
+                {
+                    // The drill-only steps of Blackrock Depths WP-G1: readable by the runner, never a damage step.
+                    std::string const line = Drill::StripPlanKeys(step.line);
+                    CHECK(p.shape == "walk" ? Drill::ParseWalk(line).has_value() : Drill::ParseLeash(line).has_value());
+                    CHECK(!Drill::DamageStep(step.line) && !Drill::Value(step.line, "dmg"));
+                    continue;
+                }
                 // Drill setup never hands out Weakened (STAGE-M4-R-REPORT M-2): no step names it as a selector.
                 CHECK(std::string_view(step.line).find("205000") == std::string_view::npos);
                 CHECK(p.shape != "weaken");
@@ -219,7 +227,7 @@ namespace
         }
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
             "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
-            "blackrock-spire-followups", "rolling-fronts" })
+            "blackrock-spire-followups", "rolling-fronts", "blackrock-depths-shapes", "blackrock-depths-shapes-2" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -492,14 +500,16 @@ namespace
 
     // STAGE-M3-R-REPORT n-11: alexei runs one cycle by default (2.6 minutes), deadmines-followups two (its alternating
     // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s),
-    // the others three (blackrock-spire-followups: 40 s cycles, 120 s, one wave 2 row a cycle).
+    // the others three (blackrock-spire-followups: 40 s cycles, 120 s, one wave 2 row a cycle); blackrock-depths-shapes
+    // and blackrock-depths-shapes-2 two (60 s cycles: the walk or the beam, then the other rows).
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())
         {
             std::string_view const name = d.name;
             CHECK(d.defaultCycles == (name == "alexei" ? 1u
-                : name == "deadmines-followups" || name == "sfk-hunt" ? 2u
+                : name == "deadmines-followups" || name == "sfk-hunt" || name == "blackrock-depths-shapes"
+                    || name == "blackrock-depths-shapes-2" ? 2u
                 : name == "stratholme-drops" ? 4u : name == "stratholme-jump" ? 6u : 3u));
             CHECK(d.defaultCycles * d.cycleMs <= 180000u);
         }

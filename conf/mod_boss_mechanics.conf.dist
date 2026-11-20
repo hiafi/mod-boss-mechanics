@@ -36,9 +36,12 @@ BossMechanics.Debug = 0
 #                     close to the non-tank one because tanks' extra survivability is damage reduction.
 #        Example:     "20:1000:1500 60:5000:8000 60h:6000:9600 60e1:7000:11000"
 #        Default:     "20:1300:1290 60:3670:3710 60h:4120:4110"
+#                     This file ships the default plus the Blackrock Depths normal rows 52, 53, 55 and 56 (REF
+#                     measurement 2026-11-17: the sheet max health of the reworked classes in item level
+#                     level-8..level+10 blues, required level <= row level; level 54 interpolates).
 #
 
-BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
+BossMechanics.ReferenceHealth.Rows = "20:1300:1290 52:3032:3126 53:3182:3266 55:3362:3629 56:3456:3727 60:3670:3710 60h:4120:4110"
 
 #
 #    BossMechanics.ReferenceHealth.MapLevels
@@ -51,14 +54,16 @@ BossMechanics.ReferenceHealth.Rows = "20:1300:1290 60:3670:3710 60h:4120:4110"
 #        Example:     "36:20 36h:60 289:60"
 #        Default:     "36:20 36h:60" - Deadmines normal is level 20, heroic level 60 (the code's fallback for a
 #                     missing or malformed value). This file ships
-#                     "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60":
+#                     "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60":
 #                     Shadowfang Keep normal is level 20 too (its level 21 bosses read the level 20 row), heroic
 #                     level 60; Scholomance, Stratholme and Blackrock Spire are level 60 on both difficulties
 #                     (their bosses span levels 57 to 62, so the pin keeps them all on the level 60 rows; without
-#                     a 229 pin a level 57 Omokk would interpolate toward the level 20 row).
+#                     a 229 pin a level 57 Omokk would interpolate toward the level 20 row). Blackrock Depths pins
+#                     heroic only (level 60); its normal bosses (levels 51 to 56) read the reference health of
+#                     their own level, interpolated between the rows of Rows, one number per section.
 #
 
-BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60"
+BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60"
 
 #
 #    BossMechanics.Telegraph.FollowMode

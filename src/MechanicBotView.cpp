@@ -10,6 +10,7 @@
 #include "Map.h"
 #include "MapDefines.h"
 #include "MechanicAssign.h"
+#include "MechanicProviders.h"
 #include "MechanicRegistry.h"
 #include "MechanicViewRules.h"
 #include "ModelIgnoreFlags.h"
@@ -355,6 +356,9 @@ namespace BossMechanics
                         case Kind::Jump:
                             JumpKind(m);
                             break;
+                        case Kind::Hide:
+                            HideKind(m, extra);
+                            break;
                         default:
                             break;
                     }
@@ -610,8 +614,10 @@ namespace BossMechanics
                         d.room.push_back(ToVec(p));
                 d.roomCenter = ToVec(rule.roomCenter);
                 d.roomRadius = rule.roomRadius;
-                // F-1b: the hard bounds; a single area doubles as the room when the rule names none.
-                if (rule.bounds)
+                // F-1b: the hard bounds; a single area doubles as the room when the rule names none. Both only when
+                // the bounds bind this bot (WP-DS: For(bits)): a role-scoped bound that leaves it out is no room for
+                // it either (Blackrock Depths R-1-FW NIT-3).
+                if (rule.bounds && BoundsBind(*rule.bounds, m.owner))
                 {
                     AddBounds(*rule.bounds);
                     if (d.room.empty() && d.roomRadius <= 0.f && rule.bounds->areas.size() == 1)
@@ -653,9 +659,26 @@ namespace BossMechanics
             void BoundsOf(ActiveMechanic const& m, SpotBounds const& b)
             {
                 Unit const* owner = ObjectAccessor::GetUnit(*_bot, m.owner);
-                if (!owner || !owner->IsAlive() || !_bot->IsInCombatWith(owner))
+                if (!owner || !owner->IsAlive() || !_bot->IsInCombatWith(owner) || !BoundsBind(b, m.owner))
                     return;
                 AddBounds(b);
+            }
+
+            // Blackrock Depths WP-DS: do the bounds bind this bot (SpotBounds::For)? Tank and Healer by the role
+            // provider (the owner's victim is the tank); a damage dealer by the glue's selfMelee (unknown: either bit).
+            bool BoundsBind(SpotBounds const& b, ObjectGuid const& ownerGuid) const
+            {
+                if ((b.who & BoundsFor::All) == BoundsFor::All)
+                    return true;
+                Role const role = GetRoleProvider().Get(ObjectAccessor::GetUnit(*_bot, ownerGuid), _bot);
+                if (HasRole(role, Role::Tank))
+                    return b.who & BoundsFor::Tank;
+                if (HasRole(role, Role::Healer))
+                    return b.who & BoundsFor::Healer;
+                std::optional<bool> const melee = _hooks ? _hooks->selfMelee : std::nullopt;
+                uint8 const dps = !melee ? (BoundsFor::Melee | BoundsFor::Ranged)
+                    : *melee ? BoundsFor::Melee : BoundsFor::Ranged;
+                return b.who & dps;
             }
 
             void AddBounds(SpotBounds const& b)
@@ -676,6 +699,7 @@ namespace BossMechanics
                 for (SpotBounds::KeepOutCircle const& k : b.keepOut)
                     out.keepOut.push_back({ ToVec(k.center), k.radius, false });
                 out.pathInside = b.pathInside;
+                out.strict = b.strict;
                 for (Solver::Bounds const& have : _in.bounds)
                     if (DropSpot::SameBounds(have, out))
                         return;
@@ -1157,6 +1181,42 @@ namespace BossMechanics
                     return;
                 Milliseconds const at = m.detonateRequested ? std::min(_now, m.resolveAt) : m.resolveAt;
                 AddTask(m, BotTaskRole::Jumper, at, at);
+            }
+
+            // ---- Hide (Blackrock Depths BD1, MechanicHide.h) ----
+            // A bot the registry placed behind a blocker (Registry::PlaceHide: every eligible player in range, spread
+            // across the blockers, each spot checked with a real ray) gets a region of spotRadiusYd round its spot over
+            // the judge window and a Member task (it holds there). Every live blocker is a small hazard until then
+            // (its footprint plus Hide::kBlockerMarginYd), so a bot on the source's side walks round the rock: its
+            // straight way through is refused and the region route goes round. Not on the board: placed spots never
+            // collide. No self-check: a Hide's ContainsPoint is "the source sees it", not the region.
+            void HideKind(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
+            {
+                if (m.resolved || !m.hide)
+                    return;
+                auto it = m.hide->spots.find(_self);
+                if (it == m.hide->spots.end())
+                    return;
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Shape circle = Shape::Circle(m.hide->spec.spotRadiusYd);
+                circle.zTolerance = m.shape.zTolerance;
+                Geo::Pose const pose{ it->second.GetPositionX(), it->second.GetPositionY(), it->second.GetPositionZ(),
+                    0.f };
+                AddRegion(m, circle, { pose }, from, to);
+                AddTask(m, BotTaskRole::Member, from, to);
+                for (HideState::LiveBlocker const& b : m.hide->live)
+                {
+                    Solver::Hazard h;
+                    h.id = m.id;
+                    h.shape = Shape::Circle(b.radius);
+                    h.shape.zTolerance = m.shape.zTolerance;
+                    h.poses.push_back({ b.at.GetPositionX(), b.at.GetPositionY(), b.at.GetPositionZ(), 0.f });
+                    h.marginYd = Hide::kBlockerMarginYd;
+                    h.timing = Solver::MakeInterval(_now, to);
+                    h.synthetic = true;
+                    extra.push_back(std::move(h));
+                }
             }
 
             Registry const& _reg;

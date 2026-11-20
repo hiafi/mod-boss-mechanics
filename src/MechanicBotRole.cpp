@@ -89,6 +89,19 @@ namespace BossMechanics
         return best;
     }
 
+    float BotRole::HealerReachYd()
+    {
+        return std::max(0.f, sPlayerbotAIConfig.HealDistance - kReachSlackYd);
+    }
+
+    float BotRole::HealerTankYd(Player* bot)
+    {
+        if (!bot->IsInCombat() || !PlayerbotAI::IsHeal(bot))
+            return -1.f;
+        Player const* tank = NearestGroupTank(bot);
+        return tank ? bot->GetExactDist2d(tank) : -1.f;
+    }
+
     Solver::RoleBand BotRole::RoleBandOf(PlayerbotAI* botAI, Player* bot, BotConfig const& cfg)
     {
         Solver::RoleBand band;
@@ -151,7 +164,7 @@ namespace BossMechanics
                 in.sight.weights.push_back(cfg.healerSightWeight * 0.5f);
             });
         }
-        in.reach.maxYd = std::max(0.f, sPlayerbotAIConfig.HealDistance - kReachSlackYd);
+        in.reach.maxYd = HealerReachYd();
         in.reach.weightPerYd = kReachWeightPerYd;
         ForEachMember(bot, [&](Player* member) { in.reach.points.push_back(PosOf(member)); });
     }

@@ -361,6 +361,56 @@ namespace
         CHECK(!FacingOnlyRefused(false, false));    // Watch, Hold, Freeze
     }
 
+    // STAGE-HEALER-RANGE: a healer steps back in once the tank is past reach, mechanic or not; -1 = no live tank /
+    // not a healer in combat.
+    void TestHealerReach()
+    {
+        float const reach = 36.5f;
+        CHECK(!HealerOutOfReach(-1.f, reach));      // no tank (dead, another map) or not a healer in combat
+        CHECK(!HealerOutOfReach(20.f, reach));
+        CHECK(!HealerOutOfReach(36.5f, reach));     // at reach: still fine
+        CHECK(HealerOutOfReach(36.6f, reach));
+        CHECK(HealerOutOfReach(45.f, reach));
+        CHECK(!HealerOutOfReach(45.f, 0.f));        // no reach (HealDistance unset)
+
+        // Relevance: out of reach, or the walk back in still runs; never without a tank.
+        CHECK(!HealerReachRelevant(-1.f, reach, false));
+        CHECK(!HealerReachRelevant(-1.f, reach, true));     // tank died mid-walk: the walk is dropped
+        CHECK(!HealerReachRelevant(30.f, reach, false));
+        CHECK(HealerReachRelevant(40.f, reach, false));
+        CHECK(HealerReachRelevant(30.f, reach, true));      // crossed reach mid-walk: keeps walking (hysteresis)
+        CHECK(!HealerReachRelevant(40.f, 0.f, false));
+
+        // A walk back in must gain kHealerReachGainYd on the tank.
+        CHECK(kHealerReachGainYd > 0.f && kHealerReachGainYd < 8.f);
+        CHECK(HealerReachWalkGains(45.f, 25.f));
+        CHECK(HealerReachWalkGains(45.f, 45.f - kHealerReachGainYd));
+        CHECK(!HealerReachWalkGains(45.f, 44.f));           // a shuffle: back off
+        CHECK(!HealerReachWalkGains(40.f, 50.f));           // farther: never
+
+        // Walking tank model: the tank walks 1 yd/s away; the healer checks every 1 s and walks to the band's far
+        // edge (reach - 8.5 yd) when out of reach. It never ends a second past reach + 1 yd and walks a few times only.
+        float healerToTank = 18.f;
+        int walks = 0;
+        float worst = 0.f;
+        for (int t = 0; t < 120; ++t)
+        {
+            healerToTank += 1.f;
+            worst = healerToTank > worst ? healerToTank : worst;
+            if (HealerOutOfReach(healerToTank, reach))
+            {
+                float const target = reach - 8.5f;
+                if (HealerReachWalkGains(healerToTank, target))
+                {
+                    healerToTank = target;
+                    ++walks;
+                }
+            }
+        }
+        CHECK(worst <= reach + 1.f);
+        CHECK(walks <= 120 / 8 + 1);
+    }
+
     // M5 CD (E): the descriptor wakes.
     void TestDescriptorWake()
     {
@@ -532,5 +582,6 @@ int main()
     TestStranded();
     TestFacingOnly();
     TestDescriptorWake();
+    TestHealerReach();
     return Report("lock_rules_test");
 }
