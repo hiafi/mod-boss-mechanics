@@ -62,6 +62,7 @@ namespace BossMechanics
         uint32 facingBreaks = 0;    // casts the waker broke because they would turn the bot (look-away)
         uint32 tankRefacings = 0;   // tank moves that turn a remembered Frontal source away from the group
         uint32 refacingStops = 0;   // ...stopped on the spot because a Frontal warning started (decision §7.5)
+        uint32 tankFacingHeld = 0;  // re-facing checks skipped for a facing hold (Scarlet Monastery F6)
         uint32 parks = 0;           // parking / drag-out moves
         uint32 routesFound = 0;
         uint32 routesFailed = 0;

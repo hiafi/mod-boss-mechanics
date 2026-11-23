@@ -1,5 +1,5 @@
 /*
- * mod-boss-mechanics: look-away facing (STAGE-M3-HANDOFF §3.7, decision §7.6, WP-C).
+ * mod-boss-mechanics: look-away facing (STAGE-M3-HANDOFF §3.7, decision §7.6, WP-C; the gaze, Scarlet Monastery F13).
  */
 
 #include "MechanicBotGuard.h"
@@ -7,12 +7,16 @@
 #if BOSS_MECHANICS_WITH_BOTS
 
 #include "MechanicBotFacing.h"
+#include "BossMechanicsConfig.h"
+#include "MechanicGaze.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "Playerbots.h"
 #include "Spell.h"
 #include "SpellInfo.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace BossMechanics
 {
@@ -27,14 +31,31 @@ namespace BossMechanics
         Milliseconds const margin = in.params.marginMs;
         Milliseconds from = Solver::kForever;
         Milliseconds to{ 0 };
+        bool carried = false;
         for (Solver::Carried const& c : in.carried)
         {
             if (!Solver::Detail::CarriedLive(in, c) || !Solver::Detail::ChoosesFacing(c))
                 continue;
-            st.lookOwed = true;
+            carried = true;
             from = std::min(from, c.timing.from - margin);
             to = std::max(to, Solver::Detail::TimingEnd(c.timing) + margin);
         }
+        // Scarlet Monastery F13: every gaze not over yet keeps its source's bearing out of the front arc.
+        std::vector<Gaze::Duty> duties;
+        Geo::Vec3 const here{ bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
+        for (GazeDuty const& g : st.viewInfo.gazes)
+        {
+            if (now > g.to + margin)
+                continue;
+            Geo::Vec3 source = g.sourcePos;
+            if (!g.source.IsEmpty())
+                if (Unit const* u = ObjectAccessor::GetUnit(*bot, g.source); u && u->IsInWorld())
+                    source = { u->GetPositionX(), u->GetPositionY(), u->GetPositionZ() };
+            duties.push_back({ Gaze::Bearing(here, source), g.arcDeg });
+            from = std::min(from, g.from - margin);
+            to = std::max(to, g.to + margin);
+        }
+        st.lookOwed = carried || !duties.empty();
         if (!st.lookOwed)
             return;
         st.lookFrom = from;
@@ -42,8 +63,15 @@ namespace BossMechanics
         st.lookWindow = now >= from && now <= to;
 
         // On the way to a target: the facing the solver chose there. Standing: the free facing here, else the plan's.
+        // Gazes only: the victim's bearing (a melee bot keeps hitting a boss that stands clear of the gaze).
         float f = 0.f;
-        if (st.mode == MechanicBotMode::Escape && st.plan.hasFacing)
+        if (!carried)
+        {
+            Unit const* victim = bot->GetVictim();
+            st.lookFacing = victim && victim->IsInWorld() && victim->GetMap() == bot->GetMap()
+                ? bot->GetAbsoluteAngle(victim) : bot->GetOrientation();
+        }
+        else if (st.mode == MechanicBotMode::Escape && st.plan.hasFacing)
             st.lookFacing = st.plan.facing;
         else if (Solver::CarriedOk(in, in.bot, &f))
             st.lookFacing = f;
@@ -51,6 +79,9 @@ namespace BossMechanics
             st.lookFacing = st.plan.facing;
         else
             st.lookFacing = bot->GetOrientation();
+        // The gazes win over a carried shape's facing when the two disagree (a gaze's cost lands on the bot itself).
+        if (!duties.empty())
+            st.lookFacing = Gaze::ChooseFacing(st.lookFacing, duties, GetConfig().bots.lookAwayMarginDeg);
 
         // A move turns the bot along its spline: the facing is applied once it stands.
         st.faceOwed = st.lookWindow && st.mode != MechanicBotMode::Escape;

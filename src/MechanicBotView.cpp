@@ -359,6 +359,9 @@ namespace BossMechanics
                         case Kind::Hide:
                             HideKind(m, extra);
                             break;
+                        case Kind::Gaze:
+                            GazeKind(m);
+                            break;
                         default:
                             break;
                     }
@@ -872,6 +875,13 @@ namespace BossMechanics
 
             void StackOrSoak(ActiveMechanic const& m, std::vector<Solver::Hazard>& extra)
             {
+                // Scarlet Monastery F2: the `to` end of a line that backs off is neither a claimer nor an avoider of
+                // it: it walks back along the line and holds (BackOffEnd).
+                if (BacksOff(m) && m.to->unit == _self)
+                {
+                    BackOffEnd(m);
+                    return;
+                }
                 std::vector<ObjectGuid> const& eligible = Eligible(m);
                 if (!Has(eligible, _self))
                     return;
@@ -903,7 +913,7 @@ namespace BossMechanics
                 {
                     uint8 const rank = static_cast<uint8>(std::min<std::ptrdiff_t>(mine - claimers.begin(), 255));
                     if (!onMe)
-                        AddRegion(m, shape, RegionPoses(m, shape, live, from), from, to);
+                        ClaimRegion(m, shape, live, from, to);
                     AddTask(m, BotTaskRole::Claimer, from, to, rank);
                     return;
                 }
@@ -937,6 +947,68 @@ namespace BossMechanics
                 AddTask(m, BotTaskRole::Avoider, from, to);
             }
 
+            // ---- Scarlet Monastery F2 (EndBacksOff, TankNearSource) ----
+
+            static bool BacksOff(ActiveMechanic const& m)
+            {
+                return m.endBackOffYd > 0.f && m.shape.type == ShapeType::Line && m.to && m.to->IsUnit();
+            }
+
+            bool SelfIsTank(ActiveMechanic const& m) const
+            {
+                return HasRole(_reg.RoleOf(m, _bot), Role::Tank);
+            }
+
+            // The `to` end's bot: a region of kBackOffSpotRadiusYd round its back-off spot (ViewRules::BackOffSpot:
+            // where it stands once that is endBackOffYd from the source, else endBackOffYd out along the line) over
+            // the judge window, and a Member task (it walks there by the window and holds; its reservation is the
+            // planned end the claimers measure their region to).
+            void BackOffEnd(ActiveMechanic const& m)
+            {
+                Milliseconds from{ 0 }, to{ 0 };
+                PlayerWindow(m, _now, _opt.postResolveHold, from, to);
+                Geo::Pose live;
+                _reg.EffectiveShape(m, live);
+                if (m.anchor.IsUnit())
+                    NoteMoving(ObjectAccessor::GetUnit(*_bot, m.anchor.unit));
+                Geo::Vec3 const spot = ViewRules::BackOffSpot({ live.x, live.y, live.z }, ToVec(_bot->GetPosition()),
+                    live.o, m.endBackOffYd);
+                Shape circle = Shape::Circle(ViewRules::kBackOffSpotRadiusYd);
+                circle.zTolerance = m.shape.zTolerance;
+                AddRegion(m, circle, { Geo::Pose{ spot.x, spot.y, spot.z, 0.f } }, from, to);
+                AddTask(m, BotTaskRole::Member, from, to);
+            }
+
+            // A claimer's region. A backed-off line: from the source to its end's planned spot
+            // (ViewRules::BeamRegionOf; the end walks back, so the live line is still short); TankNearSource: a tank
+            // claimer gets the first tankNearYd of the line. Anything else: the shape at RegionPoses, as before.
+            void ClaimRegion(ActiveMechanic const& m, Shape const& shape, Geo::Pose const& live, Milliseconds from,
+                Milliseconds to)
+            {
+                bool const tank = m.tankNearYd > 0.f && SelfIsTank(m);
+                if (!BacksOff(m) && !tank)
+                {
+                    AddRegion(m, shape, RegionPoses(m, shape, live, from), from, to);
+                    return;
+                }
+                Geo::Vec3 const source{ live.x, live.y, live.z };
+                Geo::Vec3 end{ live.x + std::cos(live.o) * shape.length, live.y + std::sin(live.o) * shape.length,
+                    live.z };
+                if (BacksOff(m))
+                {
+                    // The end's planned spot (its reservation: the back-off spot), else where it stands; it walks back
+                    // to at least endBackOffYd, so measure to there at once.
+                    if (std::optional<ViewRules::Spot> spot = SpotOf(m, m.to->unit))
+                        end = spot->p;
+                    NoteMoving(ObjectAccessor::GetUnit(*_bot, m.to->unit));
+                    end = ViewRules::BackOffSpot(source, end, live.o, m.endBackOffYd);
+                }
+                if (m.anchor.IsUnit())
+                    NoteMoving(ObjectAccessor::GetUnit(*_bot, m.anchor.unit));
+                ViewRules::BeamRegion const r = ViewRules::BeamRegionOf(shape, source, end, live.o, tank, m.tankNearYd);
+                AddRegion(m, r.shape, { r.pose }, from, to);
+            }
+
             // A Soak's claimants: the eligible players on the map, with their stacks, eta and live claim.
             std::vector<Assign::Claimant> ClaimantsOf(ActiveMechanic const& m, std::vector<ObjectGuid> const& eligible,
                 Shape const& shape, Geo::Pose const& live)
@@ -953,6 +1025,8 @@ namespace BossMechanics
                     c.bot = IsBot(g);
                     c.insideNow = _reg.ContainsPoint(m, p->GetPosition(), g);
                     c.stacks = m.ordering.auraSpell ? p->GetAuraCount(m.ordering.auraSpell) : 0;
+                    // Scarlet Monastery F7: a player of the rule's last role claims only what the others leave.
+                    c.last = m.ordering.roleLast != Role::None && HasRole(m.ordering.roleLast, _reg.RoleOf(m, p));
                     float const sd = Solver::SignedDistance(shape, live, ToVec(p->GetPosition()));
                     float const way = std::isfinite(sd) ? std::max(0.f, sd + margin) : 0.f;
                     c.etaMs = ViewRules::SoakEtaMs(_now, way, p->GetSpeed(MOVE_RUN), _opt.params.startDelay);
@@ -1219,6 +1293,34 @@ namespace BossMechanics
                 }
             }
 
+            // ---- Gaze (Scarlet Monastery F13, MechanicGaze.h) ----
+            // An eligible bot within the range (+ Gaze::kReachSlackYd: it may walk in) owes a look-away over the look
+            // window (Gaze::LookWindow): a duty for BotFacing::UpdateLookAway (the source's bearing kept out of its
+            // front arc) and a Looker task, which holds its spot over that window (a walk turns the bot along its
+            // path). No hazard, no region, nothing on the board.
+            void GazeKind(ActiveMechanic const& m)
+            {
+                if (m.resolved || !m.gaze || !Has(Eligible(m), _self))
+                    return;
+                Geo::Pose const src = _reg.AnchorPose(m);
+                float const dist = Geo::Dist2d(src.x, src.y, _bot->GetPositionX(), _bot->GetPositionY());
+                if (!Gaze::InLookRange(dist, m.gaze->spec.rangeYd))
+                    return;
+                Milliseconds const resolveAt = m.detonateRequested ? std::min(_now, m.resolveAt) : m.resolveAt;
+                Gaze::Window const w = Gaze::LookWindow(m.createdAt, resolveAt, m.gaze->spec.lead);
+                GazeDuty d;
+                d.mechanicId = m.id;
+                d.source = m.anchor.IsUnit() ? m.anchor.unit : ObjectGuid::Empty;
+                d.sourcePos = { src.x, src.y, src.z };
+                d.arcDeg = m.gaze->spec.arcDeg;
+                d.from = w.from;
+                d.to = w.to;
+                _info.gazes.push_back(d);
+                AddTask(m, BotTaskRole::Looker, w.from, w.to);
+                if (m.anchor.IsUnit())
+                    NoteMoving(ObjectAccessor::GetUnit(*_bot, m.anchor.unit));
+            }
+
             Registry const& _reg;
             Player const* _bot;
             ObjectGuid const _self;
@@ -1253,6 +1355,7 @@ namespace BossMechanics
             info.selfTriggerAuras.clear();
             info.tankFrontals.clear();
             info.parks.clear();
+            info.gazes.clear();
             info.reservationRevision = reg.ReservationRevision();
             if (!bot)
                 return;
@@ -1466,6 +1569,7 @@ namespace BossMechanics
             case BotTaskRole::Tank: return "tank";
             case BotTaskRole::Parker: return "parker";
             case BotTaskRole::Jumper: return "jumper";
+            case BotTaskRole::Looker: return "looker";
         }
         return "?";
     }
@@ -1490,7 +1594,7 @@ namespace BossMechanics
         for (BotTask const& t : info.tasks)
         {
             if (t.role == BotTaskRole::Tank || t.role == BotTaskRole::Parker || t.role == BotTaskRole::Frozen
-                || t.role == BotTaskRole::Jumper)
+                || t.role == BotTaskRole::Jumper || t.role == BotTaskRole::Looker)
                 continue;
             // A task ending now is pruned by this same update (STAGE-M3-R-REPORT n-13).
             if (t.to <= now || !reg.Find(t.mechanicId))

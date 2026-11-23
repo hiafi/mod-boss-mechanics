@@ -34,6 +34,7 @@ No core edits: everything is data (dbc-tools), spell/creature scripts and existi
 | `src/MechanicFallibility.h` | Pure seeded bot mistakes: reaction delay, late and wrong-side picks |
 | `src/MechanicJump.h` | Pure Jump kind rules (Stratholme X3): the hop's timing and speeds, who counts as in the air |
 | `src/MechanicHide.h` | Pure Hide kind rules (Blackrock Depths WP-HK): spots behind blockers, the spread, the shadow |
+| `src/MechanicGaze.h` | Pure Gaze kind rules (Scarlet Monastery SM-BM): who faces the source, the look-away facing |
 | `src/MechanicFront.h` | Pure rolling fronts (Blackrock Spire WP-RF): specs, gaps, wall segments, placement, markers |
 | `src/MechanicBotView.h/.cpp` | Registry -> solver input and tasks for one bot; reservations; navmesh, sight oracle |
 | `src/MechanicViewRules.h` | Pure player-kind rules of the view: planned spots, margins, separation (host-tested) |
@@ -101,6 +102,8 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 | `HoldStill(owner, players, window, warn)`, `Spot(owner, spots, warn, r)` | Movement / position checks |
 | `Jump(owner, spec, warn)`, `Jump(owner, at, r, warn)` | A sweep that hits who is on the ground (Stratholme X3) |
 | `Hide(owner, spec, warn)` | Hits who the source sees; bots hide behind blockers (Blackrock Depths WP-HK) |
+| `Gaze(owner, spec, warn)` | Hits who faces the source; bots turn away ([Gaze](#gaze-scarlet-monastery-sm-bm)) |
+| `HoldTankFacing(owner, source, ms)`, `ReleaseTankFacing` | No tank re-facing of `source` meanwhile (SM-BM) |
 | `ConeFront`, `LineFront`, `FrontSafe` | Rolling fronts + tank slot ([below](#rolling-fronts-blackrock-spire-wp-rf)) |
 | `Cancel`, `Detonate`, `Contains`, `ContainsPoint`, `Failures`, `OnFailure` | Handles, ledger, failure callback |
 | `Read(map)` | Bots: the map's registry (`nullptr` when none) |
@@ -112,7 +115,7 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `WeakenedOncePerPlayer()`, `Persistent(duration, tick)`, `Projectile(speed)`, `ProjectileUnit(unit)`,
 `OutAndBack(pause)`, `Lifetime(ms)` (mines), `Cap(group, n)`, `ExcludeSourceEnd(yd)`, `FacingOffset(deg)`, `Rear()`,
 `AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`,
-`MissedSoak(mode)`, `Count(n)`,
+`MissedSoak(mode)`, `Count(n)`, `EndBacksOff(yd)`, `TankNearSource(yd)`, `HoldTankFacing(unit)`,
 `Targets(set)`, `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`,
 `NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `SparesPets()`, `OnHit(fn)`, `OnResolve(fn)`.
 
@@ -120,7 +123,7 @@ M3 options:
 
 | Option | Fits | What |
 | --- | --- | --- |
-| `Persistent(duration, tick)` | + Stack, Soak | judged at every tick (tick 0: once, then it lingers) |
+| `Persistent(duration, tick)` | + Stack, Soak, Spread, RunOut | judged at every tick (tick 0: once, then it lingers) |
 | `Cluster(n)` | circle Stack | no anchor: each eligible player needs `n` others within the radius (Assembly) |
 | `Radius(yd)` | Bait | the landing circle (Fenrus 6 yd); default: only the picked player |
 | `Tolerance(yd)` | HoldStill | movement allowed in the window (default 0.3 yd; Alexei 1 yd) |
@@ -130,9 +133,15 @@ M3 options:
 | `Within(bounds)` | any kind but a decoy | hard bounds on the fighting bots' planned spots (Spot bounds); bots only |
 | `Lethal()` | Zone/Frontal, no mine or decoy | bots never plan a way across it ([below](#lethal-stratholme-x4)) |
 | `SparesPets()` | after `Lethal()` | its owner's strike spares pets: a pet owner's view adds no pet margin; bots only |
+| `EndBacksOff(yd)` | Line Stack/Soak, unit `to` | its `to` bot walks back to `yd` from the source (SM-BM) |
+| `TankNearSource(yd)` | Line Stack/Soak | a tank claimer soaks the first `yd` of the line; bots only (SM-BM) |
+| `HoldTankFacing(unit)` | any but a decoy | no tank re-facing of `unit` (the owner) while it lives; bots only |
 | `MissedSoak(mode)` | Soak | when a short pass posts `MissedSoak`: `EveryPass` (default), `OnChange`, `Never` |
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
+`Ordering::roleLast` (Soak, SM-BM): players of that role claim only what the others leave
+([Scarlet Monastery additions](#scarlet-monastery-additions-sm-bm)). A Spread or RunOut with `Persistent` judges every
+carrier's circle at every tick and keeps the rings on their carriers (each tick one `onResolve`).
 
 **Decoys** (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane). `Decoy()` fits a Zone or Frontal that
 is not a mine (`Judge::DecoyFits`) and must be set in the registering statement. The marker is drawn exactly like a
@@ -205,6 +214,7 @@ prints a fresh string to paste after a gear or stat change. The pure rules are
 | Spot | none | disc on each spot | OffSpot |
 | Jump | as Zone on the players inside who are on the ground (players only) | the shape's pieces | Hit |
 | Hide | as Zone on the players in range the source sees at its resolve (players only, line of sight) | none | Hit |
+| Gaze | as Zone on the players in range who face the source at its resolve (players only, their facing) | none | Hit |
 
 (*) `From(Owner)`: the ring of r sits on the owner (the hitbox) and a small ring
 (`Rules::kRunOutTargetMarkerRadiusYd`, 1.5 yd, same color) follows the target, so the target knows it must run.
@@ -436,7 +446,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
             |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
-            |blackrock-depths-shapes|blackrock-depths-shapes-2> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes|scarlet-monastery-shapes-2>
+            [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -458,10 +469,11 @@ are never touched. Invite the bots you test with.
 | projectile | length | `width=` (3), `speed=` (10), `back=0/1`, `pause=` (0), `exclude=` (0) |
 | mine | radius | `grace=` (500), `cap=` (0 = none), `group=` (0), `life=` (0 = until set off or cleared) |
 | lanes | lane width | `count=` (3), `gap=` (6), `axis=x/y`, `frame=` (40x40), `safe=1`, `cross=1`, `burn=` (6000) |
-| spread | radius | `count=` (0 = everyone), `self=<spell>:<min>` |
-| runout | radius | target = selected unit; `from=owner` measures from the test owner; `count=`, `self=` |
+| spread | radius | `count=` (0 = everyone), `self=<spell>:<min>`, `persist=` (lasting, SM-BM) |
+| runout | radius | target = selected unit; `from=owner` measures from the test owner; `count=`, `self=`, `persist=` |
 | stack | radius | anchored on the selected unit (else the point); `cluster=`, `shape=line`, `persist=` |
-| soak | radius | `need=` (2; 0 = nobody takes it), `order=`, `shape=line`, `persist=` |
+| soak | radius | `need=` (2; 0 = nobody takes it), `order=`, `shape=line`, `persist=`; SM-BM: `backoff=`, |
+| | | `tanknear=`, `last=`, `exempt=target` |
 | frontal | length | on the selected creature, its victim exempt; `angle=` (90), `rear=1`, `line=1` `width=` (4) |
 | bait | others' range | `rule=fewest\|farthest` (fewest), `aura=` (205000), `r=` (6, the landing circle), `order=` |
 | | | the baiter gets no Weakened, so `rule=fewest` needs `aura=` + `rider=` of a rotation debuff (205008) |
@@ -472,6 +484,8 @@ are never touched. Invite the bots you test with.
 | hide | range | `blockers=` (3, 0-8) game objects `apart=` (8) yd round the selected creature (the source), |
 | | | `r=` (2.5) footprint, `display=` (3711; fallback 5736), `go=` (148503), `behind=` (3), `share=` (2), |
 | | | `eye=` (its collision height), `linger=` (3000 ms after the resolve); damage keys as a circle |
+| gaze | range | from the selected creature (else the test owner): `arc=` (180, 1-360), `lead=` (0 = the whole |
+| | | warning); damage keys as a circle; hits who faces it at the end |
 
 A mine arms after `<ms>`. `cap=n` keeps at most n live mines per `group=` (`Cap(group, n)`): the oldest one of that
 group fizzles, so mine sets with different groups cap independently. `safe=1` fires every lane but one; `cross=1`
@@ -591,6 +605,41 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   unit, its length is the distance at registration; not with `length=` or `to=last`), and `at=target` lands a point
   where the selected unit stands as the repeat registers (a drill parses its steps at its start, so a plain point stays
   where a walking boss started).
+- Scarlet Monastery build (SM-BM; drill `scarlet-monastery-shapes` rows torment and glare build on these):
+  - `gaze <range> <ms> [arc=180] [lead=<ms>]`: a `Mechanic::Gaze` from the selected creature (else the test owner):
+    at the end of the warning every scope member within range who faces it is hit (damage keys as a circle, `rider=`
+    too); bots turn away over the look window ([Gaze](#gaze-scarlet-monastery-sm-bm)).
+  - On a beam `soak <width> <ms> shape=line to=member|target|me`: `backoff=<yd>` is `EndBacksOff` (the to= member's
+    bot walks back along the beam to that far from the source; the beam is made at least that long), `tanknear=<yd>`
+    is `TankNearSource` (a tank claimer soaks the first yd; also on a `shape=line` lane), and `exempt=target` leaves
+    the to= unit out of the soak (every other scope member eligible). Torment:
+    `soak 3 1500 shape=line to=member exempt=target need=4 persist=8000 tick=1000 backoff=10 tanknear=4`
+    (select the boss stand-in; `pick=` picks the member, a tank pick shows the back-off).
+  - `last=tank|healer|dps|nontank` (soak): `Ordering::roleLast`, that role claims only what the others leave; with or
+    without `order=`. The Vigil Flame: `soak 6 2000 anchor=member need=1 last=tank`.
+  - `holdfacing=1` (any shape): `HoldTankFacing` of the selected unit (else the test owner) on each shape made: its
+    bot tank does not walk round it to re-face it while the shape lives. Thorne's Sow: a `frontal` on the boss
+    stand-in first (the tank learns it), then `spot 3 5000 ring=5 holdfacing=1`.
+  - `persist=<ms>` `tick=<ms>` on spread and runout: a lasting carrier circle judged at every tick (the Blade window:
+    `spread 6 1000 persist=10000 tick=1000 dmg=0`).
+- Scarlet Monastery build (WP-G1 §3.9, drill `scarlet-monastery-shapes`): `pick=tank` picks the selected unit's victim
+  (none: anyone), so `soak ... to=member pick=tank backoff=10` shows the tank's back-off every time; `leash ... near=1`
+  fails each judged member while it stands closer than `yd` (the targeted tank that stayed on him); the drill-only step
+  `chase <yd> <ms> [home=1]` makes the selected creature step after its victim every 250 ms at 7 yd/s, from its melee
+  range in to its combat reaches + 0.5, never more than `yd` from where it started, and `home=1` puts it back at the
+  end (a rooted stand-in follows a tank's drag-out); and a drill's `marker <n>` remembers the member it marked as the
+  last pick, so a later `pick=same` lands on it (the Mark carrier).
+- Scarlet Monastery build (WP-G2 §3.9, drill `scarlet-monastery-shapes-2`): `along=target` turns a point's axes
+  (`shift=`, and a line's facing with its `offset=`) to the selected unit's own facing as the repeat registers, not
+  yours (Thorne's furrow: `spot 3 5000 ring=0 at=target along=target shift=5:0`); `past=<yd>` (line, with `reach=1`)
+  runs the frozen line that far past its to= unit, so the next `at=last` starts there (Crell's dash); `shift=` on a
+  fixed `to=` line (`fix=1` or `reach=1`) now moves its source before it is aimed, along your facing (a blade thrown at
+  a player from a point on Herod's ledge; before, it moved the frozen source along the aim; no drill combined them);
+  `leash ... anchor=self` judges each member against where it stood as the leash started (the tank that walked round
+  Thorne while his facing was held); the drill-only step `holdfacing <ms>` is `Mechanic::HoldTankFacing(the test owner,
+  the selected unit, ms)`; and a drill step's `repeat=` / `every=` now repeat it (the runner used to parse and drop
+  them, so `pass-eggs` laid one egg a cycle instead of 40), each repeat keeping the step's `tag=` (unlike `.mech test`,
+  whose repeats count up: a drill's tag names its mechanic).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -784,6 +833,45 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     25-27 gated, 23-24 reported (`kBrd2BarTags`, `kBrd2GroupTags`). The sweep runs `blackrock-depths-shapes-2:2`, one
     sweep for this drill alone: `mechanics_sweep.py run --programs blackrock-depths-shapes-2:2 --duration 120
     --iterations 5 --step 100 --jobs 6 --sweep blackrock-depths-shapes-2`.
+  - `scarlet-monastery-shapes` (Scarlet Monastery build §3.9, WP-G1 wave 1, F-1b live timings; 60 s, three cycles = 180
+    s, heroic numbers in `pct=`): cycle 0 Vishas's Torment (VI4: a 9.5 s beam Soak from the creature, 1.5 s to step in
+    and eight judged seconds, need 4, first on the tank, who backs off 10 yd, then on a non-tank, the tank soaking at
+    his end), Loksey's Mark twice (LK3: a non-tank carrier, Marked and the only one eligible for a 5 s Bait that sends
+    it 22 yd off the creature; then nine 5 yd markers 0-2 yd round it every 0.5 s, each landing 1.5 s later at 45% +
+    Weakened: one circle for the others, one at the same spot for the carrier); cycle 1 Ironspine (IR1: the rot under
+    him growing 7, 8, 9, 10 yd every 10 s; IR5: two 7 yd pools under players with each rot, lasting to the rot's end at
+    41.5 s (live 60 s and growing: no drill grammar grows a pool on a member's spot); IR6: a Glare every 6 s, 40 yd; the
+    creature chases the tank), Doan (DN3: three non-tanks carry an 8 yd burst, 5 s, to the edge of a 19 yd room, away
+    from the group; DN3a: a 3 yd fire pool 1 s after the last carrier's burst); cycle 2 Thalnos's crypt on a hard mode
+    pull (RH1 Galvar's banner from 5 s: a 10 yd zone at the creature's feet that only the tank sees, no damage, 3 s + 27
+    s, the creature chasing the tank; TH3 Flame Spike at 6 s and 21 s: a random carrier, tank included, walks a 4 yd
+    marker for 2 s to the edge of a 14 yd room (the crypt's area), away from the group and off the live pools; the
+    pillar 1.5 s after the landing, 45% + Weakened, the carrier included; then a 4 yd pool, 8% a second for 30 s). Tags
+    1 (Soak, group bar 5), 2 and 6 (tank only), 4, 5 and 13 (a random carrier) gated and also barred on the reference
+    members, 7-11 and 14 gated, 3 and 12 reported (`kSmBarTags`, `kSmGroupTags`, `kSmReferenceTags`). The live numbers
+    are mirrored by hand from the bosses' Logic headers (`*Logic.h` in mod-dungeon-bosses `ScarletMonastery/`): change
+    both together.
+    The sweep runs `scarlet-monastery-shapes:3`, one sweep for this drill alone, 180 s: `mechanics_sweep.py run
+    --programs scarlet-monastery-shapes:3 --duration 180 --iterations 5 --step 100 --jobs 6 --sweep
+    scarlet-monastery-shapes`.
+  - `scarlet-monastery-shapes-2` (Scarlet Monastery build §3.9, WP-G2 wave 2; 60 s, three cycles = 180 s, heroic
+    numbers in `pct=`, NAVMESH sizes): cycle 0 Thorne (GD1a: a 120 deg / 8 yd Prune every 10 s; GD1: three carriers
+    Marked, a 3 yd furrow Spot 5 yd ahead of the creature along its own facing, 5 s, `holdfacing 9000` from the Sow to
+    the cutting Prune and the tank judged against its own spot (4 yd); GD2: Holy Water 12 yd, 2.5 s; GD2a: 8 yd under
+    the creature that only the tank sees, 8 s, the creature chasing the tank; the second Sow's seeds bloom at once, 6
+    yd, 2 s: the step-out ring inside the hold), Halden (MA4: the 5-11 yd band round the creature, 8 s, while it walks
+    4 yd out and back); cycle 1 Whitemane (WM5: four flares 10 s apart, a 1-body 6 yd Soak on the next non-tank carrier,
+    the unmarked eligible, `last=tank`, a 6 yd circle judging the Marked (Seared) near it; the fourth leaves the tank
+    alone eligible, and the tank is leashed to the creature over the first three), Crell (AR7: the Blade's 6 yd
+    spread, 15 s, and two chains of five 3 yd dashes, 2 s then 1 s each, from the creature through four non-tanks and
+    the tank, 5 yd past each); cycle 2 Herod (HB1: the ledge band 13-40 yd round the pit's center 3 yd past the
+    creature, the 10 yd lanes out and home, six 4 x 32 yd blades thrown at players from the 19.3 yd lap at 12 yd/s;
+    HM3: two 4 x 10 yd beams from 3 yd off the pit's center, 30 deg every 1.5 s, 12 steps one way, the hard mode lap at
+    the flip (14 yd/s, five pairs of blades, 60%), 12 back, the creature chasing the tank). Tags 21-27 and 30-40 gated
+    (23, 25 and 31 tank only; 21, 26 and 30 a random carrier: also barred on the reference members), 29 (Soak, group
+    bar 2), 32 reported (`kSm2BarTags`, `kSm2GroupTags`, `kSm2ReferenceTags`). The sweep runs
+    `scarlet-monastery-shapes-2:3`, one sweep for this drill alone, 180 s: `mechanics_sweep.py run --programs
+    scarlet-monastery-shapes-2:3 --duration 180 --iterations 5 --step 100 --jobs 6 --sweep scarlet-monastery-shapes-2`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -951,7 +1039,8 @@ The view gives each bot its tasks (`BotTask`: mechanic, kind, role, window). The
   the tank (+- `FacingSlackDeg`, `SafetyMarginYd`), holds a group member's planned spot, the tank walks to the nearest
   ring point (every 15 degrees, radius within [both combat reaches + 1, melee range - 0.5]) where none does and whose
   spot and path are safe. During a warning it holds (above); a warning that starts while it walks stops the walk on
-  the spot. While a source is remembered, the lock blocks stock `tank face`.
+  the spot. While a source is remembered, the lock blocks stock `tank face`. A facing hold on the source
+  (`HoldTankFacing`, Scarlet Monastery SM-BM) skips the walk and stops one in progress, as a warning does.
 - **Tank parking** (`Park.Enable`): for a `Park` zone whose parked unit's victim is the bot, `Input::park` gets the
   unit's spot, its stop distance (combat reaches + 0.5) and chase trigger (its melee range) and `Park.DepthYd`; the
   solver moves the tank to where the chasing unit stops that deep inside the zone, and the tank holds there while the
@@ -1113,6 +1202,8 @@ solving one after another on the map thread never pick colliding spots (decision
 | Spot | listed | a region of r at its own spot |
 | Jump | eligible | nothing (not a hazard); a Jumper task: the brain hops for it ([Jump](#jump-stratholme-x3)) |
 | Hide | placed (eligible, in range) | a region at its spot; each live blocker a small hazard (Hide, below) |
+| Gaze | eligible, in range (+5 yd) | a look-away duty over the look window and a Looker task (Gaze, below) |
+| Line Soak/Stack, `EndBacksOff` | its `to` end | a region round its back-off spot, a Member task (SM-BM, below) |
 | Zone | anchored on the bot | carried shape (OnBot); a turning cone or line picks the facing nearest its victim |
 | | aimed at the bot (`to`) | carried shape (AimedAtBot, the registered length) |
 | | on another bot with a plan | one more pose at that bot's planned spot (a synthetic copy) |
@@ -1433,6 +1524,123 @@ drill row is `blackrock-depths-shapes`'s tag 16 (Bael'Gar BG4 heroic, cycle 0 at
 5 s cast, 95% fire, the blockers gone by 59.5 s; gated). The bot rule generalizes mod-playerbots' hand-made hides
 (`NaxxActions_Sapphiron.cpp`, Sapphiron's ice blocks; `ICCActions_SG.cpp`, Sindragosa's tombs): no code is taken
 from them.
+
+### Gaze (Scarlet Monastery SM-BM)
+
+Ironspine's heroic Glare (Scarlet Monastery GY IR6, build F13; shared doc "Look away", Deadmines addition 2): every
+6 s while the Eye is loose, a 2 s cast; anyone facing the Eye when it lands is held in its gaze (a 2 s stun).
+`Mechanic::Gaze(owner, spec, warn)` is that cast: at `now + warn` the resolve spell hits every eligible **player**
+within `spec.rangeYd` of `spec.source` (on the plane; the shape's `zTolerance`, default 10 yd, in height) whose front
+arc holds the source, with the Zone options (`Damage`, `TankDamage`, `School`, `Spell`, `Rider`, `Weakened`, `OnHit`,
+`OnResolve`, `Tag`, `Eligible`, `Within`, `ZTolerance`). Pets are never judged (they never turn away). No marker: the
+cast and the emote are the tell. `onResolve`'s `hits` are the players caught, its `cleared` the ones who looked away.
+`Mechanic::Contains(owner, h, player)` answers "in range and facing the source now"; `ContainsPoint` (no facing):
+"in range".
+
+```cpp
+// IR6 (heroic): the Eye's gaze, Ironspine the owner. The stun is the cost (no damage, no Weakened).
+BossMechanics::GazeSpec glare(eye);                         // the source; unset: the owner
+_glare = Mechanic::Gaze(me, glare.Range(40.f), 2000ms).OnHit([](Unit* u) { u->CastSpell(u, SPELL_GLARE_STUN, true); })
+    .Tag(IR6);
+```
+
+**The judge** (`Registry::StepGaze`, pure `Gaze::Faces` in `src/MechanicGaze.h`): at the resolve each eligible player
+in range is judged once by its server orientation (a human's last facing update; a bot's look-away turn): the source
+inside the front arc (`GazeSpec::Arc`, default 180 degrees: the front half, the client's own "in front" test; the edge
+counts as facing; a player within 0.5 yd of the source always faces it) is caught. `Arc(360)` catches everyone in
+range.
+
+**The bots** (`GazeKind` in the view, `BotFacing::UpdateLookAway`): an eligible bot within the range + 5 yd
+(`Gaze::kReachSlackYd`: it may walk in) owes a look-away over the look window, `[resolve - lead, resolve]`
+(`GazeSpec::Lead`; 0, the default, is the whole warning), widened by `SafetyMarginMs`. Its facing is the one nearest
+its victim that keeps the source out of the arc widened by `LookAway.MarginDeg` (`Gaze::ChooseFacing`): a melee bot
+whose boss stands clear of the Eye keeps facing and hitting the boss; one whose boss stands beside the Eye turns to the
+arc's edge and stops swinging for the window. Everything else is the carried-cone look-away (M3 decision §7.6): the
+face action turns the bot, the lock refuses a facing action, a facing cast or a swing at a target inside the arc
+(ranged stop casting on the Eye for the flash), and the waker breaks a cast that would turn the bot back. A Looker task
+holds the bot's spot over the window only (a walk turns a unit along its spline; it may still escape a hazard, facing
+along its path). A carried cone and a gaze at once: the gaze wins where they disagree. Several gazes: the facing that
+clears the most of them. Host check (`tests/sm_shapes_test.cpp`): 2,000 random bots, sources, arcs and victims; the
+chosen facing never faces the source, and keeps the victim whenever the victim is clear. `.mech test gaze`; the drill
+row is `scarlet-monastery-shapes` `glare` (G1). **Limits**: no line of sight (a wall between does not save you; use
+`Hide` for that); the judge reads the facing the server last got from a human client, so a player who turns with the
+mouse only on the client is judged at the facing of the last movement packet (WoW sends one on every turn while
+moving and on stop).
+
+### Scarlet Monastery additions (SM-BM)
+
+Bot-side rules for the Scarlet Monastery build's register (F2, F6, F7, F15). All additive: no existing option or
+default changed.
+
+- **`EndBacksOff(yd)`** (F2, Vishas's heroic Torment: an 8 s beam from Vishas to a random player, the whole group on
+  the line, the tank included). On a Line Stack/Soak whose `to` end is a unit (`Shapes::Line(Anchor(me),
+  Anchor(target), width)`), in the registering statement: the line is made at least `yd` long (hitbox and marker;
+  `Shapes::Line` measures the distance at registration). The `to` player's bot is never a claimer or an avoider of it:
+  it gets a region of 1.5 yd round its back-off spot (`ViewRules::BackOffSpot`: where it stands once that is `yd` from
+  the source on the plane, else `yd` from the source along the line) over the judge window and a Member task, so a
+  targeted tank at melee walks straight back 10 yd and holds (the soakers need the room); a ranged target already
+  past `yd` holds where it stands. The claimers' region runs from the source to that end's planned spot, less 1 yd
+  (`ViewRules::BeamRegionOf`), so nobody plans to stand past the tank. A human `to` end is not moved; the claimers then
+  measure to the back-off spot all the same (the hitbox reaches it).
+- **`TankNearSource(yd)`** (F2): a tank claimer's region is the first `yd` of the line from its source (the tank soaks
+  at the boss's end; the others fill the rest). The tank is the role provider's (the owner's victim).
+- **`Ordering::roleLast`** (F7, Whitemane's Vigil Flame: a 1-body Soak following its carrier, the tank last). Players
+  of that role claim only the slots the others cannot fill: `Assign::SoakClaimers` runs its first three steps (inside
+  now, sticky claims, bots in time) over the other players first, then over them, and only then step 4 (late bots,
+  best effort; the others first). So a late non-tank never takes the slot from a tank who can make it (an unshared
+  flame is lethal; STAGE-R-1-FW M-1). A last-role player standing
+  inside is not given a claim another player can take (it is an avoider and steps out); with nobody else eligible it
+  claims as before. Combine with `Eligible` (no Seared: `auraSpell` with `maxStacks = 0`; not the carrier: a
+  `carriers` set) and any aura `Order`.
+
+```cpp
+// VI4 Torment (heroic): everyone available but the target soaks, the target backs off when it is the tank.
+BossMechanics::Eligibility soakers;
+soakers.carriers = AvailableBut(target);                    // the script's own set (interrogated players left out)
+_torment = Mechanic::Soak(me, BossMechanics::Shapes::Line(BossMechanics::Anchor(me), BossMechanics::Anchor(target),
+    3.f), uint8(soakers.carriers.size()), 1500ms).Eligible(soakers).Persistent(8000ms, 1000ms).EndBacksOff(10.f)
+    .TankNearSource(4.f).MissedSoak(BossMechanics::MissedSoakMode::Never).Tag(VI4);
+// WM5 Vigil Flame: one body besides the carrier (who stands in it: keep it out of the count), never a Seared
+// player, the tank only when nobody else can.
+BossMechanics::Ordering tankLast;
+tankLast.roleLast = BossMechanics::Role::Tank;
+BossMechanics::Eligibility flame;
+flame.carriers = EveryoneBut(carrier);                     // the script's own set
+flame.auraSpell = SPELL_SEARED;
+flame.maxStacks = 0;
+Mechanic::Soak(me, carrier, 6.f, 1, 2000ms).Eligible(flame).Order(tankLast).Tag(WM5);
+```
+
+- **`HoldTankFacing(unit)`** (F6, Thorne's Sow and Prune, library L41: the Sow carriers plant in the furrow inside his
+  Prune cone on purpose). On any kind but a decoy: while it is active the bot tank of `unit` (nullptr: the owner) never
+  walks round it to re-face it, though a group member's planned spot (a Spot in the remembered frontal) asks for it;
+  a re-facing walk in progress stops on the spot (`refacingStops`). `Mechanic::HoldTankFacing(owner, source, ms)` holds
+  without a mechanic (0 ms: until `ReleaseTankFacing(owner, source)` or the encounter ends): from the Sow to the Prune
+  that cuts the seedlings, say. Escapes (Holy Water), parking and drag-out (blessed ground) still move the tank; the
+  stock `tank face` stays blocked while the source is remembered, so nothing else turns the boss. `.mech bots` counts
+  the skipped checks (`held`).
+
+```cpp
+// GD1 Sow: the carriers' furrow spots; the tank keeps Thorne facing the furrow meanwhile.
+_sow = Mechanic::Spot(me, furrowSpots, 5000ms, 3.f).HoldTankFacing().Tag(GD1);
+Mechanic::HoldTankFacing(me, me, 9000ms);                   // or: until the Prune that cuts them
+```
+
+- **`Persistent` on Spread and RunOut** (F15, Crell's Blade window: everyone 6 yd apart for about 10 s). Every
+  carrier's circle is judged at every tick from the resolve to `until` (tick 0: once, then the rings linger), each tick
+  one `onResolve` (pass = the tick; pass ids `Judge::CarrierPass(tick, carrier)`), the rings kept on their carriers.
+  Weakened per hit, or `WeakenedOncePerPlayer`; no damage keys make it telegraph only. The bots read the judge window
+  `[resolve, until]` (an Interval): every carrier keeps the others out of its circle and holds (a task hold) for the
+  whole window, the others plan against each carrier's circle at its reservation; so a lasting spread also pins the
+  melee where they stand (they leave it only to dodge a hazard).
+
+```cpp
+// AR7 the Blade window: a lasting 6 yd spread for the dash chain's 10 s (telegraph only; the dashes hit).
+_bladeWindow = Mechanic::Spread(me, 6.f, 1000ms).Persistent(10000ms, 1000ms).Tag(AR7);
+```
+
+- **F5** (Loksey's Mark trail): no new option. The trail composes from a `Bait` and per-marker `Circle` Zones; a trail
+  option is built only if G1's `mark-trail` drill row fails its bar (§7 #6 A).
 
 ### Rolling fronts (Blackrock Spire WP-RF)
 
@@ -1884,10 +2092,10 @@ earlier than the bare margin would allow.
 - **Freeze**: blocked: every movement action (ours too), movement spells, items whose spell moves the caster.
   Allowed: every cast, auto-attack, facing.
 - **Any mode, tank facing** (a remembered Frontal source): stock `tank face` (`TankFaceAction`) is blocked.
-- **Any mode, look-away window open**: blocked: `set facing`, `CastFacingUnitAction`, a cast with
-  `SPELL_FACING_FLAG_INFRONT` or on a hostile target outside `CAST_ANGLE_IN_FRONT` of the chosen facing (rework
-  actions such as `DkFacingCastAction` turn the bot themselves), attack-only actions on a target outside it. Heals on
-  an ally behind the bot stay allowed.
+- **Any mode, look-away window open** (a carried cone or line, or a gaze, SM-BM): blocked: `set facing`,
+  `CastFacingUnitAction`, a cast with `SPELL_FACING_FLAG_INFRONT` or on a hostile target outside `CAST_ANGLE_IN_FRONT`
+  of the chosen facing (rework actions such as `DkFacingCastAction` turn the bot themselves), attack-only actions on a
+  target outside it. Heals on an ally behind the bot stay allowed.
 
 Facing audit (M3): every playerbots and mod-dungeon-clear path that turns the bot without moving it, and what the
 look-away lock does with it, is listed in the M3 WP-C report. In short: generic turners (`set facing`,

@@ -422,6 +422,63 @@ namespace
             CHECK(Lookup(t, k).health.tank == 4110);
         }
     }
+
+    // The shipped conf rows with the Scarlet Monastery normal rows (REF, 2026-11-20: 35 and 40 measured on top of the
+    // BRD rows): the four wings' bosses (levels 32, 34, 35, 37, 40) read their own level, 32, 34 and 37 interpolate
+    // between rows 20, 35 and 40, and the 189h:60 pin sends heroic to the 60h row (normal is unpinned).
+    void TestScarletMonasteryNormalRows()
+    {
+        std::string err;
+        Table t;
+        CHECK(ParseTable("20:1300:1290 35:2038:2072 40:2278:2307 52:3032:3126 53:3182:3266 55:3362:3629 "
+                         "56:3456:3727 60:3670:3710 60h:4120:4110", t, err));
+        MapLevels pins;
+        CHECK(ParseMapLevels("36:20 36h:60 229:60 229h:60 230h:60 189h:60", pins, err));
+
+        struct Row { std::uint8_t level; std::uint32_t nonTank; std::uint32_t tank; };
+        for (Row const& row : { Row{ 35, 2038, 2072 }, Row{ 40, 2278, 2307 }, Row{ 20, 1300, 1290 },
+                                Row{ 52, 3032, 3126 } })
+        {
+            ContentInputs sm;
+            sm.hasMap = true;
+            sm.mapId = 189;
+            sm.ownerLevel = row.level;
+            sm.heroic = false;
+            ContentKey const k = ResolveContentKey(sm, pins);
+            CHECK(k.level == row.level && !k.heroic);
+            ReferenceHealth const h = Lookup(t, k).health;
+            CHECK(h.nonTank == row.nonTank);
+            CHECK(h.tank == row.tank);
+        }
+        // Levels 32, 34 and 37 have no row: between the neighbors, rising with the level, and on the line between
+        // rows 20 and 35 (32, 34) or 35 and 40 (37) to within a point.
+        ReferenceHealth const h32 = Lookup(t, Key(32)).health;
+        ReferenceHealth const h34 = Lookup(t, Key(34)).health;
+        ReferenceHealth const h37 = Lookup(t, Key(37)).health;
+        CHECK(h32.nonTank > 1300 && h32.nonTank < h34.nonTank && h34.nonTank < 2038 && h37.nonTank > 2038);
+        CHECK(h37.nonTank < 2278);
+        CHECK(h32.tank > 1290 && h32.tank < h34.tank && h34.tank < 2072 && h37.tank > 2072 && h37.tank < 2307);
+        // 20 -> 35 is 738 over 15 levels (non-tank): 32 = 1300 + 12 * 49.2 = 1890.4, 34 = 1300 + 14 * 49.2 = 1988.8;
+        // 35 -> 40 is 240 over 5: 37 = 2038 + 2 * 48 = 2134.
+        CHECK(h32.nonTank >= 1890 && h32.nonTank <= 1891);
+        CHECK(h34.nonTank >= 1988 && h34.nonTank <= 1989);
+        CHECK(h37.nonTank >= 2133 && h37.nonTank <= 2135);
+        // The BRD rows are untouched by the new ones: 52 and up read the same numbers as before.
+        CHECK(Lookup(t, Key(56)).health.nonTank == 3456);
+        // Heroic Scarlet Monastery: the pin reads the 60h row at any owner level.
+        for (std::uint8_t owner : { std::uint8_t(32), std::uint8_t(40), std::uint8_t(60) })
+        {
+            ContentInputs sm;
+            sm.hasMap = true;
+            sm.mapId = 189;
+            sm.ownerLevel = owner;
+            sm.heroic = true;
+            ContentKey const k = ResolveContentKey(sm, pins);
+            CHECK(k.level == 60 && k.heroic);
+            CHECK(Lookup(t, k).health.nonTank == 4120);
+            CHECK(Lookup(t, k).health.tank == 4110);
+        }
+    }
 }
 
 int main()
@@ -436,5 +493,6 @@ int main()
     TestMapLevelsPerDifficulty();
     TestRefFlat();
     TestBrdNormalRows();
+    TestScarletMonasteryNormalRows();
     return Report("ref_health_test");
 }

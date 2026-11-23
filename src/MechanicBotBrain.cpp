@@ -25,6 +25,7 @@
 #include "MechanicLockRules.h"
 #include "MechanicRegistry.h"
 #include "MechanicRoute.h"
+#include "MechanicViewRules.h"
 #include "MotionMaster.h"
 #include "MoveSpline.h"
 #include "ObjectAccessor.h"
@@ -494,7 +495,8 @@ namespace BossMechanics
 
         // The bot holds its spot for its tasks until this (0 = no task hold): every live task but Avoider (it only
         // keeps out of other players' circles; Watch polices its motion), Frozen (the Freeze mode) and Jumper (it hops
-        // where it stands, StepJump); and the parking hold.
+        // where it stands, StepJump); a Looker (Scarlet Monastery F13) only inside its look window (a walk turns the
+        // bot along its path); and the parking hold.
         Milliseconds TaskHoldUntil(MechanicBotState const& st, Milliseconds now, std::vector<uint32>* ids = nullptr)
         {
             Milliseconds const margin = st.input.params.marginMs;
@@ -503,6 +505,8 @@ namespace BossMechanics
             {
                 if (t.role == BotTaskRole::Avoider || t.role == BotTaskRole::Frozen || t.role == BotTaskRole::Jumper
                     || t.to + margin < now)
+                    continue;
+                if (t.role == BotTaskRole::Looker && !Gaze::LookOwedAt({ t.from, t.to }, now, margin))
                     continue;
                 until = std::max(until, t.to + margin);
                 if (ids)
@@ -1223,9 +1227,20 @@ namespace BossMechanics
             return true;
         }
 
+        // Scarlet Monastery F6: any remembered source held now (a re-facing walk in progress stops).
+        bool RefacingHeld(Registry const& reg, MechanicBotState const& st, Milliseconds now)
+        {
+            for (MechanicBotState::FrontalSource const& f : st.frontalSources)
+                if (reg.TankFacingHeld(f.source, now))
+                    return true;
+            return false;
+        }
+
         // Tank facing between warnings (§3.7, decision §7.5): once a source has cast a tank-exempt Frontal this fight,
         // a cone that would now hold a group member makes the tank walk round the source to a clear ring point.
-        bool StepTankFacing(Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
+        // Scarlet Monastery F6: a source held by a facing hold (Registry::TankFacingHeld) is never walked round.
+        bool StepTankFacing(Registry const& reg, Player* bot, MechanicBotState& st, Milliseconds now,
+            BotConfig const& cfg)
         {
             if (!cfg.tankFacingEnable || st.frontalSources.empty() || st.tankWarning)
                 return false;
@@ -1234,6 +1249,11 @@ namespace BossMechanics
             st.lastTankCheckAt = now;
             for (MechanicBotState::FrontalSource const& f : st.frontalSources)
             {
+                if (!ViewRules::RefaceAllowed(st.tankWarning, reg.TankFacingHeld(f.source, now)))
+                {
+                    ++st.counters.tankFacingHeld;
+                    continue;
+                }
                 Creature const* source = ObjectAccessor::GetCreature(*bot, f.source);
                 if (!source || !BotRole::FrontalHitsGroup(bot, source, f, st.input.bot, cfg.facingSlackDeg))
                     continue;
@@ -1550,7 +1570,7 @@ namespace BossMechanics
                 }
             }
             st.mode = MechanicBotMode::Watch;
-            if (StepTankFacing(bot, st, now, cfg))
+            if (StepTankFacing(reg, bot, st, now, cfg))
                 return;
             if (!released && !walkIn && StepChaseRecovery(reg, bot, st, now, cfg, ctx))
                 return;
@@ -2378,6 +2398,21 @@ namespace BossMechanics
         // A hop moves the bot, which stops a cast: a cast must end before the next one starts (X3).
         st.leaveBy = std::min(LeaveByAll(in), st.nextHopAt);
 
+        // Scarlet Monastery F6: a facing hold that starts while the tank walks round its source stops the walk too.
+        if (st.refacing && st.mode == MechanicBotMode::Escape && !st.tankWarning && RefacingHeld(*reg, st, now))
+        {
+            std::vector<uint32> ids;
+            Milliseconds const until = std::max(TaskHoldUntil(st, now, &ids), now + kMinMotionHold);
+            HoldForTasks(st, now, until, std::move(ids));
+            st.refacing = false;
+            ++st.counters.refacingStops;
+            if (cfg.debug)
+                LOG_INFO(kLog, "Bot {}: a facing hold started, the re-facing walk stops here", bot->GetName());
+            BotFacing::UpdateLookAway(bot, st, now);
+            PublishLookAway(*reg, bot, st, now);
+            BreakMoverAuras(bot, st, cfg);
+            return;
+        }
         // Decision §7.5 (STAGE-M3-R-REPORT M-2): a Frontal warning started while the tank walks round its source to
         // turn it: stop on the spot and hold, so the boss does not turn during the warning. The hold action stops the
         // spline. A Zone the tank is not exempt from still makes it move (the hold re-checks its spot).

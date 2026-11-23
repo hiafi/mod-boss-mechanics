@@ -29,7 +29,8 @@ namespace BossMechanics
         HoldStill,
         Spot,
         Jump,       // Stratholme X3: a sweep at its resolve that spares whoever is in the air (MechanicJump.h)
-        Hide        // Blackrock Depths BD1: hits everyone in range the source can see at its resolve (MechanicHide.h)
+        Hide,       // Blackrock Depths BD1: hits everyone in range the source can see at its resolve (MechanicHide.h)
+        Gaze        // Scarlet Monastery F13: hits everyone in range facing the source at its resolve (MechanicGaze.h)
     };
 
     // Stratholme F-2b (R-2-A A-2): when a Soak with fewer bodies inside than its count posts its group MissedSoak
@@ -54,10 +55,11 @@ namespace BossMechanics
         // Decision §7.8: the circles of Spread, RunOut and Bait hit players only (bots cannot place pets); Zones and
         // Frontals still hit pets and guardians. A Jump (Stratholme X3) trips players only: a pet cannot jump. A Hide
         // (Blackrock Depths BD1) judges players only: bots cannot hide their pets, and a melee pet on the boss would
-        // take the wave every time.
+        // take the wave every time. A Gaze (Scarlet Monastery F13) judges a player's facing: pets never turn away.
         constexpr bool PlayersOnly(Kind k)
         {
-            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait || k == Kind::Jump || k == Kind::Hide;
+            return k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait || k == Kind::Jump || k == Kind::Hide
+                || k == Kind::Gaze;
         }
 
         // Decision §7.7: a shape kind anchored on a player never hits that player (Cookie's chowder cone; the apex
@@ -81,6 +83,7 @@ namespace BossMechanics
             bool decoy = false;             // the mechanic is a Decoy() (DecoyFits): it keeps nobody
             bool airborne = false;          // Jump: in the air at the resolve (Jump::Clear, MechanicJump.h)
             bool hidden = false;            // Hide: out of the source's line of sight at the resolve (MechanicHide.h)
+            bool lookedAway = false;        // Gaze: facing away from the source at the resolve (MechanicGaze.h)
             bool playersOnly = false;       // the mechanic's Eligibility::playersOnly: players only, any kind
         };
 
@@ -123,6 +126,8 @@ namespace BossMechanics
                 return false;   // Stratholme X3: the sweep passes under a player in the air
             if (k == Kind::Hide && c.hidden)
                 return false;   // Blackrock Depths BD1: out of the source's sight behind a blocker
+            if (k == Kind::Gaze && c.lookedAway)
+                return false;   // Scarlet Monastery F13: the source was outside the player's front arc
             return c.inside && c.eligible && !c.tankExempted && !c.hitThisPass;
         }
 
@@ -244,6 +249,16 @@ namespace BossMechanics
             pass = c.ticks++;
             c.nextTick = c.tick > Ms(0) ? c.nextTick + c.tick : forever;
             return true;
+        }
+
+        // Scarlet Monastery F15 (Persistent on a Spread or RunOut): every carrier's circle is its own resolve pass, and
+        // a lasting one runs those passes again at every tick. A pass id per (tick, carrier) keeps each carrier's
+        // circle hitting a player once per tick; a one-shot keeps its old ids (tick 0: the carrier's index).
+        constexpr std::uint32_t kMaxCarrierPasses = 1024;
+
+        constexpr std::uint32_t CarrierPass(std::uint32_t tick, std::uint32_t carrier)
+        {
+            return tick * kMaxCarrierPasses + (carrier % kMaxCarrierPasses);
         }
 
         // The lasting mechanic is over (pruned at the end of the tick).

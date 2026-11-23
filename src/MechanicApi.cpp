@@ -20,7 +20,7 @@ namespace
     bool IsDamageKind(Kind k)
     {
         return k == Kind::Zone || k == Kind::Frontal || k == Kind::Spread || k == Kind::RunOut || k == Kind::Bait
-            || k == Kind::Jump || k == Kind::Hide;
+            || k == Kind::Jump || k == Kind::Hide || k == Kind::Gaze;
     }
 
     bool IsShapeKind(Kind k)
@@ -31,6 +31,18 @@ namespace
     bool IsStackOrSoak(Kind k)
     {
         return k == Kind::Stack || k == Kind::Soak;
+    }
+
+    // Scarlet Monastery F15: Spread and RunOut take Persistent too (each carrier's circle judged at every tick).
+    bool IsCarrierKind(Kind k)
+    {
+        return k == Kind::Spread || k == Kind::RunOut;
+    }
+
+    // A Line Stack/Soak (Scarlet Monastery F2: EndBacksOff, TankNearSource).
+    bool IsLineGetIn(ActiveMechanic const* m)
+    {
+        return m && IsStackOrSoak(m->kind) && m->shape.type == ShapeType::Line;
     }
 
     // A shape's sizes are usable (donut: inner < outer).
@@ -276,8 +288,8 @@ namespace BossMechanics
     MechanicRef& MechanicRef::Persistent(Milliseconds duration, Milliseconds tick)
     {
         ActiveMechanic const* cur = Get();
-        bool const fits = cur && (IsShapeKind(cur->kind) || IsStackOrSoak(cur->kind)) && !cur->mine
-            && !cur->projectile;
+        bool const fits = cur && (IsShapeKind(cur->kind) || IsStackOrSoak(cur->kind) || IsCarrierKind(cur->kind))
+            && !cur->mine && !cur->projectile;
         if (ActiveMechanic* m = Edit("Persistent", fits))
         {
             Persist p;
@@ -416,6 +428,37 @@ namespace BossMechanics
         ActiveMechanic const* cur = Get();
         if (ActiveMechanic* m = Edit("Order", cur && (cur->kind == Kind::Soak || cur->kind == Kind::Bait)))
             m->ordering = ordering;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::EndBacksOff(float yd)
+    {
+        ActiveMechanic const* cur = Get();
+        bool const fits = IsLineGetIn(cur) && cur->to && cur->to->IsUnit() && std::isfinite(yd) && yd > 0.f;
+        if (ActiveMechanic* m = Edit("EndBacksOff", fits, true))
+        {
+            m->endBackOffYd = yd;
+            m->shape.length = std::max(m->shape.length, yd);    // the hitbox (and marker) reach the backed-off end
+        }
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::TankNearSource(float yd)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("TankNearSource", IsLineGetIn(cur) && std::isfinite(yd) && yd > 0.f))
+            m->tankNearYd = yd;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::HoldTankFacing(Unit const* source)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("HoldTankFacing", cur && !cur->decoy))
+        {
+            m->holdTankFacing = true;
+            m->holdFacingSource = source ? source->GetGUID() : ObjectGuid::Empty;
+        }
         return *this;
     }
 
@@ -1214,6 +1257,51 @@ namespace Mechanic
             m.hide->spec = std::move(s);
             m.telegraph = false;    // the blockers are the tell; the script draws its own cast and emote
         });
+    }
+
+    MechanicRef Gaze(Unit* owner, GazeSpec const& spec, Milliseconds warn)
+    {
+        if (!SizeOk(spec.rangeYd > 0.f, "Gaze", owner))
+            return MechanicRef();
+        GazeSpec s = spec;
+        if (s.rangeYd > BossMechanics::Gaze::kMaxRangeYd)
+        {
+            LOG_WARN(kLog, "Mechanic::Gaze from {}: range {:.1f} yd is past the resolve's search; clamped to {:.0f}",
+                owner ? owner->GetGUID().ToString() : "?", s.rangeYd, BossMechanics::Gaze::kMaxRangeYd);
+            s.rangeYd = BossMechanics::Gaze::kMaxRangeYd;
+        }
+        // No source given (a default point at the origin): the owner's gaze.
+        Position const& o = s.source.point;
+        if (!s.source.IsUnit() && o.GetPositionX() == 0.f && o.GetPositionY() == 0.f && o.GetPositionZ() == 0.f)
+            s.source = Anchor(owner);
+        s.arcDeg = BossMechanics::Gaze::ClampArcDeg(s.arcDeg);
+        s.lead = std::max(s.lead, Milliseconds(0));
+        Shape range = Shape::Circle(s.rangeYd);
+        range.zTolerance = BossMechanics::Gaze::kDefaultZToleranceYd;
+        Anchor const source = s.source;
+        return Register(owner, "Gaze", Kind::Gaze, source, range, warn, [&s](ActiveMechanic& m)
+        {
+            m.gaze.emplace();
+            m.gaze->spec = std::move(s);
+            m.telegraph = false;    // the cast and the emote are the tell; nothing on the floor to read
+        });
+    }
+
+    void HoldTankFacing(Unit* owner, Unit const* source, Milliseconds duration)
+    {
+        Map* map = MapOf(owner, "HoldTankFacing");
+        if (!map)
+            return;
+        ObjectGuid const src = source ? source->GetGUID() : owner->GetGUID();
+        Milliseconds const until = duration > Milliseconds(0)
+            ? GameTime::GetGameTimeMS() + duration : Registry::kForever;
+        Registry::GetOrCreate(map).HoldTankFacing(owner->GetGUID(), src, until);
+    }
+
+    void ReleaseTankFacing(Unit* owner, Unit const* source)
+    {
+        if (Registry* reg = RegistryOf(owner))
+            reg->ReleaseTankFacing(owner->GetGUID(), source ? source->GetGUID() : owner->GetGUID());
     }
 
     void Cancel(Unit* owner, MechanicHandle h)

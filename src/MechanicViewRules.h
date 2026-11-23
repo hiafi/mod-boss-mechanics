@@ -333,6 +333,59 @@ namespace BossMechanics::ViewRules
         return false;
     }
 
+    // ---- Scarlet Monastery SM-BM ----
+
+    // F6 (MechanicRef::HoldTankFacing, Mechanic::HoldTankFacing): the tank walks round a remembered Frontal source to
+    // re-face it only between warnings (a warning holds it, decision §7.5) and while no hold names the source.
+    inline bool RefaceAllowed(bool warning, bool held)
+    {
+        return !warning && !held;
+    }
+
+    // F2 (MechanicRef::EndBacksOff): the `to` end's bot holds a circle of this round its back-off spot.
+    constexpr float kBackOffSpotRadiusYd = 1.5f;
+    // F2: the claimers' region of a backed-off line stops this short of the end's spot (the end's own place) and is
+    // never shorter than kMinBeamRegionYd.
+    constexpr float kBeamEndClearYd = 1.f;
+    constexpr float kMinBeamRegionYd = 2.f;
+
+    // The spot the `to` end's bot holds: where it stands when that is at least backOffYd from the source on the plane,
+    // else backOffYd from the source along the line (source to end; `lineFacing` when the end stands on the source).
+    inline Geo::Vec3 BackOffSpot(Geo::Vec3 const& source, Geo::Vec3 const& end, float lineFacing, float backOffYd)
+    {
+        float const d = Geo::Dist2d(source.x, source.y, end.x, end.y);
+        if (d >= backOffYd)
+            return end;
+        float const o = d > 0.01f ? std::atan2(end.y - source.y, end.x - source.x) : lineFacing;
+        return { source.x + std::cos(o) * backOffYd, source.y + std::sin(o) * backOffYd, end.z };
+    }
+
+    // The claimers' region of a backed-off line: from the source toward the end's spot (its planned spot when it has
+    // one), as long as the way there less kBeamEndClearYd (at least kMinBeamRegionYd, at most the hitbox's length);
+    // for a tank claimer with tankNearYd > 0 only the first tankNearYd of it (TankNearSource: the tank at the boss's
+    // end). `lineFacing` is used when the end stands on the source.
+    struct BeamRegion
+    {
+        Shape shape;
+        Geo::Pose pose;
+    };
+
+    inline BeamRegion BeamRegionOf(Shape const& line, Geo::Vec3 const& source, Geo::Vec3 const& endSpot,
+        float lineFacing, bool tank, float tankNearYd)
+    {
+        BeamRegion r;
+        float const d = Geo::Dist2d(source.x, source.y, endSpot.x, endSpot.y);
+        float const o = d > 0.01f ? std::atan2(endSpot.y - source.y, endSpot.x - source.x) : lineFacing;
+        float len = std::clamp(d - kBeamEndClearYd, kMinBeamRegionYd, std::max(kMinBeamRegionYd, line.length));
+        if (tank && tankNearYd > 0.f)
+            len = std::min(len, std::max(kMinBeamRegionYd, tankNearYd));
+        r.shape = line;
+        r.shape.length = len;
+        r.shape.excludeStart = std::min(line.excludeStart, std::max(0.f, len - 0.5f));
+        r.pose = { source.x, source.y, source.z, o };
+        return r;
+    }
+
     // HoldStill (§3.4): Freeze{resolveAt − marginMs, expireAt}. Several windows: the earliest one not over yet, merged
     // with any that overlaps it.
     inline void MergeFreeze(Solver::Freeze& f, Ms from, Ms to, Ms settle, Ms now)

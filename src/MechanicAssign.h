@@ -19,9 +19,11 @@ namespace BossMechanics::Assign
 {
     // One eligible player of a Soak. etaMs and deadlineMs share a time base (absolute GameTime ms: now + straight
     // distance / run speed + StartDelayMs; deadline = from − SafetyMarginMs). claimedSince: when the bot's current
-    // claim on this mechanic began (Reservation::since; 0 = no claim).
+    // claim on this mechanic began (Reservation::since; 0 = no claim). last: the player's role is the rule's last
+    // role (Ordering::roleLast, Scarlet Monastery F7: the tank takes the Vigil Flame only when nobody else can).
     struct Claimant { std::uint64_t guid = 0; bool bot = false; bool insideNow = false; std::uint32_t stacks = 0;
-                      std::int64_t etaMs = 0; std::int64_t claimedSince = 0; /* 0 = no claim */ };
+                      std::int64_t etaMs = 0; std::int64_t claimedSince = 0; /* 0 = no claim */
+                      bool last = false; };
     // count: bodies needed; ordered: rank by aura stacks (ascending or not); capStacks > 0: players at or above it
     // never claim.
     // keepSticky: a lasting soak whose window is already open; a sticky claim stays whatever its eta (the claimer
@@ -45,6 +47,11 @@ namespace BossMechanics::Assign
     // Players at or above capStacks never claim; count 0: nobody. Late bots fill leftover slots last (best effort).
     // Humans count only once they stand inside. The caller passes eligible players only (Registry::IsEligible), so a
     // claim of a player no longer listed is dropped. Returned in claim order, each guid once.
+    // Scarlet Monastery F7 (Ordering::roleLast): steps 1-3 run over the players who are not `last` first, then over
+    // the `last` ones for the slots left; step 4 (late bots) runs only after both tiers, the others first. So a
+    // last-role player claims only when the others cannot fill the count (no other eligible player, or none of them
+    // a bot that can come), and a late non-tank never outranks a last-role player who can make it; one standing
+    // inside still counts as a body (extra bodies never fail a Soak) but is not given a claim the others can take.
     inline std::vector<std::uint64_t> SoakClaimers(std::vector<Claimant> const& players, SoakRule const& rule)
     {
         std::vector<std::uint64_t> out;
@@ -65,11 +72,12 @@ namespace BossMechanics::Assign
         }
 
         std::vector<bool> taken(pool.size(), false);
+        bool lastTier = false;      // F7: the pass over the `last` players (after everyone else)
         auto pick = [&](auto&& want, auto&& less)
         {
             std::vector<std::size_t> idx;
             for (std::size_t i = 0; i < pool.size(); ++i)
-                if (!taken[i] && want(*pool[i]))
+                if (!taken[i] && pool[i]->last == lastTier && want(*pool[i]))
                     idx.push_back(i);
             std::sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) { return less(*pool[a], *pool[b]); });
             for (std::size_t i : idx)
@@ -101,17 +109,26 @@ namespace BossMechanics::Assign
             return a.claimedSince != b.claimedSince ? a.claimedSince < b.claimedSince : a.guid < b.guid;
         };
 
-        // 1. Inside now (humans and bots).
-        pick([](Claimant const& c) { return c.insideNow; }, byRuleNoEta);
-        // 2. Sticky bot claims that can still make it (oldest claim first).
-        pick([&](Claimant const& c)
+        for (bool const tier : { false, true })
         {
-            return c.bot && c.claimedSince != 0 && (rule.keepSticky || c.etaMs <= rule.deadlineMs);
-        }, bySince);
-        // 3. Bots that can make it.
-        pick([&](Claimant const& c) { return c.bot && c.etaMs <= rule.deadlineMs; }, byRule);
-        // 4. Late bots, best effort.
-        pick([](Claimant const& c) { return c.bot; }, byRule);
+            lastTier = tier;
+            // 1. Inside now (humans and bots).
+            pick([](Claimant const& c) { return c.insideNow; }, byRuleNoEta);
+            // 2. Sticky bot claims that can still make it (oldest claim first).
+            pick([&](Claimant const& c)
+            {
+                return c.bot && c.claimedSince != 0 && (rule.keepSticky || c.etaMs <= rule.deadlineMs);
+            }, bySince);
+            // 3. Bots that can make it.
+            pick([&](Claimant const& c) { return c.bot && c.etaMs <= rule.deadlineMs; }, byRule);
+        }
+        // 4. Late bots, best effort: only once nobody of either tier can make it (a late non-tank must not take the
+        // slot from a `last` player who can; STAGE-R-1-FW M-1), the others before the `last` ones.
+        for (bool const tier : { false, true })
+        {
+            lastTier = tier;
+            pick([](Claimant const& c) { return c.bot; }, byRule);
+        }
         return out;
     }
 

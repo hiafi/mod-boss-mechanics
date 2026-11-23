@@ -105,11 +105,11 @@ namespace BossMechanics::Drill
     };
 
     // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage (a bell soak's
-    // landing does: DamageStep), nor the drill-only steps marker, walk and leash.
+    // landing does: DamageStep), nor the drill-only steps marker, walk, leash, chase and holdfacing.
     inline bool DamageShape(std::string_view shape)
     {
         return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker"
-            && shape != "walk" && shape != "leash";
+            && shape != "walk" && shape != "leash" && shape != "chase" && shape != "holdfacing";
     }
 
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
@@ -755,7 +755,8 @@ namespace BossMechanics::Drill
     enum class LeashAnchor : std::uint8_t
     {
         Unit,           // the selected unit (the walking boss)
-        Tank            // anchor=tank: the member's nearest alive tank of the scope
+        Tank,           // anchor=tank: the member's nearest alive tank of the scope
+        Self            // anchor=self (Scarlet Monastery G2): where the member itself stood as the leash started
     };
 
     // Does a leash of `role` judge a member the role provider calls a tank / a healer?
@@ -925,6 +926,298 @@ namespace BossMechanics::Drill
     inline float BeamLengthError(Geo::Vec3 const& from, Geo::Vec3 const& toAtStart, Geo::Vec3 const& toNow)
     {
         return Geo::Dist2d(from.x, from.y, toNow.x, toNow.y) - Geo::Dist2d(from.x, from.y, toAtStart.x, toAtStart.y);
+    }
+
+    // ---- Scarlet Monastery shapes (Scarlet Monastery build §3.9, WP-G1, drill `scarlet-monastery-shapes`) ----------
+    // The wave 1 shapes no drill had run, on the heroic numbers of their bosses (pct= in the percent mode). Grammar
+    // added for it (MechanicCommand.cpp):
+    //   pick=tank                       the selected unit's victim (the tank; none: anyone): Torment on the tank,
+    //                                   whose bot backs off along the beam (EndBacksOff, SM-BM F2).
+    //   leash ... near=1                the leash inverted: a member fails while it stands CLOSER than <yd>
+    //                                   (LeashFails): the tank that did not back off from a Torment aimed at it.
+    //   chase <yd> <ms> [home=1]        drill-only step: for <ms> the selected creature steps after its victim like
+    //                                   an unrooted boss (ChaseRelocation, every kChaseStepMs at kChaseSpeedYdS, from
+    //                                   its melee range in to its stop distance), never more than <yd> from where the
+    //                                   chase started; home=1 puts it back there at the end. The sim's boss stand-in
+    //                                   is rooted (SimTankDummyAI), so without it a tank's drag-out (the banner, a
+    //                                   rot pool under him) leaves him behind in the zone.
+    //   marker <n>                      now also remembers the marked member as the command's last pick, so a later
+    //                                   pick=same lands on it (the Mark carrier's trail).
+    // Tanks are judged separately (§3.9): tags 2 and 6 judge only the tank, so the sweep bars them on the reference
+    // members too (DRILL_BARS "references"); so are the trail's 4 and 5 and the spike's pillar 13 (the carrier is a
+    // random member, so the member under test carries one Mark in four and one Spike in five: the F5 signal is the
+    // whole group's).
+    constexpr std::uint32_t kSmTagTorment = 1;          // VI4 heroic: the beam Soak, 4 others, a group failure (Soak/1)
+    constexpr std::uint32_t kSmTagBackOff = 2;          // VI4: the targeted tank still within 8.5 yd of him (OffSpot)
+    constexpr std::uint32_t kSmTagScent = 3;            // LK3: the scent (Bait, 5 s) landing, flat, reported
+    constexpr std::uint32_t kSmTagTrail = 4;            // LK3 heroic: a trail marker landing on anyone but the carrier
+    constexpr std::uint32_t kSmTagTrailCarrier = 5;     // LK3 heroic: a trail marker landing on the carrier
+    constexpr std::uint32_t kSmTagBanner = 6;           // RH1: the tank in the banner's 10 yd (tank-only, no damage)
+    constexpr std::uint32_t kSmTagRot = 7;              // IR1 heroic: the growing Grave Rot under him, 7 -> 10 yd
+    constexpr std::uint32_t kSmTagEyePool = 8;          // IR5: a 7 yd pool under a player (2 s marker)
+    constexpr std::uint32_t kSmTagGlare = 9;            // IR6 heroic: facing the source at the end of a 2 s cast
+    constexpr std::uint32_t kSmTagWallMark = 10;        // DN3 heroic: an 8 yd burst carried to the wall, on others
+    constexpr std::uint32_t kSmTagFirePool = 11;        // DN3a heroic: the 3 yd fire pool 1 s after a burst
+    constexpr std::uint32_t kSmTagSpikeCarry = 12;      // TH3: the carried 4 yd marker (no damage), reported
+    constexpr std::uint32_t kSmTagSpikePillar = 13;     // TH3 heroic: the pillar 1.5 s after the landing, carrier too
+    constexpr std::uint32_t kSmTagSpikePool = 14;       // TH3 heroic: the 4 yd pool, 30 s
+    constexpr std::uint32_t kSmBarTags[] = { 2, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14 };
+    constexpr std::uint32_t kSmGroupTags[] = { 1 };
+    constexpr std::uint32_t kSmReferenceTags[] = { 2, 4, 5, 6, 13 };
+
+    inline bool SmBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kSmBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // Cycle 0 (cycle=0/3): Vishas VI4 heroic twice (the beam on the tank, who backs off; then on a non-tank, the tank
+    // soaking at his end), Loksey LK3 heroic twice (a non-tank carrier scented for 5 s, walking 22 yd off him, then a
+    // 4.5 s trail of nine 5 yd markers 0-2 yd round it every 0.5 s, each landing 1.5 s later). Cycle 1 (cycle=1/3):
+    // Ironspine IR1 + IR5 + IR6 heroic (the rot under him growing 7 -> 10 yd over 30 s by re-registration, two eye
+    // pools under players with each rot, a Glare every 6 s; the boss chases the tank that drags him off the rot), then
+    // Doan DN3 + DN3a heroic (three non-tanks carry an 8 yd burst to the edge of a 19 yd chamber, a fire pool 1 s
+    // after). Cycle 2 (cycle=2/3, F-1b: STAGE-R-1-GY MN-1): Thalnos's crypt on a hard mode pull, Galvar's RH1 banner
+    // at his feet that only the tank sees for 30 s, the boss chasing the tank off it, and TH3 Flame Spike twice (a
+    // random carrier, tank included, walks a 4 yd marker 2 s to the edge; the pillar 1.5 s later, then a 30 s pool).
+    // The live numbers are the bosses' Logic headers (CORE mod-dungeon-bosses ScarletMonastery/*Logic.h), mirrored
+    // here by hand: keep them in step.
+    constexpr std::uint32_t kSmCycleMs = 60000;
+    constexpr std::uint32_t kSmCycles = 3;
+    constexpr float kTormentWidth = 3.f;                // §3.5 D1: SM-BM's example width (VI4: unset)
+    constexpr std::uint32_t kTormentWarnMs = 1500;      // VishasLogic.h kTormentWarnMs: the emote to the first tick
+    constexpr std::uint32_t kTormentJudgedMs = 8000;    // VishasLogic.h kTormentMs: 8 judged seconds, a 9.5 s channel
+    constexpr std::uint32_t kTormentSoakers = 4;        // a 5-man group: everyone but the target
+    constexpr float kTormentBackOffYd = 10.f;           // SM-BM F2 example (D1's call)
+    constexpr float kTormentTankNearYd = 4.f;
+    constexpr float kTormentBackOffJudgeYd = 8.5f;      // sm_shapes_test: the tank walks back past 8.5 yd in time
+    constexpr std::uint32_t kScentMs = 5000;            // LK3: the 5 s Scent debuff
+    constexpr float kScentOthersYd = 22.f;              // LokseyLogic.h kScentFarYd: the carrier walks 22 yd off him
+    constexpr std::uint32_t kTrailMarkers = 9;          // three hounds and six pups: the longest normal trail
+    constexpr std::uint32_t kTrailEveryMs = 500;
+    constexpr std::uint32_t kTrailWarnMs = 1500;
+    constexpr float kTrailMarkerYd = 5.f;
+    constexpr float kTrailScatterYd = 2.f;
+    constexpr float kBannerYd = 10.f;                   // RH1: 10 yd round the banner at Galvar's feet
+    constexpr std::uint32_t kBannerWarnMs = 3000;
+    constexpr std::uint32_t kBannerMs = 30000;          // ThalnosHardModeLogic.h kBannerMs: 3 s warned + 27 s judged
+    constexpr float kRotFromYd = 7.f;                   // IR1 heroic: 7 -> 10 yd over 30 s
+    constexpr float kRotToYd = 10.f;
+    constexpr std::uint32_t kRotStepMs = 10000;         // KT-SM GrowingZone: a step every 10 s, warned 1 s ahead
+    constexpr std::uint32_t kRotWarnMs = 1500;          // IR1: the 1.5 s cast
+    constexpr std::uint32_t kRotStepWarnMs = 1000;
+    constexpr std::uint32_t kEyePoolWarnMs = 2000;      // IR5: the 2 s marker
+    constexpr std::uint32_t kGlareMs = 2000;            // IR6: the 2 s cast, every 6 s while the Eye is loose
+    constexpr std::uint32_t kGlareEveryMs = 6000;
+    constexpr float kGlareRangeYd = 40.f;
+    constexpr float kWallMarkYd = 8.f;                  // DN3: 8 yd burst, 5 s mark, three marks on heroic
+    constexpr std::uint32_t kWallMarkMs = 5000;
+    constexpr std::uint32_t kWallMarks = 3;
+    constexpr float kDoanRoomYd = 19.f;                 // the chamber, about 1,180 sq yd: a 19.4 yd circle
+    constexpr float kFirePoolYd = 3.f;                  // DN3a: 3 yd, forms 1 s after the burst
+    constexpr std::uint32_t kEyePoolsEndMs = 41500;     // IR5: live 60 s; here to the last rung's end (cycle 1)
+    constexpr float kSpikeYd = 4.f;                     // ThalnosLogic.h TH3: kSpikeRadius
+    constexpr std::uint32_t kSpikeCastMs = 2000;        // the bar (the carry)
+    constexpr std::uint32_t kSpikeMarkerMs = 1500;      // landing to the pillar
+    constexpr std::uint32_t kSpikePoolMs = 30000;       // heroic
+    constexpr std::uint32_t kSpikeFirstMs = 6000;       // kSpikeBeat: first at 6 s, every 15 s
+    constexpr std::uint32_t kSpikeEveryMs = 15000;
+    constexpr float kCryptRoomYd = 14.f;                // the crypt, 18 x 33 yd: a 13.7 yd circle of its area
+
+    // ---- the chase (drill-only `chase` step) ----
+    constexpr std::uint32_t kChaseStepMs = 250;
+    constexpr float kChaseSpeedYdS = 7.f;               // a creature's base run speed
+    constexpr float kMaxChaseYd = 40.f;
+
+    struct ChaseSpec
+    {
+        float yd = 0.f;                 // never more than this from where the chase started
+        std::uint32_t ms = 0;
+        bool home = false;              // home=1: back to the start at the end
+    };
+
+    // The relocations of a chase of `ms` (one every kChaseStepMs, the last at `ms`): at least 1.
+    constexpr std::uint32_t ChaseSteps(std::uint32_t ms)
+    {
+        return ms < kChaseStepMs ? 1u : (ms + kChaseStepMs - 1) / kChaseStepMs;
+    }
+
+    // One relocation of a chasing unit at `unit` after its victim at `victim`: none while within `triggerYd` (its
+    // melee range); else toward the victim by at most `maxStepYd`, stopping `stopYd` short of it (its combat reaches
+    // plus a little), and pulled back onto the circle of `maxFromStartYd` round `start`. nullopt: it stays.
+    inline std::optional<Geo::Vec3> ChaseRelocation(Geo::Vec3 const& start, Geo::Vec3 const& unit,
+        Geo::Vec3 const& victim, float triggerYd, float stopYd, float maxStepYd, float maxFromStartYd)
+    {
+        float const dx = victim.x - unit.x;
+        float const dy = victim.y - unit.y;
+        float const d = std::sqrt(dx * dx + dy * dy);
+        if (d <= triggerYd || d <= stopYd || d <= 0.f)
+            return std::nullopt;
+        float const move = std::min(maxStepYd, d - stopYd);
+        Geo::Vec3 p{ unit.x + dx / d * move, unit.y + dy / d * move, unit.z };
+        float const sx = p.x - start.x;
+        float const sy = p.y - start.y;
+        float const fromStart = std::sqrt(sx * sx + sy * sy);
+        if (fromStart > maxFromStartYd && fromStart > 0.f)
+        {
+            p.x = start.x + sx / fromStart * maxFromStartYd;
+            p.y = start.y + sy / fromStart * maxFromStartYd;
+        }
+        float const mx = p.x - unit.x;
+        float const my = p.y - unit.y;
+        if (mx * mx + my * my < 0.0001f)
+            return std::nullopt;
+        return p;
+    }
+
+    // ---- Scarlet Monastery shapes, wave 2 (Scarlet Monastery build §3.9, WP-G2, drill `scarlet-monastery-shapes-2`) -
+    // The wave 2 rows: a second drill (wave 1's two 60 s cycles are full), one sweep of its own; heroic numbers in
+    // pct= (hard mode for the beams' cycle half). Tags 21-40 never meet wave 1's 1-11. NAVMESH numbers (HANDOFF §2.3,
+    // §7 #28-#33 ruled A): Halden's ring 5-11 yd, Herod's pit r 13.1 and 121 yd lap, Crell's storeroom. Grammar
+    // added for it (MechanicCommand.cpp):
+    //   along=target                    a point's axes (shift=, a line's facing) follow the selected unit's own facing
+    //                                   as the repeat registers, not the run's: Thorne's furrow 5 yd ahead of him.
+    //   past=<yd>                       (line, reach=1) the fixed line runs that far past the to= unit: FixLine.
+    //   shift= with to= fix=1           (line) moves the source before it is aimed (it used to move it after, along
+    //                                   the aimed facing; no drill combined them): a blade thrown from the ledge.
+    //   leash ... anchor=self           each member judged against where it stood as the leash started (the tank that
+    //                                   walks round Thorne to re-face him).
+    //   holdfacing <ms>                 drill-only step: Mechanic::HoldTankFacing(the test owner, the selected unit,
+    //                                   ms) (ParseHoldFacing; SM-BM F6, D12's call).
+    //   repeat= / every= on a step      now honored by the runner (RepeatOffsets above; tag kept per repeat).
+    // Tanks are judged separately (§3.9): the tank-only tags (23, 25, 31) and the random-carrier tags (21, 26, 30)
+    // are barred on the reference members too (DRILL_BARS "references").
+    constexpr std::uint32_t kSm2TagFurrow = 21;         // GD1 heroic: a Sow carrier off the furrow at the debuff end
+    constexpr std::uint32_t kSm2TagPrune = 22;          // GD1a heroic: the 120 deg / 8 yd Prune (non-tanks)
+    constexpr std::uint32_t kSm2TagTankHold = 23;       // F6: the tank walked > 4 yd while the facing hold stood
+    constexpr std::uint32_t kSm2TagHolyWater = 24;      // GD2 heroic: the 12 yd ring at him (2.5 s cast)
+    constexpr std::uint32_t kSm2TagBlessedGround = 25;  // GD2a: the tank inside the 8 yd tank-only ground (F14)
+    constexpr std::uint32_t kSm2TagBloom = 26;          // GD1c heroic (Bless the Harvest missed): 6 yd at the furrow
+    constexpr std::uint32_t kSm2TagCloseRanks = 27;     // MA4 heroic: the 5-11 yd band round Halden, 12% a second
+    constexpr std::uint32_t kSm2TagFlame = 29;          // WM5: the Vigil Flame 1-body soak unshared (group)
+    constexpr std::uint32_t kSm2TagSeared = 30;         // WM5a: a Seared (or the flame's) player within 6 yd of it
+    constexpr std::uint32_t kSm2TagFlameTank = 31;      // F7: the tank left Mograine while a non-tank could share
+    constexpr std::uint32_t kSm2TagBladeSpread = 32;    // AR7: the lasting 6 yd spread of the Blade window, reported
+    constexpr std::uint32_t kSm2TagStrike = 33;         // AR7 heroic: the first Proving Strike dash (2 s)
+    constexpr std::uint32_t kSm2TagStrikeNext = 34;     // AR7 heroic: the four follow-up dashes (1 s each)
+    constexpr std::uint32_t kSm2TagLapOut = 35;         // HB1a: the 10 yd lane out of the pit (2.5 s)
+    constexpr std::uint32_t kSm2TagLapBand = 36;        // HB1b: the ledge band, closed for the lap
+    constexpr std::uint32_t kSm2TagBlade = 37;          // HB1c heroic: a blade of light across the pit (1.5 s)
+    constexpr std::uint32_t kSm2TagLapHome = 38;        // HB1d: the 10 yd lane home to the pit's center (1.5 s)
+    constexpr std::uint32_t kSm2TagBeam = 39;           // HM3: Ravager's Beacon, two beams stepping 30 deg / 1.5 s
+    constexpr std::uint32_t kSm2TagBladeHard = 40;      // HB1c hard mode: two blades at once every 1.5 s (60%)
+    constexpr std::uint32_t kSm2BarTags[] = { 21, 22, 23, 24, 25, 26, 27, 30, 31, 33, 34, 35, 36, 37, 38, 39, 40 };
+    constexpr std::uint32_t kSm2GroupTags[] = { 29 };
+    constexpr std::uint32_t kSm2ReferenceTags[] = { 21, 23, 25, 26, 30, 31 };
+
+    inline bool Sm2BarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kSm2BarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // Cycle 0 (cycle=0/3): Thorne GD1 heroic twice (a Prune every 10 s; a Sow on three carriers whose furrow is 5 yd
+    // ahead of him, the tank holding his facing from the Sow to the Prune that cuts), GD2 + GD2a between them (Holy
+    // Water, then the tank-only blessed ground he is dragged off), the second Sow's seeds blooming at once (Bless the
+    // Harvest missed: the step-out ring inside the hold); then Halden MA4 heroic (the 5-11 yd band round him while he
+    // steps 4 yd out and back). Cycle 1 (cycle=1/3): Whitemane WM5 heroic, four flares 10 s apart on four non-tank
+    // carriers in turn (each Seared after, Marked (drill) the stand-in), the fourth with only the tank left to share;
+    // then Crell AR7 heroic (the Blade window's lasting spread and two five-dash chains 10 s apart). Cycle 2
+    // (cycle=2/3): Herod HB1 heroic (the lap: out lane, the ledge band, six blades from the lap, home lane), then HM3
+    // (two beams round the planted axe, 12 steps one way, the hard mode lap at the flip, 12 steps back). The pit's
+    // center is the planted axe, 3 yd past him along the run's facing (he kneels 3 yd from it, HM2).
+    constexpr std::uint32_t kSm2CycleMs = 60000;
+    constexpr std::uint32_t kSm2Cycles = 3;
+    // Thorne (D12, CATH GD1-GD3, §7 #32: a 14.9 yd dry spot)
+    constexpr float kPruneYd = 8.f;
+    constexpr float kPruneAngleDeg = 120.f;
+    constexpr std::uint32_t kPruneWarnMs = 2000;
+    constexpr std::uint32_t kPruneEveryMs = 10000;
+    constexpr std::uint32_t kSowCarriers = 3;           // heroic
+    constexpr std::uint32_t kSowMs = 5000;              // the Blessed Grain debuff
+    constexpr float kFurrowYd = 3.f;
+    constexpr float kFurrowAheadYd = 5.f;
+    constexpr std::uint32_t kFacingHoldMs = 9000;       // from the Sow to the Prune that cuts (SM-BM's D12 example)
+    constexpr float kTankHoldDriftYd = 4.f;             // a re-facing walk round him moves the tank farther
+    constexpr float kHolyWaterYd = 12.f;                // heroic
+    constexpr std::uint32_t kHolyWaterMs = 2500;
+    constexpr float kBlessedGroundYd = 8.f;
+    constexpr std::uint32_t kBlessedGroundMs = 8000;
+    constexpr std::uint32_t kBlessedGroundWarnMs = 500;
+    constexpr float kBloomYd = 6.f;
+    constexpr std::uint32_t kBloomWarnMs = 2000;
+    // Halden (D10, ARM MA4, §7 #30 A: the ring 5-11 yd in the 21 x 40 yd middle chamber)
+    constexpr float kRanksInnerYd = 5.f;
+    constexpr float kRanksOuterYd = 11.f;
+    constexpr std::uint32_t kRanksWarnMs = 2500;
+    constexpr std::uint32_t kRanksMs = 8000;            // heroic: the ring turns 8 s
+    constexpr float kRanksStepYd = 4.f;                 // "a boss that steps" (§3.9): out, then back
+    constexpr std::uint32_t kRanksStepMs = 2000;
+    // Whitemane (D14, CATH WM5, heroic)
+    constexpr float kFlameYd = 6.f;
+    constexpr std::uint32_t kFlameEveryMs = 10000;
+    constexpr std::uint32_t kFlares = 4;                // four non-tank carriers; the fourth flare leaves the tank
+    constexpr std::uint32_t kFlameRegisterLagMs = 500;  // each flare's carrier is marked after the last one resolved
+    constexpr float kFlameTankLeashYd = 8.f;            // kTankLeashYd: the tank stays on Mograine
+    // Crell (D9, ARM AR7, heroic: the Blade 15 s, a chain 2 s after the Issue and every 10 s)
+    constexpr float kBladeSpreadYd = 6.f;
+    constexpr std::uint32_t kBladeMs = 15000;
+    constexpr float kStrikeWidth = 3.f;
+    constexpr float kStrikePastYd = 5.f;
+    constexpr std::uint32_t kStrikeFirstMs = 2000;
+    constexpr std::uint32_t kStrikeNextMs = 1000;
+    constexpr std::uint32_t kStrikeDashes = 5;          // every player once
+    constexpr std::uint32_t kStrikeEveryMs = 10000;
+    // Herod (D11 / D11H, ARM HB1 / HM3; NAVMESH: pit r 13.1, the ledge band out to the walls, lap ~121 yd)
+    constexpr float kPitYd = 13.f;
+    constexpr float kPitAheadYd = 3.f;                  // the pit's center (the planted axe) past his start
+    constexpr float kLapRadiusYd = 19.3f;               // 121 yd / 2 pi
+    constexpr float kBandOuterYd = 40.f;                // "out to the walls": the sim's floor has none
+    constexpr float kLaneWidth = 10.f;                  // HB1a / HB1d: his 5 yd spin
+    constexpr std::uint32_t kOutWarnMs = 2500;
+    constexpr std::uint32_t kHomeWarnMs = 1500;
+    constexpr float kBladeLaneWidth = 4.f;
+    constexpr float kBladeLaneYd = 32.f;                // from the ledge across the pit's center to its far edge
+    constexpr std::uint32_t kBladeWarnMs = 1500;
+    constexpr std::uint32_t kBladeEveryMs = 1500;
+    constexpr float kLapHeroicYdS = 12.f;
+    constexpr float kLapHardYdS = 14.f;
+    constexpr std::uint32_t kLapBlades = 6;             // heroic: a blade every 1.5 s, each landing inside the lap
+    constexpr std::uint32_t kLapBladesHard = 5;         // hard mode: the 8.7 s lap lands five pairs
+    constexpr float kBeamInnerYd = 3.f;
+    constexpr float kBeamYd = 10.f;                     // 3 -> 13 yd: to the pit's edge
+    constexpr float kBeaconWidth = 4.f;
+    constexpr float kBeamStepDeg = 30.f;
+    constexpr std::uint32_t kBeamStepMs = 1500;
+    constexpr std::uint32_t kBeamSteps = 24;            // 12 one way (a full turn), the flip, 12 back
+    constexpr float kBeamChaseYd = 12.f;
+
+    // How long one lap of `radiusYd` takes at `ydPerS` (ms).
+    inline float LapMs(float radiusYd, float ydPerS)
+    {
+        return ydPerS > 0.f ? Geo::kTwoPi * radiusYd / ydPerS * 1000.f : 0.f;
+    }
+
+    // Where the cyclone is `elapsedMs` into a lap that starts at bearing `startRad` (radians from the run's facing),
+    // `dir` +1 counterclockwise, -1 clockwise: the bearing (radians, wrapped to [0, 2 pi)).
+    inline float LapBearing(float startRad, int dir, float radiusYd, float ydPerS, float elapsedMs)
+    {
+        float const b = startRad + static_cast<float>(dir < 0 ? -1 : 1) * ydPerS * elapsedMs / 1000.f / radiusYd;
+        float const w = std::fmod(b, Geo::kTwoPi);
+        return w < 0.f ? w + Geo::kTwoPi : w;
+    }
+
+    // `shift=<ahead>:<left>` for a line turned by `offsetRad` (the run frame turned) whose source sits at `source`
+    // (run frame: x ahead, y left of the boss's start): the source in the turned frame.
+    inline Geo::Vec3 ShiftInTurnedFrame(Geo::Vec3 const& source, float offsetRad)
+    {
+        float const c = std::cos(offsetRad);
+        float const s = std::sin(offsetRad);
+        return { source.x * c + source.y * s, -source.x * s + source.y * c, 0.f };
     }
 
     inline std::vector<Def> const& All()
@@ -1389,6 +1682,349 @@ namespace BossMechanics::Drill
                         "school=fire pct=15 cycle=1/2 tag=26" },
                     { 42000, "walk 12 3000 offset=180 cycle=1/2" },
                 }, 2 },     // two cycles a run (120 s): the sweep runs blackrock-depths-shapes-2:2
+
+            // Scarlet Monastery build §3.9 (WP-G1, wave 1): see kSmTagTorment above. Cycle 0 (0/3): Vishas's Torment
+            // on the tank, then on a non-tank; Loksey's Mark twice. Cycle 1 (1/3): Ironspine's growing rot, eye pools
+            // and Glares; Doan's Mark of Righteous Fire to the wall and its pool. Cycle 2 (2/3, F-1b): Thalnos's crypt,
+            // Galvar's banner dragged off and two Flame Spikes carried to the edge.
+            { "scarlet-monastery-shapes", "a beam soak to a player whose tank end backs off, a scent trail behind a "
+                "carrier, a growing rot with pools under players, a gaze, marks carried to the wall, a tank-only "
+                "banner dragged off, flame spikes carried to the edge", 60000, true, {
+                    // torment: Vishas VI4 heroic, the 9.5 s channel (1.5 s to step in, 8 judged seconds; D1's
+                    // kTormentWarnMs / kTormentMs) on the tank (he backs off 10 yd), then a non-tank
+                    { 0, "soak 3 1500 shape=line anchor=target to=member pick=tank exempt=target need=4 persist=8000 "
+                        "tick=1000 backoff=10 tanknear=4 cycle=0/3 tag=1" },
+                    { 1500, "leash 8.5 8000 role=tank near=1 cycle=0/3 tag=2" },
+                    { 10000, "soak 3 1500 shape=line anchor=target to=member pick=nontank exempt=target need=4 "
+                        "persist=8000 tick=1000 backoff=10 tanknear=4 cycle=0/3 tag=1" },
+                    // mark-trail: Loksey LK3 heroic, a non-tank carrier (D5's kScentTankExempt) scented 5 s, walking
+                    // 22 yd off him (kScentFarYd), then nine markers; the others' circle (tag 4) and the carrier's
+                    // (tag 5) lie on the same spot (at=prev)
+                    { 20000, "marker 1 pick=nontank cycle=0/3" },
+                    { 20000, "bait 22 5000 aura=205009:1 r=1 pct=0 cycle=0/3 tag=3" },
+                    { 25000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 25000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 25500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 25500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 26000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 26000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 26500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 26500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 27000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 27000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 27500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 27500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 28000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 28000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 28500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 28500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 29000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 29000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 31000, "marker 0 cycle=0/3" },
+                    { 32000, "marker 1 pick=nontank cycle=0/3" },
+                    { 32000, "bait 22 5000 aura=205009:1 r=1 pct=0 cycle=0/3 tag=3" },
+                    { 37000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 37000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 37500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 37500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 38000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 38000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 38500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 38500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 39000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 39000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 39500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 39500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 40000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 40000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 40500, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 40500, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 41000, "circle 5 1500 at=member pick=same scatter=2 aura=205009:0:0 pct=45 weak=1 "
+                        "cycle=0/3 tag=4" },
+                    { 41000, "circle 5 1500 at=prev aura=205009:1 pct=45 weak=1 cycle=0/3 tag=5" },
+                    { 43000, "marker 0 cycle=0/3" },
+                    // rot-grow: Ironspine IR1 heroic under him (7, 8, 9, 10 yd, each step warned 1 s ahead and live
+                    // as the last one ends), IR5 two eye pools with each rot (the first on anyone; live they last 60 s
+                    // and grow like his, so here they stay to the rot's end at 41.5 s, 7 yd: the drill has no growing
+                    // pool on a member's spot), IR6 a Glare every 6 s; he chases the tank that drags him off the rot,
+                    // and goes home before Doan
+                    { 0, "circle 7 1500 persist=10000 tick=1000 school=nature pct=8 cycle=1/3 tag=7" },
+                    { 0, "circle 7 2000 at=member pick=any persist=39500 tick=1000 school=nature pct=8 cycle=1/3 "
+                        "tag=8" },
+                    { 0, "circle 7 2000 at=member pick=other persist=39500 tick=1000 school=nature pct=8 cycle=1/3 "
+                        "tag=8" },
+                    { 0, "chase 20 42000 home=1 cycle=1/3" },
+                    { 4000, "gaze 40 2000 pct=0 cycle=1/3 tag=9" },
+                    { 10000, "gaze 40 2000 pct=0 cycle=1/3 tag=9" },
+                    { 10500, "circle 8 1000 persist=10000 tick=1000 school=nature pct=8 cycle=1/3 tag=7" },
+                    { 14000, "circle 7 2000 at=member pick=any persist=25500 tick=1000 school=nature pct=8 cycle=1/3 "
+                        "tag=8" },
+                    { 14000, "circle 7 2000 at=member pick=other persist=25500 tick=1000 school=nature pct=8 "
+                        "cycle=1/3 tag=8" },
+                    { 16000, "gaze 40 2000 pct=0 cycle=1/3 tag=9" },
+                    { 20500, "circle 9 1000 persist=10000 tick=1000 school=nature pct=8 cycle=1/3 tag=7" },
+                    { 22000, "gaze 40 2000 pct=0 cycle=1/3 tag=9" },
+                    { 28000, "gaze 40 2000 pct=0 cycle=1/3 tag=9" },
+                    { 30500, "circle 10 1000 persist=10000 tick=1000 school=nature pct=8 cycle=1/3 tag=7" },
+                    // wall-mark: Doan DN3 heroic, three non-tanks carry 8 yd to the edge of a 19 yd chamber; DN3a
+                    // the 3 yd pool 1 s after the burst (the last carrier's: pick=same remembers one member)
+                    { 43000, "circle 8 5000 anchor=member pick=nontank drop=edge,away room=19 school=fire pct=45 "
+                        "weak=1 cycle=1/3 tag=10" },
+                    { 43000, "circle 8 5000 anchor=member pick=other drop=edge,away room=19 school=fire pct=45 "
+                        "weak=1 cycle=1/3 tag=10" },
+                    { 43000, "circle 8 5000 anchor=member pick=other drop=edge,away room=19 school=fire pct=45 "
+                        "weak=1 cycle=1/3 tag=10" },
+                    { 48000, "circle 3 1000 at=member pick=same persist=10000 tick=1000 school=fire pct=10 "
+                        "cycle=1/3 tag=11" },
+                    // banner-drag: Galvar RH1 (Thalnos hard mode, from 5 s), a 10 yd zone only the tank sees at his
+                    // feet for 30 s (3 s warned, 27 s judged: ThalnosHardModeLogic.h kBannerMs); he chases the tank off
+                    // and goes home after it
+                    { 5000, "circle 10 3000 at=target role=tank persist=27000 tick=1000 pct=0 cycle=2/3 tag=6" },
+                    { 5000, "chase 20 30500 home=1 cycle=2/3" },
+                    // spike-carry: Thalnos TH3 heroic (from 6 s, every 15 s), a random carrier (tank included) walks a
+                    // 4 yd marker for the 2 s bar to the crypt's edge away from the group, off the live pools (the
+                    // crypt, 18 x 33 yd: a 14 yd circle of its area); it lands where the carrier stands, the pillar
+                    // 1.5 s later (45%, Weakened, the carrier included), then the 4 yd pool 30 s
+                    { 6000, "circle 4 2000 anchor=member pick=any drop=edge,away,avoid room=14 pct=0 cycle=2/3 "
+                        "tag=12" },
+                    { 8000, "circle 4 1500 at=member pick=same school=fire pct=45 weak=1 cycle=2/3 tag=13" },
+                    { 8000, "circle 4 2500 at=prev persist=29000 tick=1000 school=fire pct=8 cycle=2/3 tag=14" },
+                    { 21000, "circle 4 2000 anchor=member pick=any drop=edge,away,avoid room=14 pct=0 cycle=2/3 "
+                        "tag=12" },
+                    { 23000, "circle 4 1500 at=member pick=same school=fire pct=45 weak=1 cycle=2/3 tag=13" },
+                    { 23000, "circle 4 2500 at=prev persist=29000 tick=1000 school=fire pct=8 cycle=2/3 tag=14" },
+                }, 3 },     // three cycles a run (180 s): the sweep runs scarlet-monastery-shapes:3
+
+            // Scarlet Monastery build §3.9 (WP-G2, wave 2): see kSm2TagFurrow above. Cycle 0 (0/3): Thorne's Sow and
+            // Prune with the facing hold, Holy Water and the blessed ground, the missed Bless the Harvest; Halden's
+            // Close Ranks. Cycle 1 (1/3): Whitemane's Vigil Flame loop; Crell's Blade window. Cycle 2 (2/3): Herod's
+            // lap; Ravager's Beacon with the hard mode lap at its flip.
+            { "scarlet-monastery-shapes-2", "Spots in a held frontal, a tank-only ground under the boss, a 1-body soak "
+                "passed round with the tank last, a lasting spread with a dash chain, a band on a stepping boss, a "
+                "ledge lap with lanes into the pit, two turning beams", 60000, false, {
+                    // sow-prune: Thorne GD1a heroic, the Prune every 10 s (120 deg, 8 yd, 2 s wind-up; the tank exempt)
+                    { 0, "frontal 8 2000 angle=120 pct=45 weak=1 cycle=0/3 tag=22" },
+                    // GD1 heroic: three carriers (non-tanks here, so the hold's judge reads the tank alone), the furrow
+                    // 5 yd ahead of him; the tank holds his facing from the Sow to the Prune that cuts and stays on its
+                    // spot (anchor=self)
+                    { 3000, "marker 1 pick=nontank cycle=0/3" },
+                    { 3000, "marker 1 pick=nontank cycle=0/3" },
+                    { 3000, "marker 1 pick=nontank cycle=0/3" },
+                    { 3000, "spot 3 5000 ring=0 at=target along=target shift=5:0 aura=205009:1 cycle=0/3 tag=21" },
+                    { 3000, "holdfacing 9000 cycle=0/3" },
+                    { 3000, "leash 4 9000 role=tank anchor=self cycle=0/3 tag=23" },
+                    { 10000, "frontal 8 2000 angle=120 pct=45 weak=1 cycle=0/3 tag=22" },
+                    { 12000, "marker 0 cycle=0/3" },
+                    // blessed-ground: GD2 heroic Holy Water, then GD2a, 8 yd under him for 8 s that only the tank sees;
+                    // he chases the tank off it (and stays dragged through the second Sow, home at 40 s)
+                    { 14000, "circle 12 2500 at=target school=holy pct=45 weak=1 cycle=0/3 tag=24" },
+                    { 16500, "circle 8 500 at=target role=tank persist=8000 tick=1000 pct=0 cycle=0/3 tag=25" },
+                    { 16500, "chase 20 23500 home=1 cycle=0/3" },
+                    { 20000, "frontal 8 2000 angle=120 pct=45 weak=1 cycle=0/3 tag=22" },
+                    // the second Sow, carriers tank included; Bless the Harvest missed: every seed blooms as it is
+                    // planted (6 yd, 2 s), the step-out ring inside the hold
+                    { 23000, "marker 1 cycle=0/3" },
+                    { 23000, "marker 1 cycle=0/3" },
+                    { 23000, "marker 1 cycle=0/3" },
+                    { 23000, "spot 3 5000 ring=0 at=target along=target shift=5:0 aura=205009:1 cycle=0/3 tag=21" },
+                    { 23000, "holdfacing 9000 cycle=0/3" },
+                    { 28000, "circle 6 2000 at=target along=target shift=5:0 school=holy pct=30 weak=1 cycle=0/3 "
+                        "tag=26" },
+                    { 30000, "frontal 8 2000 angle=120 pct=45 weak=1 cycle=0/3 tag=22" },
+                    { 32000, "marker 0 cycle=0/3" },
+                    // close-ranks: Halden MA4 heroic, the 5-11 yd band round him (§7 #30 A) for 8 s while he steps 4 yd
+                    // out and back
+                    { 42000, "donut 11 2500 inner=5 anchor=target persist=8000 tick=1000 pct=12 cycle=0/3 tag=27" },
+                    { 46500, "walk 4 2000 cycle=0/3" },
+                    { 49500, "walk 4 2000 offset=180 cycle=0/3" },
+                    // vigil-flame: Whitemane WM5 heroic, a flare every 10 s on the next non-tank carrier (Marked
+                    // (drill) 205009 is the flame and Seared both); 1-body soak, the unmarked eligible, the tank last;
+                    // the Seared kept off it. Live (D14 RegisterFlameSoak) registers each soak at the pass with the
+                    // whole time to the next flare as its warning, 10 s; the drill's 9.5 s is that lead less the
+                    // kFlameRegisterLagMs that keeps each mark after the last resolve, so it is 0.5 s harsher. Live
+                    // Seared lasts 19 s (kSearedMs, fades before the second flare after); the drill's Marked never
+                    // fades in the cycle, also harsher (G2 Q2). A short lead is where Ordering::roleLast matters
+                    // (STAGE-R-1-FW M-1)
+                    { 500, "marker 1 pick=nontank cycle=1/3" },
+                    { 500, "soak 6 9500 anchor=member pick=same need=1 aura=205009:0:0 last=tank cycle=1/3 tag=29" },
+                    { 500, "circle 6 9500 anchor=member pick=same aura=205009:1 pct=0 cycle=1/3 tag=30" },
+                    { 500, "leash 8 29500 role=tank cycle=1/3 tag=31" },
+                    { 10500, "marker 1 pick=nontank cycle=1/3" },
+                    { 10500, "soak 6 9500 anchor=member pick=same need=1 aura=205009:0:0 last=tank cycle=1/3 tag=29" },
+                    { 10500, "circle 6 9500 anchor=member pick=same aura=205009:1 pct=0 cycle=1/3 tag=30" },
+                    { 20500, "marker 1 pick=nontank cycle=1/3" },
+                    { 20500, "soak 6 9500 anchor=member pick=same need=1 aura=205009:0:0 last=tank cycle=1/3 tag=29" },
+                    { 20500, "circle 6 9500 anchor=member pick=same aura=205009:1 pct=0 cycle=1/3 tag=30" },
+                    { 30500, "marker 1 pick=nontank cycle=1/3" },
+                    { 30500, "soak 6 9500 anchor=member pick=same need=1 aura=205009:0:0 last=tank cycle=1/3 tag=29" },
+                    { 30500, "circle 6 9500 anchor=member pick=same aura=205009:1 pct=0 cycle=1/3 tag=30" },
+                    { 40500, "marker 0 cycle=1/3" },
+                    // blade-window: Crell AR7 heroic, the Blade's lasting 6 yd spread (F15) and a five-dash chain at 2
+                    // s and 12 s
+                    { 41000, "spread 6 2000 persist=13000 tick=1000 pct=0 cycle=1/3 tag=32" },
+                    { 43000, "line 5 2000 width=3 anchor=target to=member pick=nontank reach=1 past=5 pct=45 weak=1 "
+                        "cycle=1/3 tag=33" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=other reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=other reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=other reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=tank reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 53000, "line 5 2000 width=3 anchor=target to=member pick=nontank reach=1 past=5 pct=45 weak=1 "
+                        "cycle=1/3 tag=33" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=other reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=other reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=other reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    { 0, "line 5 1000 width=3 at=last to=member pick=tank reach=1 past=5 after=resolve pct=30 weak=1 "
+                        "cycle=1/3 tag=34" },
+                    // herod-lap: Herod HB1 heroic round the pit's center (3 yd past him): the ledge band closed from
+                    // the yell to the lap's end, the lane out, six blades thrown from the lap (12 yd/s on r 19.3) at
+                    // players, the lane home
+                    { 0, "donut 40 2500 inner=13 shift=3:0 persist=10100 tick=1000 pct=15 once=1 cycle=2/3 tag=36" },
+                    { 0, "line 19.3 2500 width=10 offset=90 shift=0:-3 pct=45 weak=1 cycle=2/3 tag=35" },
+                    { 2500, "line 32 1500 width=4 shift=3:19.3 to=member pick=any fix=1 school=holy pct=45 weak=1 "
+                        "cycle=2/3 tag=37" },
+                    { 4000, "line 32 1500 width=4 shift=-12.5:11.5 to=member pick=any fix=1 school=holy pct=45 weak=1 "
+                        "cycle=2/3 tag=37" },
+                    { 5500, "line 32 1500 width=4 shift=-15.47:-5.6 to=member pick=any fix=1 school=holy pct=45 weak=1 "
+                        "cycle=2/3 tag=37" },
+                    { 7000, "line 32 1500 width=4 shift=-3.5:-18.17 to=member pick=any fix=1 school=holy pct=45 weak=1 "
+                        "cycle=2/3 tag=37" },
+                    { 8500, "line 32 1500 width=4 shift=13.72:-16.05 to=member pick=any fix=1 school=holy pct=45 "
+                        "weak=1 cycle=2/3 tag=37" },
+                    { 10000, "line 32 1500 width=4 shift=22.28:-0.95 to=member pick=any fix=1 school=holy pct=45 "
+                        "weak=1 cycle=2/3 tag=37" },
+                    { 12600, "line 19.3 1500 width=10 offset=270 shift=-19.3:3 pct=45 weak=1 cycle=2/3 tag=38" },
+                    // turning-beams: Herod HM3, two 4 x 10 yd beams round the planted axe, 30 deg every 1.5 s (each
+                    // step marked 1.5 s ahead), 12 steps counterclockwise, the hard mode lap at the flip (14 yd/s, two
+                    // blades at once, 60%), 12 back; the tank walks him round the pit ahead of them (chase)
+                    { 16000, "line 10 1500 width=4 offset=90 shift=3:-3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 16000, "line 10 1500 width=4 offset=270 shift=3:3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 16000, "chase 12 36000 home=1 cycle=2/3" },
+                    { 17500, "line 10 1500 width=4 offset=120 shift=1.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 17500, "line 10 1500 width=4 offset=300 shift=4.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 19000, "line 10 1500 width=4 offset=150 shift=0.4:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 19000, "line 10 1500 width=4 offset=330 shift=5.6:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 20500, "line 10 1500 width=4 offset=180 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 20500, "line 10 1500 width=4 shift=6:0 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 22000, "line 10 1500 width=4 offset=210 shift=0.4:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 22000, "line 10 1500 width=4 offset=30 shift=5.6:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 23500, "line 10 1500 width=4 offset=240 shift=1.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 23500, "line 10 1500 width=4 offset=60 shift=4.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 25000, "line 10 1500 width=4 offset=270 shift=3:3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 25000, "line 10 1500 width=4 offset=90 shift=3:-3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 26500, "line 10 1500 width=4 offset=300 shift=4.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 26500, "line 10 1500 width=4 offset=120 shift=1.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 28000, "line 10 1500 width=4 offset=330 shift=5.6:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 28000, "line 10 1500 width=4 offset=150 shift=0.4:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 29500, "line 10 1500 width=4 shift=6:0 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 29500, "line 10 1500 width=4 offset=180 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 31000, "line 10 1500 width=4 offset=30 shift=5.6:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 31000, "line 10 1500 width=4 offset=210 shift=0.4:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 32500, "line 10 1500 width=4 offset=60 shift=4.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 32500, "line 10 1500 width=4 offset=240 shift=1.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 34000, "line 10 1500 width=4 offset=30 shift=5.6:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 34000, "line 10 1500 width=4 offset=210 shift=0.4:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 34000, "donut 40 2500 inner=13 shift=3:0 persist=8700 tick=1000 pct=20 once=1 cycle=2/3 tag=36" },
+                    { 34000, "line 19.3 2500 width=10 offset=270 shift=0:3 pct=60 weak=1 cycle=2/3 tag=35" },
+                    { 35500, "line 10 1500 width=4 shift=6:0 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 35500, "line 10 1500 width=4 offset=180 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 36500, "line 32 1500 width=4 shift=3:-19.3 to=member pick=any fix=1 school=holy pct=60 weak=1 "
+                        "cycle=2/3 tag=40" },
+                    { 36500, "line 32 1500 width=4 shift=3:-19.3 to=member pick=other fix=1 school=holy pct=60 weak=1 "
+                        "cycle=2/3 tag=40" },
+                    { 37000, "line 10 1500 width=4 offset=330 shift=5.6:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 37000, "line 10 1500 width=4 offset=150 shift=0.4:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 38000, "line 32 1500 width=4 shift=-14.09:-8.96 to=member pick=any fix=1 school=holy pct=60 "
+                        "weak=1 cycle=2/3 tag=40" },
+                    { 38000, "line 32 1500 width=4 shift=-14.09:-8.96 to=member pick=other fix=1 school=holy pct=60 "
+                        "weak=1 cycle=2/3 tag=40" },
+                    { 38500, "line 10 1500 width=4 offset=300 shift=4.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 38500, "line 10 1500 width=4 offset=120 shift=1.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 39500, "line 32 1500 width=4 shift=-12.87:10.98 to=member pick=any fix=1 school=holy pct=60 "
+                        "weak=1 cycle=2/3 tag=40" },
+                    { 39500, "line 32 1500 width=4 shift=-12.87:10.98 to=member pick=other fix=1 school=holy pct=60 "
+                        "weak=1 cycle=2/3 tag=40" },
+                    { 40000, "line 10 1500 width=4 offset=270 shift=3:3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 40000, "line 10 1500 width=4 offset=90 shift=3:-3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 41000, "line 32 1500 width=4 shift=5.36:19.16 to=member pick=any fix=1 school=holy pct=60 weak=1 "
+                        "cycle=2/3 tag=40" },
+                    { 41000, "line 32 1500 width=4 shift=5.36:19.16 to=member pick=other fix=1 school=holy pct=60 "
+                        "weak=1 cycle=2/3 tag=40" },
+                    { 41500, "line 10 1500 width=4 offset=240 shift=1.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 41500, "line 10 1500 width=4 offset=60 shift=4.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 42500, "line 32 1500 width=4 shift=21.06:6.8 to=member pick=any fix=1 school=holy pct=60 weak=1 "
+                        "cycle=2/3 tag=40" },
+                    { 42500, "line 32 1500 width=4 shift=21.06:6.8 to=member pick=other fix=1 school=holy pct=60 "
+                        "weak=1 cycle=2/3 tag=40" },
+                    { 43000, "line 10 1500 width=4 offset=210 shift=0.4:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 43000, "line 10 1500 width=4 offset=30 shift=5.6:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 44500, "line 10 1500 width=4 offset=180 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 44500, "line 10 1500 width=4 shift=6:0 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 45200, "line 19.3 1500 width=10 offset=90 shift=-19.3:-3 pct=60 weak=1 cycle=2/3 tag=38" },
+                    { 46000, "line 10 1500 width=4 offset=150 shift=0.4:-1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 46000, "line 10 1500 width=4 offset=330 shift=5.6:1.5 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 47500, "line 10 1500 width=4 offset=120 shift=1.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 47500, "line 10 1500 width=4 offset=300 shift=4.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 49000, "line 10 1500 width=4 offset=90 shift=3:-3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 49000, "line 10 1500 width=4 offset=270 shift=3:3 school=holy pct=45 weak=1 cycle=2/3 tag=39" },
+                    { 50500, "line 10 1500 width=4 offset=60 shift=4.5:-2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                    { 50500, "line 10 1500 width=4 offset=240 shift=1.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
+                        "tag=39" },
+                }, 3 },     // three cycles a run (180 s): the sweep runs scarlet-monastery-shapes-2:3
         };
         return drills;
     }
@@ -1628,13 +2264,14 @@ namespace BossMechanics::Drill
         return out;
     }
 
-    // ---- member picks (pick=any|nontank|other, min=) ---------------------------------------------------------------
+    // ---- member picks (pick=any|nontank|other|tank, min=) ----------------------------------------------------------
 
     enum class PickRule : std::uint8_t
     {
         Any,
         NonTank,        // never the selected unit's victim
-        Other           // a non-tank the chain has not picked yet (see PickPool)
+        Other,          // a non-tank the chain has not picked yet (see PickPool)
+        Tank            // the selected unit's victim (Scarlet Monastery G1: Torment on the tank); none: anyone
     };
 
     // One member as a pick sees it (members in guid order).
@@ -1659,7 +2296,13 @@ namespace BossMechanics::Drill
                 if (keep(c[i]))
                     pool.push_back(i);
         };
-        if (rule == PickRule::Any)
+        if (rule == PickRule::Tank)
+        {
+            collect([](PickCandidate const& m) { return m.victim; });
+            if (pool.empty())
+                collect([](PickCandidate const&) { return true; });
+        }
+        else if (rule == PickRule::Any)
             collect([](PickCandidate const&) { return true; });
         else
         {
@@ -1693,7 +2336,8 @@ namespace BossMechanics::Drill
     // ---- fixed lines (fix=1, reach=1, at=last) ---------------------------------------------------------------------
 
     // A line frozen at registration: from `source` toward `toward`, `size` long, or (reach) ending at `toward` but
-    // never shorter than `size`. A target on the source keeps the given facing.
+    // never shorter than `size`; `past` (reach, Scarlet Monastery G2 `past=<yd>`) runs it that far beyond `toward`
+    // (Crell's Proving Strike: "to 5 yd past the target's spot"). A target on the source keeps the given facing.
     struct FixedLine
     {
         Geo::Vec3 source;
@@ -1702,14 +2346,14 @@ namespace BossMechanics::Drill
     };
 
     inline FixedLine FixLine(Geo::Vec3 const& source, Geo::Vec3 const& toward, float size, bool reach,
-        float facing)
+        float facing, float past = 0.f)
     {
         float const dx = toward.x - source.x;
         float const dy = toward.y - source.y;
         float const d = std::sqrt(dx * dx + dy * dy);
         FixedLine out{ source, d > 1e-3f ? std::atan2(dy, dx) : facing, size };
         if (reach)
-            out.length = std::max(size, d);
+            out.length = std::max(size, d + std::max(past, 0.f));
         return out;
     }
 
@@ -1739,7 +2383,15 @@ namespace BossMechanics::Drill
         LeashRole role = LeashRole::Any;
         LeashAnchor anchor = LeashAnchor::Unit;
         std::uint32_t ledgerTag = 0;
+        bool near = false;              // near=1 (Scarlet Monastery G1): a failure when CLOSER than yd (LeashFails)
     };
+
+    // Does a leash fail a member whose distance test came out `outOfLeash` (farther than yd)? near=1 inverts it: the
+    // member fails while it stands within yd (a Torment target that has not backed off).
+    constexpr bool LeashFails(bool near, bool outOfLeash)
+    {
+        return near ? !outOfLeash : outOfLeash;
+    }
 
     // Every token after the third is key=value with one of `keys`, each at most once.
     inline bool OnlyKeys(std::vector<std::string_view> const& t, std::vector<std::string_view> const& keys)
@@ -1784,12 +2436,12 @@ namespace BossMechanics::Drill
         return w;
     }
 
-    // `leash <yd> <ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>` (plan keys stripped): yd >
-    // 0, ms up to kMaxWalkMs, tick from kMinLeashTickMs to ms, a whole tag >= 1; nullopt otherwise.
+    // `leash <yd> <ms> [role=tank|healer|nonhealer|any] [anchor=tank|self] [tick=<ms>] [near=0|1] tag=<n>` (plan keys
+    // stripped): yd > 0, ms up to kMaxWalkMs, tick from kMinLeashTickMs to ms, a whole tag >= 1; nullopt otherwise.
     inline std::optional<LeashStep> ParseLeash(std::string_view line)
     {
         std::vector<std::string_view> const t = Tokens(line);
-        if (t.size() < 3 || t[0] != "leash" || !OnlyKeys(t, { "role", "anchor", "tick", "tag" }))
+        if (t.size() < 3 || t[0] != "leash" || !OnlyKeys(t, { "role", "anchor", "tick", "near", "tag" }))
             return std::nullopt;
         std::optional<float> const yd = Number(t[1]);
         std::optional<float> const ms = Number(t[2]);
@@ -1811,9 +2463,12 @@ namespace BossMechanics::Drill
         }
         if (std::optional<std::string_view> const anchor = Value(line, "anchor"))
         {
-            if (*anchor != "tank")
+            if (*anchor == "tank")
+                l.anchor = LeashAnchor::Tank;
+            else if (*anchor == "self")
+                l.anchor = LeashAnchor::Self;
+            else
                 return std::nullopt;
-            l.anchor = LeashAnchor::Tank;
         }
         if (std::optional<std::string_view> const v = Value(line, "tick"))
         {
@@ -1824,12 +2479,93 @@ namespace BossMechanics::Drill
         }
         else if (l.tickMs > l.ms)
             return std::nullopt;
+        if (std::optional<std::string_view> const v = Value(line, "near"))
+        {
+            if (*v != "0" && *v != "1")
+                return std::nullopt;
+            l.near = *v == "1";
+        }
         std::optional<std::string_view> const tag = Value(line, "tag");
         std::optional<float> const n = tag ? Number(*tag) : std::nullopt;
         if (!n || *n < 1.f || *n != std::floor(*n))
             return std::nullopt;
         l.ledgerTag = static_cast<std::uint32_t>(*n);
         return l;
+    }
+
+    // `chase <yd> <ms> [home=0|1]` (Scarlet Monastery G1; plan keys stripped): yd in (0, kMaxChaseYd], ms from
+    // kChaseStepMs to kMaxWalkMs; nullopt otherwise.
+    inline std::optional<ChaseSpec> ParseChase(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "chase" || !OnlyKeys(t, { "home" }))
+            return std::nullopt;
+        std::optional<float> const yd = Number(t[1]);
+        std::optional<float> const ms = Number(t[2]);
+        if (!yd || *yd <= 0.f || *yd > kMaxChaseYd || !ms || *ms < static_cast<float>(kChaseStepMs)
+            || *ms > static_cast<float>(kMaxWalkMs))
+            return std::nullopt;
+        ChaseSpec c;
+        c.yd = *yd;
+        c.ms = static_cast<std::uint32_t>(*ms);
+        if (std::optional<std::string_view> const v = Value(line, "home"))
+        {
+            if (*v != "0" && *v != "1")
+                return std::nullopt;
+            c.home = *v == "1";
+        }
+        return c;
+    }
+
+    // `holdfacing <ms>` (Scarlet Monastery G2; plan keys stripped, no other key): for <ms> the selected unit's bot
+    // tank holds its facing (Mechanic::HoldTankFacing(the test owner, the selected unit, ms), SM-BM F6: D12's call
+    // from the Sow to the Prune that cuts the seedlings); ms from kChaseStepMs to kMaxWalkMs; nullopt otherwise.
+    inline std::optional<std::uint32_t> ParseHoldFacing(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() != 2 || t[0] != "holdfacing")
+            return std::nullopt;
+        std::optional<float> const ms = Number(t[1]);
+        if (!ms || *ms < static_cast<float>(kChaseStepMs) || *ms > static_cast<float>(kMaxWalkMs)
+            || *ms != std::floor(*ms))
+            return std::nullopt;
+        return static_cast<std::uint32_t>(*ms);
+    }
+
+    // ---- repeat= and every= on a drill step (Scarlet Monastery G2: the runner used to drop them) -------------------
+    // `.mech test` reads `repeat=` (1, at most kMaxStepRepeat) and `every=` (1000 ms) and registers the repeats every
+    // `every` ms, each one tag higher. A drill step does the same but keeps its tag: a drill's ledger tag names its
+    // mechanic (`pass-eggs`: 40 eggs on tag 60, DrillPresets::kPassEggTag, which the `pass` descriptor counts).
+    // Before this the runner (RunDrillWith) parsed and dropped both, so `pass-eggs` laid one egg per cycle.
+
+    constexpr std::uint32_t kMaxStepRepeat = 50;            // MechanicCommand.cpp kMaxRepeat
+    constexpr std::uint32_t kDefaultStepEveryMs = 1000;
+
+    // The start offsets (ms after the step's own start) of a step's repeats: 0, every, 2 * every, ...; `repeat`
+    // clamped to 1 .. kMaxStepRepeat.
+    inline std::vector<std::uint32_t> RepeatOffsets(std::uint32_t repeat, std::uint32_t everyMs)
+    {
+        std::uint32_t const n = std::clamp<std::uint32_t>(repeat, 1u, kMaxStepRepeat);
+        std::vector<std::uint32_t> out;
+        out.reserve(n);
+        for (std::uint32_t k = 0; k < n; ++k)
+            out.push_back(k * everyMs);
+        return out;
+    }
+
+    // A step line's repeats as the `.mech test` parser reads them (repeat= whole, default 1, clamped; every= ms,
+    // default kDefaultStepEveryMs, never below 0): the offsets the runner schedules.
+    inline std::vector<std::uint32_t> StepRepeatOffsets(std::string_view line)
+    {
+        std::uint32_t repeat = 1;
+        std::uint32_t every = kDefaultStepEveryMs;
+        if (std::optional<std::string_view> const v = Value(line, "repeat"))
+            if (std::optional<float> const n = Number(*v))
+                repeat = *n < 1.f ? 1u : static_cast<std::uint32_t>(std::min(*n, static_cast<float>(kMaxStepRepeat)));
+        if (std::optional<std::string_view> const v = Value(line, "every"))
+            if (std::optional<float> const n = Number(*v))
+                every = *n < 0.f ? 0u : static_cast<std::uint32_t>(*n);
+        return RepeatOffsets(repeat, every);
     }
 }
 
