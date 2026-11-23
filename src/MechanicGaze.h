@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 namespace BossMechanics::Gaze
@@ -162,6 +163,33 @@ namespace BossMechanics::Gaze
     inline bool InLookRange(float distYd, float rangeYd)
     {
         return distYd <= rangeYd + kReachSlackYd;
+    }
+
+    // ---- Scarlet Monastery F-4a: a walk of the bot's own against its look windows ------------------------------
+    // A walk no hazard asks for (the strand route to the melee ring, the route in past a refused chase) turns the bot
+    // along its path, so it must not run while a look is owed: it does not start while a window is owed (LookOwedAt)
+    // or opens within kOwnWalkLeadMs, and one already walking stops (holds) once a window is owed. A hazard's escape
+    // is not one of these: it still runs, with the look-away facing applied when it stands.
+    constexpr Ms kOwnWalkLeadMs{ 1000 };
+
+    enum class OwnWalk : std::uint8_t
+    {
+        Go,         // no window owed or near: start it, or walk on
+        Defer,      // not started: a window is owed now or opens within the lead; asked again after it
+        Stop,       // walking: a window is owed now; hold for it
+    };
+
+    inline OwnWalk OwnWalkAt(std::vector<Window> const& windows, Ms now, Ms margin, bool walking,
+        Ms lead = kOwnWalkLeadMs)
+    {
+        for (Window const& w : windows)
+        {
+            if (LookOwedAt(w, now, margin))
+                return walking ? OwnWalk::Stop : OwnWalk::Defer;
+            if (!walking && now < w.from - margin && now >= w.from - margin - lead)
+                return OwnWalk::Defer;
+        }
+        return OwnWalk::Go;
     }
 }
 

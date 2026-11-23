@@ -83,8 +83,11 @@ namespace BossMechanics
         if (!duties.empty())
             st.lookFacing = Gaze::ChooseFacing(st.lookFacing, duties, GetConfig().bots.lookAwayMarginDeg);
 
-        // A move turns the bot along its spline: the facing is applied once it stands.
-        st.faceOwed = st.lookWindow && st.mode != MechanicBotMode::Escape;
+        // A move turns the bot along its spline: the facing is applied once it stands (the face action waits for
+        // the spline to end). Scarlet Monastery F-4a: a gaze's facing is owed in Escape too, so a bot that stands
+        // between legs or at the end of a hazard's escape inside the window faces away there (Gaze/9: it faced along
+        // its path). A carried shape's stays off in Escape (its facing is the plan's, for the target spot).
+        st.faceOwed = st.lookWindow && (st.mode != MechanicBotMode::Escape || !duties.empty());
         st.faceAngle = st.lookFacing;
     }
 

@@ -127,6 +127,11 @@ namespace BossMechanics
         // route search for a clear ring point.
         uint32 msChaseStranded = 0;
         uint32 strandRoutes = 0;
+        // Scarlet Monastery F-4a: routes to a safe point inside the melee ring after a refused chase
+        // (Landing::ReachSafe: Halden's band, its inner edge inside the ring), and own walks (strand or inner routes)
+        // deferred or stopped for a gaze's look window (Gaze::OwnWalkAt).
+        uint32 chaseInnerRoutes = 0;
+        uint32 lookWalkStops = 0;
         // M5 CD (C6): facing-only actions (`set facing`) the lock refused while the brain walked the bot (Escape),
         // also in lockBlocks; facingBlocks stays the look-away count.
         uint32 escapeFacingBlocks = 0;

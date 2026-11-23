@@ -517,6 +517,18 @@ namespace BossMechanics
             return until;
         }
 
+        // Scarlet Monastery F-4a: the bot's own walk (a strand route, the route in past a refused chase) against the
+        // look windows of its Looker tasks (Gaze::OwnWalkAt): one not started waits while a window is owed or near,
+        // one walking stops once a window is owed.
+        Gaze::OwnWalk OwnWalkVerdict(MechanicBotState const& st, Milliseconds now, bool walking)
+        {
+            std::vector<Gaze::Window> windows;
+            for (BotTask const& t : st.viewInfo.tasks)
+                if (t.role == BotTaskRole::Looker)
+                    windows.push_back({ t.from, t.to });
+            return Gaze::OwnWalkAt(windows, now, st.input.params.marginMs, walking);
+        }
+
         bool HasRole(MechanicBotState const& st, BotTaskRole role, Milliseconds now)
         {
             Milliseconds const margin = st.input.params.marginMs;
@@ -1025,6 +1037,7 @@ namespace BossMechanics
             st.refacing = false;
             st.regionRoute = false;
             st.reachWalk = false;
+            st.ownWalk = false;
         }
 
         // Solve and take the plan: Move/GraceMove/Fallback/NoPath -> Escape; Safe -> Watch.
@@ -1643,6 +1656,16 @@ namespace BossMechanics
                 }
                 st.mode = MechanicBotMode::Hold;
                 st.outOfRoleSince = Milliseconds(0);
+                st.ownWalk = false;
+                // Scarlet Monastery F-4a: standing inside a look window, face away now (the walk faced along its
+                // path), not on the face action's next turn.
+                BotFacing::UpdateLookAway(bot, st, now);
+                if (st.faceOwed && !SplineInFlight(bot) && BotFacing::FacingOff(bot, st.faceAngle))
+                {
+                    BotFacing::Apply(bot, st.faceAngle);
+                    Leaks::OwnFacing(st.leak, st.faceAngle);
+                    ++st.counters.facingsApplied;
+                }
                 return;
             }
 
@@ -1830,6 +1853,25 @@ namespace BossMechanics
                 now + Milliseconds(LockRules::ChaseValveWindowMs(release)));
         }
 
+        // Asks the route search (this same step) for `goal`, the bot's own walk; held kMinMotionHold meanwhile.
+        void AskOwnRoute(MechanicBotState& st, Geo::Vec3 const& goal, Milliseconds now)
+        {
+            Solver::Input const& in = st.input;
+            st.routeGoal = goal;
+            st.routePending = true;
+            st.ownRouteAsked = true;
+            st.routeAskedAt = now - Milliseconds(1);
+            st.plan = Solver::Plan();
+            st.plan.target = in.bot;
+            st.plan.path = { in.bot };
+            st.plan.arriveAt = now;
+            st.plan.holdUntil = now + kMinMotionHold;
+            st.planFor.clear();
+            st.mode = MechanicBotMode::Hold;
+            st.pendingEscape = false;
+            st.outOfRoleSince = Milliseconds(0);
+        }
+
         // M5 CD (C5): a stranded bot routes to the first point of the melee ring (the bot's side first) that is safe
         // over the horizon, LockRules::kStrandRingInsetYd inside the band: the M3 route search (RunRoute, in this
         // same step from Update) walks round the hazard, and the escape ends where the stock chase takes over. Held
@@ -1844,24 +1886,48 @@ namespace BossMechanics
                 Geo::Vec3 const q = Landing::RingPoint(in.role.anchor, in.bot, radius, k);
                 if (!Solver::PointSafe(in, q, now, horizonEnd))
                     continue;
-                st.routeGoal = q;
-                st.routePending = true;
-                st.routeAskedAt = now - Milliseconds(1);
-                st.plan = Solver::Plan();
-                st.plan.target = in.bot;
-                st.plan.path = { in.bot };
-                st.plan.arriveAt = now;
-                st.plan.holdUntil = now + kMinMotionHold;
-                st.planFor.clear();
-                st.mode = MechanicBotMode::Hold;
-                st.pendingEscape = false;
-                st.outOfRoleSince = Milliseconds(0);
+                AskOwnRoute(st, q, now);
                 ++st.counters.strandRoutes;
                 if (cfg.debug)
                     LOG_INFO(kLog, "Bot {}: stranded {} ms out of melee range, route to ring point {} ({:.1f}, {:.1f})",
                         bot->GetName(), (now - st.lastInRangeAt).count(), k, q.x, q.y);
                 return;
             }
+        }
+
+        // Scarlet Monastery F-4a (Halden's Close Ranks, Zone/27 on tanks): the chase is refused (by the lock or
+        // Watch's end check) because no point of the melee ring is safe, while a point nearer the target is (a band
+        // whose inner edge lies inside the ring). The stock chase stops on the ring, so the bot routes to that point
+        // instead (Landing::ReachSafe), as a strand route does; the boss keeps its band (ruling §7 #30 A). Same gates
+        // as StrandedNow, with the refusal in place of the stranding clock.
+        bool ChaseInnerWanted(PlayerbotAI* botAI, Player const* bot, MechanicBotState& st, Milliseconds now)
+        {
+            Solver::Input const& in = st.input;
+            return LockRules::ChaseRefusedNow(st.chase, now.count()) && OutOfMeleeRange(bot, in.role, in.bot)
+                && st.mode != MechanicBotMode::Escape && st.mode != MechanicBotMode::Freeze && now >= st.walkInUntil
+                && TaskHoldUntil(st, now) <= now && !BotBrain::Released(botAI, st, now);
+        }
+
+        // The point to route in to: none while the ring itself is clear (the strand route's job) or nothing within
+        // reach is.
+        bool ChaseInnerGoal(MechanicBotState const& st, Milliseconds now, Geo::Vec3& q)
+        {
+            Solver::Input const& in = st.input;
+            Milliseconds const horizonEnd = now + in.params.horizon;
+            float const radius = in.role.maxYd - LockRules::kStrandRingInsetYd;
+            return !Landing::RingSafe(in, in.role.anchor, in.bot, radius, now, horizonEnd)
+                && Landing::ReachSafe(in, in.role.anchor, in.bot, radius, now, horizonEnd, &q);
+        }
+
+        void StepChaseInnerRoute(Player const* bot, MechanicBotState& st, Geo::Vec3 const& q, Milliseconds now,
+            BotConfig const& cfg)
+        {
+            Solver::Input const& in = st.input;
+            AskOwnRoute(st, q, now);
+            ++st.counters.chaseInnerRoutes;
+            if (cfg.debug)
+                LOG_INFO(kLog, "Bot {}: chase refused with the melee ring unsafe, route in to ({:.1f}, {:.1f}), "
+                    "{:.1f} yd from the target", bot->GetName(), q.x, q.y, Dist2d(q, in.role.anchor));
         }
 
         void StepHold(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
@@ -2431,10 +2497,49 @@ namespace BossMechanics
             return;
         }
 
-        // M5 CD (C5): a stranded bot asks the route search for a clear ring point (it runs just below).
-        if (stranded && cfg.routeEnable && !st.routePending && st.mode != MechanicBotMode::Escape
-            && now - st.lastRouteAt >= Milliseconds(cfg.routeRetryMs))
-            StepStrandRoute(bot, st, now, cfg);
+        // Scarlet Monastery F-4a (Ironspine's Glare, Gaze/9 on melee): the bot's own walk stops once a look window is
+        // owed and holds for it (the hold faces away); a spline turns the bot along its path, into the source.
+        if (st.ownWalk && st.mode == MechanicBotMode::Escape
+            && OwnWalkVerdict(st, now, true) == Gaze::OwnWalk::Stop)
+        {
+            std::vector<uint32> ids;
+            Milliseconds const until = std::max(TaskHoldUntil(st, now, &ids), now + kMinMotionHold);
+            HoldForTasks(st, now, until, std::move(ids));
+            st.ownWalk = false;
+            ++st.counters.lookWalkStops;
+            if (cfg.debug)
+                LOG_INFO(kLog, "Bot {}: a look window opened, its own walk stops here", bot->GetName());
+            BotFacing::UpdateLookAway(bot, st, now);
+            PublishLookAway(*reg, bot, st, now);
+            BreakMoverAuras(bot, st, cfg);
+            return;
+        }
+
+        // M5 CD (C5): a stranded bot asks the route search for a clear ring point (it runs just below). F-4a: a bot
+        // refused its chase with only points inside the ring clear routes in to one; neither starts while a look
+        // window is owed or near (Gaze::OwnWalkAt).
+        bool const ownRouteFree = cfg.routeEnable && !st.routePending && st.mode != MechanicBotMode::Escape
+            && now - st.lastRouteAt >= Milliseconds(cfg.routeRetryMs);
+        Geo::Vec3 innerGoal;
+        bool const innerChase = !stranded && ownRouteFree && ChaseInnerWanted(botAI, bot, st, now)
+            && ChaseInnerGoal(st, now, innerGoal);
+        if ((stranded || innerChase) && ownRouteFree)
+        {
+            bool const deferred = OwnWalkVerdict(st, now, false) != Gaze::OwnWalk::Go;
+            if (deferred && !st.ownWalkDeferred)
+            {
+                ++st.counters.lookWalkStops;
+                if (cfg.debug)
+                    LOG_INFO(kLog, "Bot {}: a look window is owed or near, its own walk waits", bot->GetName());
+            }
+            st.ownWalkDeferred = deferred;
+            if (!deferred && stranded)
+                StepStrandRoute(bot, st, now, cfg);
+            else if (!deferred)
+                StepChaseInnerRoute(bot, st, innerGoal, now, cfg);
+        }
+        else
+            st.ownWalkDeferred = false;
 
         // §3.8 route search: a brain step after the failed re-route, never the same one. A route that was due and
         // took its budget unit ends the step whatever it found (never a route and a solve in one step,
@@ -2442,13 +2547,16 @@ namespace BossMechanics
         if (st.routePending && now > st.routeAskedAt)
         {
             st.routePending = false;
+            bool const own = st.ownRouteAsked;
+            st.ownRouteAsked = false;
             bool const due = st.mode == MechanicBotMode::Hold && cfg.routeEnable
                 && now - st.lastRouteAt >= Milliseconds(cfg.routeRetryMs)
                 && !BotBrain::Released(botAI, st, now)
                 && Solver::PointSafe(in, st.routeGoal, now, now + in.params.horizon);
             if (due && TakeBudget(bot, now))
             {
-                RunRoute(bot, st, now, cfg);
+                if (RunRoute(bot, st, now, cfg))
+                    st.ownWalk = own;
                 BotFacing::UpdateLookAway(bot, st, now);
                 PublishLookAway(*reg, bot, st, now);
                 BreakMoverAuras(bot, st, cfg);

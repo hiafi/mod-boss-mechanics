@@ -279,6 +279,16 @@ namespace
         CHECK(SpellEffectSpot(false, true) == LandingSpot::Center);
         CHECK(SpellEffectSpot(true, true) == LandingSpot::Center);
         CHECK(SpellEffectSpot(false, false) == LandingSpot::None);
+        // Scarlet Monastery F-4a: a jump to the target's back (Feral Charge - Cat 49376) lands Behind; a jump onto
+        // the center as well keeps the center probe; a charge with it still lands Behind (the jump wins).
+        CHECK(SpellEffectSpot(false, false, true) == LandingSpot::Behind);
+        CHECK(SpellEffectSpot(true, false, true) == LandingSpot::Behind);
+        CHECK(SpellEffectSpot(false, true, true) == LandingSpot::Center);
+        CHECK(kTargetDestTargetBack == 65u);
+        CHECK(JumpLandsBehind(65, 0));      // 49376 effect 1: JUMP_DEST, TargetA 65 (Spell.dbc 3.3.5)
+        CHECK(JumpLandsBehind(0, 65));
+        CHECK(!JumpLandsBehind(6, 0));      // TARGET_UNIT_TARGET_ENEMY
+        CHECK(!JumpLandsBehind(64, 0));     // TARGET_DEST_TARGET_FRONT
     }
 
     // WP-F2 (STAGE-M4-R2-REPORT M-1 fix 4): the chase clock and its valve.

@@ -203,11 +203,15 @@ namespace
     // WP-Q2, WP-F2 (STAGE-M4-R2-REPORT m-5): how a spell's effects carry its caster to the cast unit: a charge
     // (CHARGE, CHARGE_DEST: Spell::EffectCharge stops at the target's reach on the caster's side) or a jump (JUMP,
     // JUMP_DEST: MoveJump onto the unit's position). LEAP, LEAP_BACK and TELEPORT_UNITS land elsewhere (Blink,
-    // Disengage; Shadowstep's own test is by name).
+    // Disengage; Shadowstep's own test is by name). Scarlet Monastery F-4a: a jump to the target's back (Feral Charge
+    // - Cat 49376: JUMP_DEST at TARGET_DEST_TARGET_BACK) lands Behind, so the probe is where the cat lands, not the
+    // target's center.
     LockRules::LandingSpot SpellLanding(SpellInfo const* info)
     {
+        static_assert(LockRules::kTargetDestTargetBack == uint32(TARGET_DEST_TARGET_BACK));
         bool charge = false;
         bool jump = false;
+        bool jumpBehind = false;
         for (SpellEffectInfo const& effect : info->GetEffects())
             switch (effect.Effect)
             {
@@ -217,12 +221,16 @@ namespace
                     break;
                 case SPELL_EFFECT_JUMP:
                 case SPELL_EFFECT_JUMP_DEST:
-                    jump = true;
+                    if (LockRules::JumpLandsBehind(uint32(effect.TargetA.GetTarget()),
+                        uint32(effect.TargetB.GetTarget())))
+                        jumpBehind = true;
+                    else
+                        jump = true;
                     break;
                 default:
                     break;
             }
-        return LockRules::SpellEffectSpot(charge, jump);
+        return LockRules::SpellEffectSpot(charge, jump, jumpBehind);
     }
 
     // The unit a gap closer lands next to and where it stops, for the Idle/Watch landing test.
@@ -359,6 +367,9 @@ namespace
     // round dest) is safe over the horizon. A refusal goes on the chase clock: the brain releases a bot refused for
     // BossMechanics.Bots.ChaseReleaseMs (the safety valve, a walk-in on a short horizon since M5 CD). The
     // brain's view (st.input) is current: the brain steps before the engine picks actions in the same AI tick.
+    // Scarlet Monastery F-4a: the stock chase stops on that ring, so it stays refused when only points nearer the
+    // target are safe (a band whose inner edge lies inside the ring); the brain then routes the bot to one of them
+    // (MechanicBotBrain.cpp StepChaseInnerRoute, Landing::ReachSafe) on its next step.
     bool ChaseRefused(Player* bot, MechanicBotState& st, Unit* dest, Milliseconds now)
     {
         Solver::Input const& in = st.input;

@@ -19,6 +19,7 @@
 
 #include "MechanicLockRules.h"
 #include "MechanicSolver.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -177,6 +178,47 @@ namespace BossMechanics::Landing
             }
         }
         return false;
+    }
+
+    // Scarlet Monastery F-4a (Halden's Close Ranks): melee reach is a disk, not a ring. With a band whose inner edge
+    // lies inside the melee ring (a donut on the boss, 5 yd inside), no ring point is safe while points nearer the
+    // boss are, and a tank refused its chase was left to the band. ReachSafe looks on the ring of `radiusYd`, then on
+    // rings kReachStepYd further in, down to kReachMinYd; `safe` gets the first point found (outermost ring first, the
+    // bot's side first on each). A point found inside the outer ring is taken kReachInsetYd deeper on its bearing when
+    // that point is safe too: the target keeps moving, and the band with it.
+    inline constexpr float kReachStepYd = 0.5f;
+    inline constexpr float kReachMinYd = 1.f;
+    inline constexpr float kReachInsetYd = 1.f;
+
+    inline bool ReachSafe(Solver::Input const& in, Geo::Vec3 const& center, Geo::Vec3 const& bot, float radiusYd,
+        Ms now, Ms to, Geo::Vec3* safe = nullptr)
+    {
+        if (!std::isfinite(radiusYd))
+            return false;
+        float r = radiusYd;
+        for (;;)
+        {
+            Geo::Vec3 p;
+            if (RingSafe(in, center, bot, r, now, to, &p))
+            {
+                float const dx = p.x - center.x;
+                float const dy = p.y - center.y;
+                float const len = std::sqrt(dx * dx + dy * dy);
+                float const deeper = std::max(kReachMinYd, r - kReachInsetYd);
+                if (r < radiusYd && len > 0.01f && deeper < r)
+                {
+                    Geo::Vec3 const q{ center.x + dx / len * deeper, center.y + dy / len * deeper, center.z };
+                    if (Solver::PointSafe(in, q, now, to))
+                        p = q;
+                }
+                if (safe)
+                    *safe = p;
+                return true;
+            }
+            if (r <= kReachMinYd)
+                return false;
+            r = std::max(kReachMinYd, r - kReachStepYd);
+        }
     }
 }
 

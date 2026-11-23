@@ -349,11 +349,24 @@ namespace BossMechanics::LockRules
     // A spell's effects that carry its caster to the cast unit, as the lock reads them (Spell::EffectCharge,
     // EffectChargeDest, EffectJump, EffectJumpDest): a charge stops at the target's reach on the caster's side, a jump
     // lands on the target's position. A jump wins over a charge (the center probe is the stricter one only for it).
-    inline LandingSpot SpellEffectSpot(bool charge, bool jump)
+    // Scarlet Monastery F-4a: a jump whose destination is the target's back (`jumpBehind`, an implicit target
+    // kTargetDestTargetBack: Feral Charge - Cat 49376, JUMP_DEST at TARGET_DEST_TARGET_BACK) lands behind the target
+    // by its facing, not on its center; a jump onto the center as well keeps the center probe.
+    inline constexpr uint32_t kTargetDestTargetBack = 65;     // Targets::TARGET_DEST_TARGET_BACK (SharedDefines.h)
+
+    inline LandingSpot SpellEffectSpot(bool charge, bool jump, bool jumpBehind = false)
     {
         if (jump)
             return LandingSpot::Center;
+        if (jumpBehind)
+            return LandingSpot::Behind;
         return charge ? LandingSpot::Reach : LandingSpot::None;
+    }
+
+    // A JUMP or JUMP_DEST effect with these implicit targets lands behind its target (SpellEffectSpot's `jumpBehind`).
+    inline bool JumpLandsBehind(uint32_t targetA, uint32_t targetB)
+    {
+        return targetA == kTargetDestTargetBack || targetB == kTargetDestTargetBack;
     }
 
     // The probe of a charge or a Behind landing, as a distance from the destination unit's center: its reach plus

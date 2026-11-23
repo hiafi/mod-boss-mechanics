@@ -1,12 +1,15 @@
 // Standalone tests for the Scarlet Monastery build's BM additions (SM-BM): the Gaze kind's pure rules
 // (src/MechanicGaze.h) and its resolve filter rule (MechanicJudge.h); Ordering::roleLast in the Soak claim
 // (MechanicAssign.h); EndBacksOff / TankNearSource's back-off spot and claim region (MechanicViewRules.h) run through
-// the solver; the facing hold rule; and the pass ids of a lasting Spread (Judge::CarrierPass). Build: tests/run.sh.
+// the solver; the facing hold rule; and the pass ids of a lasting Spread (Judge::CarrierPass). F-4a: the bot's own
+// walk against its look windows (Gaze::OwnWalkAt), the route in past a refused chase (Landing::ReachSafe, Halden's
+// Close Ranks band) and Feral Charge - Cat's Behind landing beside Ironspine's rot. Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicAssign.h"
 #include "MechanicGaze.h"
 #include "MechanicJudge.h"
+#include "MechanicLanding.h"
 #include "MechanicSolver.h"
 #include "MechanicViewRules.h"
 #include <chrono>
@@ -418,6 +421,130 @@ namespace
         CHECK(Solver::TargetOk(in, in.bot, kNow + Ms(11500), kNow + Ms(12000)));    // over
         CHECK(Solver::TargetOk(in, { 7.5f, 0.f, 0.f }, kNow, kNow + Ms(10000)));    // 6 yd + margin out
     }
+
+    // ---- F-4a ----------------------------------------------------------------------------------------------------
+
+    // Ironspine's Glare (D2 IR6, Gaze/9 on melee): a strand route asked at 63.5 s with the window opening at 64 s
+    // walked through it. The bot's own walk waits while a window is owed or opens within the lead, and one walking
+    // stops once a window is owed; outside the windows it goes.
+    void TestOwnWalk()
+    {
+        Ms const m{ 300 };
+        std::vector<Gaze::Window> const glares{ Gaze::LookWindow(Ms(64000), Ms(66000), Ms(0)),
+            Gaze::LookWindow(Ms(70000), Ms(72000), Ms(0)) };
+        using Gaze::OwnWalk;
+        CHECK(Gaze::OwnWalkAt({}, Ms(65000), m, false) == OwnWalk::Go);
+        CHECK(Gaze::OwnWalkAt({}, Ms(65000), m, true) == OwnWalk::Go);
+        // Well before: go. Within the lead (window - margin - 1000 ms): wait, but a walk already going walks on.
+        CHECK(Gaze::OwnWalkAt(glares, Ms(62000), m, false) == OwnWalk::Go);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(62699), m, false) == OwnWalk::Go);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(62700), m, false) == OwnWalk::Defer);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(63500), m, false) == OwnWalk::Defer);   // the sweep's strand at 63.5 s
+        CHECK(Gaze::OwnWalkAt(glares, Ms(63500), m, true) == OwnWalk::Go);
+        // Owed (the margin opens it early, closes it late): a start waits, a walk stops.
+        CHECK(Gaze::OwnWalkAt(glares, Ms(63700), m, true) == OwnWalk::Stop);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(65000), m, false) == OwnWalk::Defer);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(65000), m, true) == OwnWalk::Stop);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(66300), m, true) == OwnWalk::Stop);
+        // Between the glares: free again until the next one's lead.
+        CHECK(Gaze::OwnWalkAt(glares, Ms(66301), m, true) == OwnWalk::Go);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(67000), m, false) == OwnWalk::Go);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(68700), m, false) == OwnWalk::Defer);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(71000), m, true) == OwnWalk::Stop);
+        CHECK(Gaze::OwnWalkAt(glares, Ms(73000), m, false) == OwnWalk::Go);
+        // Against the Looker hold (TaskHoldUntil): every step the hold counts, the own walk is stopped or waits.
+        for (std::int64_t t = 60000; t <= 75000; t += 50)
+        {
+            bool owed = false;
+            for (Gaze::Window const& w : glares)
+                owed = owed || Gaze::LookOwedAt(w, Ms(t), m);
+            if (owed)
+            {
+                CHECK(Gaze::OwnWalkAt(glares, Ms(t), m, true) == OwnWalk::Stop);
+                CHECK(Gaze::OwnWalkAt(glares, Ms(t), m, false) == OwnWalk::Defer);
+            }
+        }
+    }
+
+    // Halden's Close Ranks (D10 MA4, Zone/27 on tanks): `donut 11 inner=5 anchor=target`. The tank's melee ring
+    // (melee range - 0.5: 4.5 yd for a warrior, more for a bear) lies in the band plus its margin, so the chase was
+    // refused with no way in. ReachSafe finds a point inside the inner edge, on the bot's side, within melee reach.
+    void TestReachSafe()
+    {
+        Solver::Input in;
+        in.now = kNow;
+        Solver::Hazard band;
+        band.id = 27;
+        band.shape = Shape::Donut(5.f, 11.f);
+        band.poses = { Pose{ 0.f, 0.f, 0.f, 0.f } };
+        band.marginYd = kMargin;
+        band.timing = Solver::MakeInterval(kNow, kNow + Ms(8000));
+        in.hazards.push_back(band);
+        Ms const to = kNow + in.params.horizon;
+        Vec3 const boss{};
+        for (float ring : { 4.5f, 5.5f, 6.8f })    // Prot Warrior, a bigger reach, Bear form
+        {
+            Vec3 const tank{ ring + 3.f, 1.f, 0.f };     // left behind as the boss stepped 4 yd away
+            CHECK(!Landing::RingSafe(in, boss, tank, ring, kNow, to));      // the chase as refused before
+            Vec3 safe{ 99.f, 99.f, 0.f };
+            CHECK(Landing::ReachSafe(in, boss, tank, ring, kNow, to, &safe));
+            float const r = std::sqrt(safe.x * safe.x + safe.y * safe.y);
+            CHECK(r <= ring && r >= Landing::kReachMinYd - 0.001f);         // within melee reach
+            CHECK(r <= 5.f - kMargin);                                      // clear of the band and its margin
+            CHECK(Solver::PointSafe(in, safe, kNow, to));
+            CHECK(safe.x > 0.f);                                            // on the bot's side
+            // A step deeper than the outermost safe ring (the boss keeps walking, the band with it).
+            CHECK(r <= 5.f - kMargin - Landing::kReachInsetYd + Landing::kReachStepYd + 0.001f);
+        }
+        // Nothing within reach: a circle on the boss covering the whole disk.
+        Solver::Input full = in;
+        full.hazards[0].shape = Shape::Circle(8.f);
+        Vec3 safe{};
+        CHECK(!Landing::ReachSafe(full, boss, Vec3{ 9.f, 0.f, 0.f }, 4.f, kNow, to, &safe));
+        // A clear ring: its own point, nothing deeper (the strand route's job, unchanged).
+        Solver::Input clear;
+        clear.now = kNow;
+        Vec3 const bot{ 9.f, 0.f, 0.f };
+        CHECK(Landing::ReachSafe(clear, boss, bot, 4.f, kNow, to, &safe));
+        Vec3 const first = Landing::RingPoint(boss, bot, 4.f, 0);
+        CHECK(Geo::Dist2d(safe.x, safe.y, first.x, first.y) < 0.001f);
+        // A bad radius finds nothing (no endless loop).
+        CHECK(!Landing::ReachSafe(in, boss, bot, std::nanf(""), kNow, to, &safe));
+        CHECK(!Landing::ReachSafe(full, boss, bot, 0.2f, kNow, to, &safe));
+        // After the band: the ring is clear again.
+        CHECK(Landing::RingSafe(in, boss, bot, 4.5f, kNow + Ms(9000), kNow + Ms(12000)));
+    }
+
+    // Feral Charge - Cat (49376: JUMP_DEST at TARGET_DEST_TARGET_BACK) beside Ironspine's rot: the boss dragged off
+    // the rot faces his tank, so his back points into it. The landing test now probes the boss's back (where the cat
+    // lands) and refuses the leap; the old center probe allowed it.
+    void TestFeralChargeLanding()
+    {
+        Solver::Input in;
+        in.now = kNow;
+        Solver::Hazard rot;
+        rot.id = 7;
+        rot.shape = Shape::Circle(7.f);
+        rot.poses = { Pose{ -9.f, 0.f, 0.f, 0.f } };        // the rot left behind; the boss stands at 0, 2 yd off it
+        rot.marginYd = kMargin;
+        rot.timing = Solver::MakeInterval(kNow, kNow + Ms(20000));
+        in.hazards.push_back(rot);
+        Ms const to = kNow + Ms(1000);
+        Landing::Dest boss;
+        boss.combatReachYd = 1.5f;
+        boss.facing = 0.f;                                  // toward the tank at +x; his back toward the rot
+        Vec3 const cat{ 4.f, 12.f, 0.f };                   // the Feral, out of melee on the side
+        using LockRules::LandingSpot;
+        LandingSpot const spot = LockRules::SpellEffectSpot(false, false, LockRules::JumpLandsBehind(65, 0));
+        CHECK(spot == LandingSpot::Behind);
+        CHECK(!Landing::LandingUnsafe(in, LandingSpot::Center, boss, cat, kNow, to));   // as built: allowed
+        CHECK(Landing::LandingUnsafe(in, spot, boss, cat, kNow, to));                   // now: refused
+        Vec3 const lands = Landing::LandingPoint(spot, boss, cat);
+        CHECK(lands.x < -2.f && std::fabs(lands.y) < 0.001f);
+        // Turned the other way (his back away from the rot) the leap is allowed.
+        boss.facing = Geo::kPi;
+        CHECK(!Landing::LandingUnsafe(in, spot, boss, cat, kNow, to));
+    }
 }
 
 int main()
@@ -433,5 +560,8 @@ int main()
     TestTormentSolve();
     TestFacingHold();
     TestCarrierPasses();
+    TestOwnWalk();
+    TestReachSafe();
+    TestFeralChargeLanding();
     return Report("sm_shapes_test");
 }
