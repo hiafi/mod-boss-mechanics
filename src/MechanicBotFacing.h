@@ -10,6 +10,11 @@
  * - the waker breaks a cast in progress on a target outside the arc when a window starts before the cast ends (the
  *   mid-cast re-facing in PlayerbotAI::UpdateAI cannot be stopped otherwise).
  *
+ * Scarlet Monastery F13 (Mechanic::Gaze, MechanicGaze.h): a gaze the bot is in range of is the same duty seen from the
+ * other side: over its look window the bot keeps the gaze's source out of its front arc (BotViewInfo::gazes), at the
+ * facing nearest its victim that clears it (Gaze::ChooseFacing); the face action, the lock and the waker hold it as
+ * above. A carried cone and a gaze at once: the gaze wins where they disagree.
+ *
  * Pure functions of the bot's state and live units; nothing is kept.
  */
 
@@ -37,7 +42,8 @@ namespace BossMechanics
         constexpr float kFaceToleranceDeg = 5.f;
 
         // Recomputes lookOwed, lookWindow, lookFacing, lookFrom/lookTo and faceOwed/faceAngle from st.input (the
-        // chooseFacing carried shapes) and the plan. Called on every brain step and by the waker for casting bots.
+        // chooseFacing carried shapes), st.viewInfo.gazes (F13) and the plan. Called on every brain step and by the
+        // waker for casting bots.
         void UpdateLookAway(Player const* bot, MechanicBotState& st, Milliseconds now);
 
         // A look-away window (widened by SafetyMarginMs) is open at `now`.

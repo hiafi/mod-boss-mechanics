@@ -104,11 +104,11 @@ namespace BossMechanics
             // M3: the player kinds, the tank tasks and the route search (STAGE-M3-HANDOFF §3.8 telemetry).
             handler->PSendSysMessage("  m3: carrier solves {}, claim solves {}, pick solves {}, role solves {}, "
                 "violated {}, freezes {}, facings {}, facing blocks {} (in escape {}), facing breaks {}, tank "
-                "re-facings {} (stopped by a warning {}), parks {}, routes {} ({} found, {} failed, us last {} max "
-                "{}), sight rays {}",
+                "re-facings {} (stopped by a warning or a hold {}, held {}), parks {}, routes {} ({} found, {} "
+                "failed, us last {} max {}), sight rays {}",
                 c.carrierSolves, c.claimSolves, c.pickSolves, c.roleSolves, c.violatedPlans, c.freezes,
                 c.facingsApplied, c.facingBlocks, c.escapeFacingBlocks, c.facingBreaks, c.tankRefacings,
-                c.refacingStops, c.parks,
+                c.refacingStops, c.tankFacingHeld, c.parks,
                 c.routesFound + c.routesFailed, c.routesFound, c.routesFailed, c.routeUsLast, c.routeUsMax,
                 c.sightRays);
             // M4 (STAGE-M4-HANDOFF §3.5-§3.7, WP-C): mode time, lock leaks (spell x count), the Fallback split by
@@ -150,8 +150,10 @@ namespace BossMechanics
             // recovery solves; M5 CD: the stranding clock and its routes; WP-Q3: the mover auras cancelled.
             handler->PSendSysMessage("  m4 landings: gap closers and chases refused {}, motions stopped for their end "
                 "{}, out of reach with the chase refused {} ms, chase walk-ins {}, recovery solves {}, stranded {} "
-                "ms (strand routes {}), mover auras cancelled {}", c.landingBlocks, c.motionEndStops, c.msChaseRefused,
-                c.chaseReleases, c.chaseSolves, c.msChaseStranded, c.strandRoutes, c.moverBreaks);
+                "ms (strand routes {}), inner routes {}, own walks held for a look {}, escapes stopped for a look {}, "
+                "mover auras cancelled {}", c.landingBlocks, c.motionEndStops, c.msChaseRefused, c.chaseReleases,
+                c.chaseSolves, c.msChaseStranded, c.strandRoutes, c.chaseInnerRoutes, c.lookWalkStops,
+                c.lookEscapeStops, c.moverBreaks);
             // Stratholme X3: the Jump kind's hops (MechanicBotBrain.cpp StepJump). The resolve's own count of who was
             // in the air (and how) is the registry's debug line "Jump <id> (tag <n>): ...".
             handler->PSendSysMessage("  x3 jumps: hops {} ({} along the walk), refused {}, could not hop {}, too late "

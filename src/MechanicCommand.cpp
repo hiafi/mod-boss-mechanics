@@ -11,7 +11,8 @@
  *   .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
  *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
- *               |blackrock-depths-shapes|blackrock-depths-shapes-2> [cycles=3] [seed=] [dmg=1] [self=0]
+ *               |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes
+ *               |scarlet-monastery-shapes-2> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -103,6 +104,33 @@
  * to=target|member|me` is a beam from the anchor to that unit (Shapes::Line(from, to, width): it turns with the unit,
  * its length is the distance at registration), and `at=target` lands a point where the selected unit stands as the
  * repeat registers (a drill parses its steps at the start, so a plain point stays where a walking boss started).
+ *
+ * Scarlet Monastery build (SM-BM; drills `scarlet-monastery-shapes` rows torment and glare build on these):
+ * `gaze <range> <ms> [arc=180] [lead=<ms>]` is a Mechanic::Gaze from the selected creature (else the test owner): at
+ * the end of the warning every scope member within range who faces it (the source inside the front arc) is hit
+ * (damage keys as a circle); bots turn away over the look window (MechanicGaze.h). On a `soak <width> <ms> shape=line
+ * to=...` beam, `backoff=<yd>` is EndBacksOff (the to= member's bot walks back along it to that far from the source),
+ * `tanknear=<yd>` is TankNearSource (a tank claimer soaks the first yd of it) and `exempt=target` leaves the to= unit
+ * out of the soak; `last=tank|healer|dps|nontank` on a soak is Ordering::roleLast (that role claims last; with or
+ * without order=); `holdfacing=1` on any shape is HoldTankFacing(the selected unit) (the tank does not re-face it
+ * while the shape lives: a spot in its frontal); and spread and runout take persist=<ms> tick=<ms> (Persistent: every
+ * carrier's circle judged at every tick).
+ *
+ * Scarlet Monastery build (WP-G1 §3.9, drill `scarlet-monastery-shapes`): `pick=tank` picks the selected unit's
+ * victim (none: anyone; Torment on the tank), `leash ... near=1` fails a member while it stands closer than <yd>
+ * (the targeted tank that did not back off), the drill-only step `chase <yd> <ms> [home=1]` makes the selected
+ * creature step after its victim like an unrooted boss (ScheduleChase; the sim's stand-in is rooted, so a tank's
+ * drag-out would leave it behind), and a drill's `marker <n>` remembers the marked member as the last pick, so a
+ * later `pick=same` lands on it (the Mark carrier's trail; MechanicDrill.h "Scarlet Monastery shapes").
+ *
+ * Scarlet Monastery build (WP-G2 §3.9, drill `scarlet-monastery-shapes-2`): `along=target` turns a point's axes
+ * (shift=, a line's facing) to the selected unit's own facing as the repeat registers (Thorne's furrow ahead of him),
+ * `past=<yd>` runs a reach=1 line that far past its to= unit (Crell's dash), `shift=` on a fixed to= line moves its
+ * source before it is aimed (a blade thrown from Herod's ledge), `leash ... anchor=self` judges each member against
+ * where it stood as the leash started, the drill-only step `holdfacing <ms>` is Mechanic::HoldTankFacing(the test
+ * owner, the selected unit, ms), and the drill runner now honors a step's `repeat=` / `every=` (it parsed and
+ * dropped them: `pass-eggs` laid one egg per cycle), keeping the step's tag on every repeat (MechanicDrill.h
+ * "repeat= and every= on a drill step").
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -481,7 +509,8 @@ namespace
             Any,                // a random member
             NonTank,            // a random member other than the selected unit's victim
             Same,               // the member the previous pick of this command landed on (else a random one)
-            Other               // a non-tank the chain has not picked (Drill::PickPool)
+            Other,              // a non-tank the chain has not picked (Drill::PickPool)
+            Tank                // the selected unit's victim, else a random member (Scarlet Monastery WP-G1)
         };
         enum class To : uint8
         {
@@ -580,13 +609,22 @@ namespace
         Milliseconds hideLinger{ 3000 };    // linger=: the blockers stay this long after the resolve
         // Blackrock Depths build WP-G2 (drill `blackrock-depths-shapes-2`)
         bool atTarget = false;          // at=target: where the selected unit stands as the repeat registers
+        // Scarlet Monastery build SM-BM
+        float gazeArc = Gaze::kDefaultArcDeg;   // gaze arc=: the front arc that counts as facing (degrees)
+        Milliseconds gazeLead{ 0 };             // gaze lead=: the bots' look window before the resolve (0: all)
+        float backOff = 0.f;            // soak backoff=: EndBacksOff (a to= beam)
+        float tankNear = 0.f;           // soak tanknear=: TankNearSource (a beam or lane)
+        bool holdFacing = false;        // holdfacing=1: HoldTankFacing(the selected unit)
+        // Scarlet Monastery build WP-G2 (drill `scarlet-monastery-shapes-2`)
+        bool alongTarget = false;       // along=target: a point's axes follow the selected unit's facing
+        float past = 0.f;               // line past=: a reach=1 line runs this far past the to= unit
     };
 
     bool IsShapeName(std::string const& s)
     {
         static char const* const shapes[] = { "circle", "donut", "cone", "rearcone", "line", "projectile", "mine",
             "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
-            "conefront", "linefront", "hide" };
+            "conefront", "linefront", "hide", "gaze" };
         for (char const* name : shapes)
             if (s == name)
                 return true;
@@ -857,7 +895,7 @@ namespace
                 ref.Count(spec.spreadCount);
             if (spec.selfAura)
                 ref.SelfTrigger(spec.selfAura, spec.selfMin);
-            ApplyCommon(ref, spec, true, false);
+            ApplyCommon(ref, spec, true, true);     // persist= (Scarlet Monastery F15): a lasting spread
             keep(ref);
         }
         else if (s == "runout")
@@ -880,7 +918,7 @@ namespace
                 ref.Count(spec.runoutCount);
             if (spec.selfAura)
                 ref.SelfTrigger(spec.selfAura, spec.selfMin);
-            ApplyCommon(ref, spec, true, false);
+            ApplyCommon(ref, spec, true, true);     // persist= (Scarlet Monastery F15): a lasting runout
             keep(ref);
         }
         else if (s == "stack")
@@ -915,6 +953,11 @@ namespace
             MechanicRef ref = beam ? Mechanic::Soak(owner, *beam, spec.need, spec.warn)
                 : spec.lane ? Mechanic::Soak(owner, laneSpec(), spec.need, spec.warn)
                 : Mechanic::Soak(owner, anchor, spec.size, spec.need, spec.warn);
+            // Scarlet Monastery F2: backoff= (a beam's to= end walks back), tanknear= (the tank at the source's end).
+            if (spec.backOff > 0.f)
+                ref.EndBacksOff(spec.backOff);
+            if (spec.tankNear > 0.f)
+                ref.TankNearSource(spec.tankNear);
             ApplyCommon(ref, spec, false, true);
             keep(ref);
         }
@@ -1002,6 +1045,19 @@ namespace
             ApplyCommon(ref, spec, true, false);
             keep(ref);
         }
+        else if (s == "gaze")
+        {
+            // Scarlet Monastery F13 (MechanicGaze.h): the selected creature (else the test owner) is the source; at the
+            // end of the warning every scope member within `size` yd who faces it is hit.
+            Unit* source = ObjectAccessor::GetUnit(*owner, spec.selected);
+            if (!source || !source->IsCreature() || !source->IsInWorld() || source->GetMap() != owner->GetMap())
+                source = owner;
+            GazeSpec gaze{ Anchor(source) };
+            gaze.Range(spec.size).Arc(spec.gazeArc).Lead(spec.gazeLead);
+            MechanicRef ref = Mechanic::Gaze(owner, gaze, spec.warn);
+            ApplyCommon(ref, spec, true, false);
+            keep(ref);
+        }
         else if (s == "conefront")
         {
             // WP-RF: a rolling cone front from the anchor point out to `size` yd, its slice at spec.sliceAbs.
@@ -1041,6 +1097,16 @@ namespace
             ApplyCommon(ref, spec, true, false);
             keep(ref);
         }
+        // Scarlet Monastery F6: holdfacing=1 (a bots-only option, so it may follow the commit): the tank of the
+        // selected unit (else the test owner) does not re-face it while these live.
+        if (spec.holdFacing)
+        {
+            Unit* source = ObjectAccessor::GetUnit(*owner, spec.selected);
+            if (!source || !source->IsInWorld() || source->GetMap() != owner->GetMap())
+                source = owner;
+            for (uint32 id : ids)
+                MechanicRef(owner->GetMap(), id, false).HoldTankFacing(source);
+        }
         if (ids.empty() && err.empty())
             err = "the registry refused it (see the server log: size, MaxActivePerMap or BossMechanics.Enable)";
         return ids;
@@ -1079,8 +1145,8 @@ namespace
     // A random member (pick=any), one other than the selected unit's victim (pick=nontank), or the member the last pick
     // of this command landed on while it is still usable (pick=same; else one other than the victim, as the steps
     // that follow a pick=nontank one expect: STAGE-M3-R-REPORT n-9), or a non-tank the chain has not picked
-    // (pick=other, Drill::PickPool). `source` (with min=): the point the min= distance is measured from. Remembered
-    // for pick=same and the chain.
+    // (pick=other, Drill::PickPool), or the selected unit's victim (pick=tank, else anyone). `source` (with min=): the
+    // point the min= distance is measured from. Remembered for pick=same and the chain.
     Player* PickMember(Creature* owner, TestSpec const& spec, Dice& dice, Position const* source = nullptr)
     {
         std::vector<Player*> const members = GroupMembers(owner, spec.gm, spec.includeGm);
@@ -1106,7 +1172,8 @@ namespace
             candidates.push_back(c);
         }
         Drill::PickRule const rule = spec.pick == TestSpec::Pick::Any ? Drill::PickRule::Any
-            : spec.pick == TestSpec::Pick::Other ? Drill::PickRule::Other : Drill::PickRule::NonTank;
+            : spec.pick == TestSpec::Pick::Other ? Drill::PickRule::Other
+            : spec.pick == TestSpec::Pick::Tank ? Drill::PickRule::Tank : Drill::PickRule::NonTank;
         std::vector<std::size_t> const pool = Drill::PickPool(candidates, rule, source ? spec.minDist : 0.f);
         if (pool.empty())
             return nullptr;
@@ -1406,6 +1473,17 @@ namespace
             }
             return ids;
         }
+        if (spec.alongTarget)
+        {
+            // along=target (Scarlet Monastery WP-G2): the axes of shift= (and a line's facing, turned by offset=) are
+            // the selected unit's facing now, not the run's: Thorne's furrow 5 yd ahead of him.
+            if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+            {
+                spec.facing = Geo::WrapPi(selected->GetOrientation() + Geo::DegToRad(spec.shape == "line"
+                    ? spec.offset : 0.f));
+                spec.point.SetOrientation(spec.facing);
+            }
+        }
         if (spec.atLast)
         {
             // The end of the fixed line `atBack` before the last; none: where the selected unit stands now.
@@ -1497,6 +1575,15 @@ namespace
             spec.unitAnchor = true;
             spec.unit = member->GetGUID();
             spec.target = member->GetGUID();
+        }
+        // A fixed to= line (Scarlet Monastery WP-G2): shift= moves its source first, along the run's (or along=)
+        // facing, and the line is aimed from there; otherwise shift= would move the frozen source along the aim.
+        if (spec.fix && spec.to != TestSpec::To::None && spec.shifted && !spec.unitAnchor)
+        {
+            Geo::Vec3 const p = Drill::Shifted({ spec.point.GetPositionX(), spec.point.GetPositionY(),
+                spec.point.GetPositionZ() }, spec.facing, spec.shiftAhead, spec.shiftLeft);
+            spec.point.Relocate(p.x, p.y, GroundZ(owner, p.x, p.y, p.z));
+            spec.shifted = false;
         }
         // Where a line starts now (min= measures from it, fix= freezes it there).
         Position source = spec.point;
@@ -1592,7 +1679,7 @@ namespace
             }
             Drill::FixedLine const line = Drill::FixLine({ source.GetPositionX(), source.GetPositionY(),
                 source.GetPositionZ() }, { toward.GetPositionX(), toward.GetPositionY(), toward.GetPositionZ() },
-                spec.size, spec.reach, spec.facing);
+                spec.size, spec.reach, spec.facing, spec.past);
             spec.unitAnchor = false;
             spec.to = TestSpec::To::None;
             spec.facing = line.facing;
@@ -1855,6 +1942,13 @@ namespace
             readTo(s == "line");
             spec.reach = opt.Bool("reach", false);
             spec.fix = spec.reach || opt.Bool("fix", false) || spec.to == TestSpec::To::Last;
+            // past=<yd> (line, Scarlet Monastery WP-G2): a reach=1 line runs that far past the to= unit.
+            if (s == "line" && opt.Has("past"))
+            {
+                spec.past = opt.Float("past", 0.f);
+                if (!(spec.past >= 0.f))
+                    opt.MarkBad("past");
+            }
             spec.minDist = opt.Float("min", 0.f);
             if (spec.minDist < 0.f)
                 opt.MarkBad("min");
@@ -1928,7 +2022,33 @@ namespace
             }
             // to=target|member|me with shape=line (Blackrock Depths WP-G2): a beam from the anchor to that unit.
             readTo(false);
+            // Scarlet Monastery F2: backoff=<yd> (EndBacksOff, a to= beam) and tanknear=<yd> (TankNearSource).
+            if (opt.Has("backoff"))
+            {
+                spec.backOff = opt.Float("backoff", 0.f);
+                if (!(spec.backOff > 0.f))
+                    opt.MarkBad("backoff");
+            }
+            if (opt.Has("tanknear"))
+            {
+                spec.tankNear = opt.Float("tanknear", 0.f);
+                if (!(spec.tankNear > 0.f))
+                    opt.MarkBad("tanknear");
+            }
         }
+        // Scarlet Monastery F13: `gaze <range> <ms> [arc=180] [lead=<ms>]`.
+        if (s == "gaze")
+        {
+            spec.gazeArc = opt.Float("arc", Gaze::kDefaultArcDeg);
+            if (!(spec.gazeArc >= Gaze::kMinArcDeg && spec.gazeArc <= Gaze::kMaxArcDeg))
+                opt.MarkBad("arc");
+            spec.gazeLead = opt.Ms("lead", Milliseconds(0));
+            if (spec.gazeLead < Milliseconds(0))
+                opt.MarkBad("lead");
+        }
+        // Scarlet Monastery F6: holdfacing=1 on any shape.
+        if (opt.Has("holdfacing"))
+            spec.holdFacing = opt.Bool("holdfacing", false);
         if (s == "hunt")
         {
             spec.huntRate = opt.Float("speed", Drill::kHuntRateNormal);
@@ -2120,7 +2240,7 @@ namespace
         if (s == "cone" || s == "rearcone" || s == "line" || s == "projectile")
             spec.follow = opt.Bool("follow", false);
         // exempt=target (Stratholme BZ1): the unit the shape aims at (to=) is spared; everyone else in scope is not.
-        if ((s == "cone" || s == "line" || s == "projectile") && opt.Has("exempt"))
+        if ((s == "cone" || s == "line" || s == "projectile" || s == "soak") && opt.Has("exempt"))
         {
             if (opt.Str("exempt", "") == "target")
                 spec.exemptTo = true;
@@ -2177,6 +2297,18 @@ namespace
                 spec.ordering = order;
             else
                 opt.MarkBad("order");
+        }
+        // Scarlet Monastery F7: last=<role> (a soak's Ordering::roleLast; with or without order=).
+        if (s == "soak" && opt.Has("last"))
+        {
+            if (std::optional<Role> role = ParseRole(opt.Str("last", "")); role && *role != Role::Any)
+            {
+                Ordering order = spec.ordering.value_or(Ordering());
+                order.roleLast = *role;
+                spec.ordering = order;
+            }
+            else
+                opt.MarkBad("last");
         }
         if (opt.Has("self"))
         {
@@ -2271,6 +2403,8 @@ namespace
             spec.pick = TestSpec::Pick::Same;
         else if (pick == "other")
             spec.pick = TestSpec::Pick::Other;
+        else if (pick == "tank")
+            spec.pick = TestSpec::Pick::Tank;
         else if (pick != "any")
             opt.MarkBad("pick");
         if (opt.Has("shift"))
@@ -2278,6 +2412,14 @@ namespace
             spec.shifted = ParseShift(opt.Str("shift", ""), spec.shiftAhead, spec.shiftLeft);
             if (!spec.shifted)
                 opt.MarkBad("shift");
+        }
+        // along=target (Scarlet Monastery WP-G2): the point's axes turn with the selected unit as the repeat registers.
+        if (opt.Has("along"))
+        {
+            if (opt.Str("along", "") == "target")
+                spec.alongTarget = true;
+            else
+                opt.MarkBad("along");
         }
 
         // anchor
@@ -2358,12 +2500,22 @@ namespace
                 || (spec.to == TestSpec::To::Me && spec.unit == gm->GetGUID())))
                 return "a beam needs two ends: anchor= and to= name the same unit";
         }
+        if (spec.backOff > 0.f && (spec.to == TestSpec::To::None || spec.to == TestSpec::To::Last || !spec.lane))
+            return "backoff= is for a beam's to= end: a soak shape=line to=member, target or me";
+        if (spec.tankNear > 0.f && !spec.lane)
+            return "tanknear= is for a line soak: add shape=line";
+        if (spec.bells && (spec.backOff > 0.f || spec.tankNear > 0.f))
+            return "bell= places the soak on one of its points: no backoff= or tanknear=";
         if (spec.fix && spec.to == TestSpec::To::None)
             return "fix=1 and reach=1 aim at the to= unit: add to=member, target or me";
         if (spec.fix && (spec.follow || s == "projectile"))
             return "fix=1 and reach=1 freeze a line: no follow=1, no projectile";
         if (spec.minDist > 0.f && spec.to != TestSpec::To::Member)
             return "min= measures a to=member pick from the line's source: add to=member";
+        if (spec.past > 0.f && (!spec.reach || spec.to == TestSpec::To::Last))
+            return "past= runs a reach=1 line beyond its to= unit: add reach=1 and to=member, target or me";
+        if (spec.alongTarget && (selected == gm || spec.unitAnchor || spec.anchorMember))
+            return "along=target turns a point's axes with the selected unit: select one, leave anchor= out";
         if (spec.offset != 0.f && s == "frontal" && spec.rear)
             return "a frontal takes rear=1 or offset=, not both";
         if (spec.atEach && (s == "spot" || s == "spread" || s == "runout" || s == "bait" || s == "holdstill"
@@ -2424,7 +2576,8 @@ namespace
     }
 
     // `.mech drill` step `marker <stacks>`: stacks > 0 sets exactly that many Marked (drill) stacks (205009) on one
-    // random member below it (not the selected unit's victim with pick=nontank); 0 removes Marked from every member.
+    // random member below it (not the selected unit's victim with pick=nontank), remembered as the run's last pick (a
+    // later pick=same lands on it: Scarlet Monastery WP-G1's Mark trail); 0 removes Marked from every member.
     // Never touches Weakened: drill setup hands out no Weakened, and a reset leaves the Weakened members earned from
     // real failures (orchestrator ruling on STAGE-M4-R-REPORT M-2). The encounter records the players, so its end
     // (and `.mech clear`) removes Marked too. The spell row was checked when the drill was parsed.
@@ -2458,6 +2611,9 @@ namespace
         aura->SetStackAmount(stacks);
         aura->RefreshDuration();
         Registry::GetOrCreate(owner->GetMap()).BeginEncounter(owner->GetGUID()).markedPlayers.insert(p->GetGUID());
+        dice.lastMember = p->GetGUID();
+        dice.chain.clear();
+        dice.chain.push_back(p->GetGUID());
     }
 
     // ---- the drill runner (M4, MechanicDrillRunner.h) -------------------------------------------------------------
@@ -2527,13 +2683,22 @@ namespace
     // Drill step `leash` (Blackrock Depths WP-G1): every tick for `l.ms`, each alive scope member (role=: the ones the
     // role provider calls tanks / healers / not healers for the selected unit) farther than `l.yd` from the selected
     // unit (anchor=tank: from every other alive scope tank; none: skipped) takes an OffSpot failure on the owner's
-    // encounter (ledger key Zone/<tag>). No mechanic registers: the bots never see it.
+    // encounter (ledger key Zone/<tag>); near=1 (Scarlet Monastery WP-G1): each one closer than that instead;
+    // anchor=self (Scarlet Monastery WP-G2): each one farther than that from where it stood as the leash started
+    // (a member with no start spot, joined later, is skipped). No mechanic registers: the bots never see it.
     void ScheduleLeash(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
         Drill::LeashStep const& l)
     {
+        auto const starts = std::make_shared<std::unordered_map<ObjectGuid, Geo::Vec3>>();
+        if (l.anchor == Drill::LeashAnchor::Self)
+            schedule(delay, [spec, starts](Creature* testOwner)
+            {
+                for (Player const* p : GroupMembers(testOwner, spec.gm, spec.includeGm))
+                    (*starts)[p->GetGUID()] = { p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() };
+            });
         uint32 const ticks = Drill::LeashTicks(l.ms, l.tickMs);
         for (uint32 k = 1; k <= ticks; ++k)
-            schedule(delay + Milliseconds(static_cast<int64>(k) * l.tickMs), [spec, l](Creature* testOwner)
+            schedule(delay + Milliseconds(static_cast<int64>(k) * l.tickMs), [spec, l, starts](Creature* testOwner)
             {
                 Unit* unit = ObjectAccessor::GetUnit(*testOwner, spec.selected);
                 if (!unit || !unit->IsInWorld() || !unit->IsAlive())
@@ -2552,7 +2717,13 @@ namespace
                     if (!Drill::LeashJudges(l.role, HasRole(roles[i], Role::Tank), HasRole(roles[i], Role::Healer)))
                         continue;
                     Geo::Vec3 const pos{ p->GetPositionX(), p->GetPositionY(), p->GetPositionZ() };
-                    if (l.anchor == Drill::LeashAnchor::Tank)
+                    if (l.anchor == Drill::LeashAnchor::Self)
+                    {
+                        auto const it = starts->find(p->GetGUID());
+                        if (it == starts->end() || !Drill::LeashFails(l.near, Drill::OutOfLeash(it->second, pos, l.yd)))
+                            continue;
+                    }
+                    else if (l.anchor == Drill::LeashAnchor::Tank)
                     {
                         std::vector<Geo::Vec3> tanks;
                         for (std::size_t j = 0; j < members.size(); ++j)
@@ -2560,10 +2731,10 @@ namespace
                                 tanks.push_back({ members[j]->GetPositionX(), members[j]->GetPositionY(),
                                     members[j]->GetPositionZ() });
                         std::optional<bool> const out = Drill::OutOfTankLeash(tanks, pos, l.yd);
-                        if (!out || !*out)
+                        if (!out || !Drill::LeashFails(l.near, *out))
                             continue;
                     }
-                    else if (!Drill::OutOfLeash(at, pos, l.yd))
+                    else if (!Drill::LeashFails(l.near, Drill::OutOfLeash(at, pos, l.yd)))
                         continue;
                     FailureEvent e;
                     e.encounter = testOwner->GetGUID();
@@ -2575,6 +2746,54 @@ namespace
                     reg.PostFailure(e);
                 }
             });
+    }
+
+    // Drill step `chase` (Scarlet Monastery WP-G1, MechanicDrill.h): for `c.ms` the selected creature steps after its
+    // victim every kChaseStepMs like an unrooted boss: from its melee range in to its combat reaches + 0.5 (the stop
+    // the tank's drag-out plans for, MechanicBotRole.cpp), at most kChaseSpeedYdS, never more than `c.yd` from where
+    // the chase started (NearTeleportTo: the sim's rooted stand-in moves too), facing its victim. home=1: back to the
+    // start at the end. A creature only: never a player.
+    void ScheduleChase(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::ChaseSpec const& c)
+    {
+        auto const start = std::make_shared<std::optional<Position>>();
+        uint32 const steps = Drill::ChaseSteps(c.ms);
+        float const maxStep = Drill::kChaseSpeedYdS * static_cast<float>(Drill::kChaseStepMs) / 1000.f;
+        for (uint32 k = 0; k <= steps; ++k)
+        {
+            uint32 const elapsed = k ? std::min(k * Drill::kChaseStepMs, c.ms) : 0;
+            bool const last = k == steps;
+            schedule(delay + Milliseconds(elapsed), [selected = spec.selected, start, c, maxStep, elapsed, last](
+                Creature* testOwner)
+            {
+                Creature* unit = ObjectAccessor::GetCreature(*testOwner, selected);
+                if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                    return;
+                if (!*start)
+                    *start = unit->GetPosition();
+                if (!elapsed)
+                    return;
+                Position const& s = **start;
+                if (last && c.home)
+                {
+                    unit->NearTeleportTo(s.GetPositionX(), s.GetPositionY(), s.GetPositionZ(), s.GetOrientation());
+                    return;
+                }
+                Unit* victim = unit->GetVictim();
+                if (!victim || !victim->IsInWorld() || victim->GetMap() != unit->GetMap())
+                    return;
+                std::optional<Geo::Vec3> const p = Drill::ChaseRelocation(
+                    { s.GetPositionX(), s.GetPositionY(), s.GetPositionZ() },
+                    { unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() },
+                    { victim->GetPositionX(), victim->GetPositionY(), victim->GetPositionZ() },
+                    unit->GetMeleeRange(victim), unit->GetCombatReach() + victim->GetCombatReach() + 0.5f, maxStep,
+                    c.yd);
+                if (!p)
+                    return;
+                unit->NearTeleportTo(p->x, p->y, GroundZ(testOwner, p->x, p->y, unit->GetPositionZ()),
+                    unit->GetAngle(victim));
+            });
+        }
     }
 
     // RunDrill with the run's dice (a program shares one across its entries).
@@ -2608,6 +2827,9 @@ namespace
             uint8 stacks = 0;
             std::optional<Drill::WalkStep> walk;        // `walk` (Blackrock Depths WP-G1)
             std::optional<Drill::LeashStep> leash;      // `leash`
+            std::optional<Drill::ChaseSpec> chase;      // `chase` (Scarlet Monastery WP-G1)
+            std::optional<uint32> holdFacingMs;         // `holdfacing <ms>` (Scarlet Monastery WP-G2)
+            std::vector<uint32> repeats{ 0 };           // repeat= / every=: each repeat's offset (Drill::RepeatOffsets)
             TestSpec spec;
         };
         ParseCtx const ctx = CtxOf(scope, scopeGuid);
@@ -2653,19 +2875,38 @@ namespace
                 planned.push_back(std::move(p));
                 continue;
             }
-            if (!head.empty() && (head[0] == "walk" || head[0] == "leash"))
+            if (!head.empty() && head[0] == "holdfacing")
             {
-                // Drill-only (MechanicDrill.h "Blackrock Depths shapes"): the selected unit walks, or the scope
-                // members it leaves behind take ledger failures; nothing registers.
+                // Drill-only (MechanicDrill.h "Scarlet Monastery shapes, wave 2"): the selected unit's bot tank holds
+                // its facing for <ms> (Mechanic::HoldTankFacing, SM-BM F6); nothing registers.
+                p.holdFacingMs = Drill::ParseHoldFacing(line);
+                if (!p.holdFacingMs)
+                {
+                    err = Acore::StringFormat("Drill {}: bad step '{}' (holdfacing <ms>)", def.name, step.line);
+                    return false;
+                }
+                p.spec.gm = scopeGuid;
+                p.spec.includeGm = self;
+                p.spec.selected = boss->GetGUID();
+                planned.push_back(std::move(p));
+                continue;
+            }
+            if (!head.empty() && (head[0] == "walk" || head[0] == "leash" || head[0] == "chase"))
+            {
+                // Drill-only (MechanicDrill.h "Blackrock Depths shapes", "Scarlet Monastery shapes"): the selected
+                // unit walks or chases its victim, or the scope members it leaves behind take ledger failures;
+                // nothing registers.
                 if (head[0] == "walk")
                     p.walk = Drill::ParseWalk(line);
-                else
+                else if (head[0] == "leash")
                     p.leash = Drill::ParseLeash(line);
-                if (!p.walk && !p.leash)
+                else
+                    p.chase = Drill::ParseChase(line);
+                if (!p.walk && !p.leash && !p.chase)
                 {
                     err = Acore::StringFormat("Drill {}: bad step '{}' (walk <yd> <ms> [offset=<deg>], leash <yd> "
-                        "<ms> [role=tank|healer|nonhealer|any] [anchor=tank] [tick=<ms>] tag=<n>)", def.name,
-                        step.line);
+                        "<ms> [role=tank|healer|nonhealer|any] [anchor=tank|self] [tick=<ms>] [near=1] tag=<n>, "
+                        "chase <yd> <ms> [home=1])", def.name, step.line);
                     return false;
                 }
                 p.spec.gm = scopeGuid;
@@ -2690,6 +2931,9 @@ namespace
                 return false;
             }
             p.spec.includeGm = self;
+            // repeat= / every= (Scarlet Monastery WP-G2): the runner used to drop them; each repeat keeps the step's
+            // tag (a drill's tag names its mechanic: `pass-eggs`' 40 eggs are all Zone/60).
+            p.repeats = Drill::RepeatOffsets(repeat, static_cast<uint32>(every.count()));
             planned.push_back(std::move(p));
         }
 
@@ -2711,18 +2955,28 @@ namespace
                 ScheduleWalk(schedule, delay, p.spec, *p.walk);
             else if (p.leash)
                 ScheduleLeash(schedule, delay, p.spec, *p.leash);
-            else
-                schedule(delay, [spec = p.spec, rng, follow](Creature* testOwner)
+            else if (p.chase)
+                ScheduleChase(schedule, delay, p.spec, *p.chase);
+            else if (p.holdFacingMs)
+                schedule(delay, [selected = p.spec.selected, ms = *p.holdFacingMs](Creature* testOwner)
                 {
-                    // The Bait's owner stands where the creature stands now, not where it stood at the start: the
-                    // tank drags it (STAGE-M3-R-REPORT m-15).
-                    if (follow)
-                        if (Unit* creature = ObjectAccessor::GetUnit(*testOwner, spec.selected))
-                            if (creature->IsAlive())
-                                PlaceTestOwner(testOwner, creature->GetPosition());
-                    std::string ignored;
-                    RegisterRepeat(testOwner, spec, *rng, ignored);
+                    if (Unit* unit = ObjectAccessor::GetUnit(*testOwner, selected))
+                        if (unit->IsInWorld() && unit->IsAlive())
+                            Mechanic::HoldTankFacing(testOwner, unit, Milliseconds(ms));
                 });
+            else
+                for (uint32 offset : p.repeats)
+                    schedule(delay + Milliseconds(offset), [spec = p.spec, rng, follow](Creature* testOwner)
+                    {
+                        // The Bait's owner stands where the creature stands now, not where it stood at the start: the
+                        // tank drags it (STAGE-M3-R-REPORT m-15).
+                        if (follow)
+                            if (Unit* creature = ObjectAccessor::GetUnit(*testOwner, spec.selected))
+                                if (creature->IsAlive())
+                                    PlaceTestOwner(testOwner, creature->GetPosition());
+                        std::string ignored;
+                        RegisterRepeat(testOwner, spec, *rng, ignored);
+                    });
         }
         out.seed = rng->rng.Seed();
         out.cycles = cycles;

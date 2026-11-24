@@ -133,6 +133,11 @@ namespace BossMechanics
         Geo::Vec3 routeGoal;
         Milliseconds routeAskedAt{ 0 };
         Milliseconds lastRouteAt{ 0 };
+        // Scarlet Monastery F-4a: the pending route is the bot's own walk (a strand route, the route in past a refused
+        // chase), and the Escape walks one: a gaze's look window defers or stops it (Gaze::OwnWalkAt).
+        bool ownRouteAsked = false;
+        bool ownWalk = false;
+        bool ownWalkDeferred = false;                       // ...one was held back last step (counted once per run)
         std::size_t waypointIdx = 0;                        // plan.waypoints: the leg the move action walks
         Milliseconds lastTrackAt{ 0 };                      // region tracking re-solves (MovingAnchorRecheckMs)
         Milliseconds lastSightAt{ 0 };                      // healer line-of-sight checks

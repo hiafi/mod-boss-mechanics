@@ -18,6 +18,7 @@
 #include "Duration.h"
 #include "MechanicDescriptor.h"
 #include "MechanicFront.h"
+#include "MechanicGaze.h"
 #include "MechanicGeometry.h"
 #include "MechanicHide.h"
 #include "MechanicJudge.h"
@@ -181,6 +182,10 @@ namespace BossMechanics
         uint32 auraSpell = 0;
         bool ascending = true;
         uint8 capStacks = 0;            // players at or above this many stacks never claim (0 = no cap)
+        // Scarlet Monastery F7 (Soak): players of these roles claim only the slots nobody else can fill (the Vigil
+        // Flame: the tank last). Role::None = no role key. The role is the module's role provider's (the owner's
+        // victim is the tank). Bots only (Assign::SoakClaimers).
+        Role roleLast = Role::None;
     };
 
     struct SelfTrigger
@@ -467,6 +472,35 @@ namespace BossMechanics
         bool warnedAllBad = false;                              // the one-time "no spot is good" warning
     };
 
+    // The Gaze kind (Scarlet Monastery F13, Mechanic::Gaze; pure rules in MechanicGaze.h). At the end of the warning
+    // everyone eligible within rangeYd of the source (on the plane; the shape's zTolerance in height) whose front arc
+    // (arcDeg wide, centered on the player's facing) holds the source is hit. Bots turn away over the look window
+    // ([resolve - lead, resolve]; lead 0 = the whole warning). Built in place and passed to Mechanic::Gaze:
+    //
+    //     GazeSpec glare(eye);                                    // the source: the Eye
+    //     Mechanic::Gaze(me, glare.Range(40.f), 2000ms).Rider(SPELL_GLARE_STUN).Tag(IR6);
+    struct GazeSpec
+    {
+        Anchor source;                  // whose gaze (a unit: its live position; a point); unset: the owner
+        float rangeYd = Gaze::kDefaultRangeYd;          // players farther are not judged (at most kMaxRangeYd)
+        float arcDeg = Gaze::kDefaultArcDeg;            // the front arc that counts as facing (180: the front half)
+        Milliseconds lead{ 0 };                         // bots: look away this long before the resolve (0: all of it)
+
+        GazeSpec() = default;
+        explicit GazeSpec(Anchor const& src) : source(src) { }
+
+        GazeSpec& Range(float yd) { rangeYd = yd; return *this; }
+        GazeSpec& Arc(float deg) { arcDeg = deg; return *this; }
+        GazeSpec& Lead(Milliseconds ms) { lead = ms; return *this; }
+    };
+
+    // A Gaze's runtime (Registry::StepGaze): the spec and who looked away at the resolve.
+    struct GazeState
+    {
+        GazeSpec spec;
+        GuidSet away;                   // at the resolve: in range, facing away (spared)
+    };
+
     // A bot's planned spot on one mechanic (M3 handoff §3.6). Registry::Reserve replaces the bot's earlier entry and
     // keeps its `since`; Tick drops it at `until`.
     struct Reservation
@@ -644,6 +678,21 @@ namespace BossMechanics
         GuidSet jumpCleared;
         // Hide (Blackrock Depths BD1): the spec, the bots' spots and the resolve's verdict (Registry::StepHide).
         std::optional<HideState> hide;
+        // Gaze (Scarlet Monastery F13): the spec and the resolve's verdict (Registry::StepGaze).
+        std::optional<GazeState> gaze;
+        // ---- Scarlet Monastery SM-BM (bots only unless noted) ----
+        // EndBacksOff(yd) (F2, a Line Stack/Soak whose `to` end is a unit: Torment): the `to` player's bot walks back
+        // along the line until it stands endBackOffYd from the source, opening the line for the claimers, and holds
+        // there; the claimers' region runs from the source to that end. The hitbox is at least this long
+        // (MechanicRef::EndBacksOff sets the length).
+        float endBackOffYd = 0.f;
+        // TankNearSource(yd) (F2): a tank claimer's region is the first tankNearYd of the line from its source (the
+        // tank soaks at the boss's end, the others fill the rest).
+        float tankNearYd = 0.f;
+        // HoldTankFacing(unit) (F6, any kind): while this is active the bot tank of `holdFacingSource` (empty: the
+        // owner) never walks round it to re-face it (Thorne's Sow carriers stand in his Prune cone on purpose).
+        bool holdTankFacing = false;
+        ObjectGuid holdFacingSource;
 
         bool IsShapeKind() const { return Judge::IsShapeKind(kind); }
         bool IsCluster() const { return kind == Kind::Stack && clusterMinOthers > 0; }
@@ -795,6 +844,9 @@ namespace BossMechanics
                                             // moves; unique across the map's encounters, an owner's new one too)
         std::vector<EncounterUnit> units;   // adds and tracked units (not the owner)
         std::vector<HeldPlayer> held;       // prisons and the players they hold
+        // Scarlet Monastery F6 (Mechanic::HoldTankFacing): sources whose bot tank holds its facing until the time
+        // given (Registry::kForever: until released or the encounter ends). Bots only.
+        std::unordered_map<ObjectGuid, Milliseconds> facingHolds;
     };
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -909,6 +961,15 @@ namespace BossMechanics
         // The live encounter `unit` belongs to: as its owner, else as a tracked unit. nullptr: none.
         Encounter const* FindEncounterOfUnit(ObjectGuid unit) const;
 
+        // ---- Scarlet Monastery F6 (tank facing holds; bots only) ----
+        // The bot tank of `source` holds its facing until `until` (Registry::kForever: until released); a later call
+        // replaces the time. Begins the owner's encounter when needed; goes with it.
+        void HoldTankFacing(ObjectGuid owner, ObjectGuid source, Milliseconds until);
+        void ReleaseTankFacing(ObjectGuid owner, ObjectGuid source);
+        // `source`'s tank must not re-face it now: an encounter hold not yet over, or an active mechanic with
+        // HoldTankFacing naming it (or owned by it, when it names none).
+        bool TankFacingHeld(ObjectGuid source, Milliseconds now) const;
+
         // ---- resolve spell (C2's spell_boss_mechanics_resolve calls these) ----
         // OnObjectAreaTargetSelect: keeps the units inside ctx (shape, sweep band, only/exclude), eligible, not
         // tank-exempt, player-controlled, and not yet hit this pass; records them in hitPerPass. A mechanic that is
@@ -986,6 +1047,10 @@ namespace BossMechanics
         // source sees `p` (or `who`, when it is a unit in the map) from there. Range is not checked here.
         Position HideSource(ActiveMechanic const& m) const;
         bool HideSees(ActiveMechanic const& m, Position const& p, Unit const* who = nullptr) const;
+        // Gaze (Scarlet Monastery F13): the source's position now (its unit, else the last known pose), and whether a
+        // player at `p` facing `facing` faces it (Gaze::Faces; range is not checked here).
+        Position GazeSource(ActiveMechanic const& m) const;
+        bool GazeFaces(ActiveMechanic const& m, Position const& p, float facing) const;
 
     private:
         Unit* FindUnit(ObjectGuid guid) const;
@@ -1009,6 +1074,7 @@ namespace BossMechanics
         void StepSpot(ActiveMechanic& m, Milliseconds now);
         void StepJump(ActiveMechanic& m, Milliseconds now);
         void StepHide(ActiveMechanic& m, Milliseconds now);
+        void StepGaze(ActiveMechanic& m, Milliseconds now);
         // Hide: places every eligible player in range on a spot behind a live blocker (MechanicHide.h Assign, each
         // candidate spot judged by a real ray, the floor and the encounter's lasting zones). `force`: even when
         // nothing changed (Hide::NeedsReplace). Bumps the revision when the spots change.

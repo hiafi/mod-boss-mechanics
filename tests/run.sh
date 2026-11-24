@@ -5,8 +5,8 @@
 # src/MechanicDrillPlan.h, src/MechanicLockRules.h, src/MechanicLeaks.h, src/MechanicCost.h, src/MechanicLanding.h,
 # src/MechanicDescriptor.h, src/MechanicDescriptorPresets.h, src/MechanicRoleRules.h, src/MechanicDispelRules.h,
 # src/MechanicKickRules.h, src/MechanicTargetRules.h, src/MechanicRefHealth.h, src/MechanicJump.h,
-# src/MechanicTauntSwap.h, src/MechanicPass.h, src/MechanicFront.h, src/MechanicHide.h; tests/brain_model.h
-# models the brain's step cycle on them): no server build needed.
+# src/MechanicTauntSwap.h, src/MechanicPass.h, src/MechanicFront.h, src/MechanicHide.h, src/MechanicGaze.h;
+# tests/brain_model.h models the brain's step cycle on them): no server build needed.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +21,7 @@ for test in geometry_test math_test barrage_test solver_test solver_m3_test assi
     fight_test descriptor_test role_rules_test dispel_rules_test kick_rules_test drop_spot_test \
     target_rules_test ref_health_test hunt_test decoy_test scholo_shapes_test strat_followups_test \
     lethal_test jump_test brs_followups_test taunt_swap_test pass_test front_test brs_upper_followups_test \
-    brd_shapes_test descriptor_ds_test hide_test; do
+    brd_shapes_test descriptor_ds_test hide_test sm_shapes_test sm_drill_test sm2_drill_test; do
   "$CXX" -std=c++20 -Wall -Wextra -Werror -O1 -I "$root/src" -I "$here" "$here/$test.cpp" -o "$out/$test"
   if ! "$out/$test"; then
     status=1

@@ -144,6 +144,7 @@ namespace BossMechanics
             case Kind::Spot: return "Spot";
             case Kind::Jump: return "Jump";
             case Kind::Hide: return "Hide";
+            case Kind::Gaze: return "Gaze";
         }
         return "?";
     }
@@ -1170,6 +1171,16 @@ namespace BossMechanics
                 Unit const* u = who.IsEmpty() ? nullptr : FindUnit(who);
                 return HideSees(m, p, u && u->GetExactDist(&p) < 0.1f ? u : nullptr);
             }
+            case Kind::Gaze:
+            {
+                // In range, and (when `who` stands at p) facing the source; a bare point has no facing: in range.
+                if (!m.gaze || !Geo::Contains(m.shape, AnchorPose(m), v))
+                    return false;
+                Unit const* u = who.IsEmpty() ? nullptr : FindUnit(who);
+                if (!u || u->GetExactDist(&p) >= 0.1f)
+                    return true;
+                return GazeFaces(m, p, u->GetOrientation());
+            }
             case Kind::Bait:
             case Kind::HoldStill:
                 return false;
@@ -1359,6 +1370,7 @@ namespace BossMechanics
             c.decoy = m->decoy;
             c.airborne = m->jumpCleared.count(u->GetGUID()) != 0;    // Jump: judged by StepJump before the cast
             c.hidden = m->hide && m->hide->hidden.count(u->GetGUID()) != 0;  // Hide: judged by StepHide before it
+            c.lookedAway = m->gaze && m->gaze->away.count(u->GetGUID()) != 0;  // Gaze: judged by StepGaze before it
             if (!Judge::KeepResolveTarget(m->kind, c))
                 return true;
             done.insert(u->GetGUID());
@@ -1463,6 +1475,7 @@ namespace BossMechanics
                 c.decoy = m.decoy;
                 c.airborne = m.jumpCleared.count(p->GetGUID()) != 0;
                 c.hidden = m.hide && m.hide->hidden.count(p->GetGUID()) != 0;
+                c.lookedAway = m.gaze && m.gaze->away.count(p->GetGUID()) != 0;
                 if (!Judge::KeepResolveTarget(m.kind, c))
                     continue;
                 done.insert(p->GetGUID());
@@ -1635,6 +1648,9 @@ namespace BossMechanics
             case Kind::Hide:
                 StepHide(m, now);
                 break;
+            case Kind::Gaze:
+                StepGaze(m, now);
+                break;
         }
     }
 
@@ -1788,17 +1804,33 @@ namespace BossMechanics
 
     void Registry::StepCarriers(ActiveMechanic& m, Milliseconds now)
     {
-        if (now < m.resolveAt && !m.detonateRequested)
-            return;
-        m.detonateRequested = false;
-        ResolveResult r = BaseResult(m, 0);
+        // Scarlet Monastery F15: a lasting Spread or RunOut (Persistent) judges every carrier's circle at every tick
+        // from its resolve to `until` (tick 0: once, then the rings linger); each tick is one onResolve.
+        uint32 tick = 0;
+        if (m.persist)
+        {
+            if (!TakePersistPass(m, now, tick))
+            {
+                if (m.resolved && now >= m.persist->until)
+                    m.finished = true;
+                return;
+            }
+        }
+        else
+        {
+            if (now < m.resolveAt && !m.detonateRequested)
+                return;
+            m.detonateRequested = false;
+        }
+        ResolveResult r = BaseResult(m, tick);
         Unit const* owner = FindUnit(m.owner);
         Shape circle = Shape::Circle(m.shape.radius);
         circle.zTolerance = m.shape.zTolerance;
-        uint32 pass = 0;
+        uint32 carrier = 0;
         for (ObjectGuid const& c : Carriers(m))
         {
-            uint32 const thisPass = pass++;
+            uint32 const thisPass = m.persist ? Judge::CarrierPass(tick, carrier) : carrier;
+            ++carrier;
             Unit const* cu = FindUnit(c);
             if (!cu || !cu->IsAlive())
                 continue;
@@ -1816,7 +1848,8 @@ namespace BossMechanics
         }
         r.count = r.hits.size();
         m.resolved = true;
-        m.finished = true;
+        if (!m.persist || now >= m.persist->until)
+            m.finished = true;
         Report(m, r);
     }
 
@@ -2276,5 +2309,94 @@ namespace BossMechanics
                 "the last of {} placement(s)", m.id, m.tag, judged, h.hidden.size(), r.hits.size(), h.live.size(),
                 h.placements);
         Report(m, r);
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // Gaze (Scarlet Monastery F13; MechanicGaze.h)
+    // ----------------------------------------------------------------------------------------------------------------
+    Position Registry::GazeSource(ActiveMechanic const& m) const
+    {
+        Geo::Pose const pose = AnchorPose(m);
+        return Position(pose.x, pose.y, pose.z, pose.o);
+    }
+
+    bool Registry::GazeFaces(ActiveMechanic const& m, Position const& p, float facing) const
+    {
+        if (!m.gaze)
+            return false;
+        return Gaze::Faces(ToVec(p), facing, ToVec(GazeSource(m)), m.gaze->spec.arcDeg);
+    }
+
+    // At the resolve every eligible player in range is judged once by its facing then (the server's orientation:
+    // a human's last facing update, a bot's look-away turn); the ones facing away are spared, the rest are hit with
+    // the Zone options (damage, rider, Weakened, onHit). onResolve's `cleared` lists who looked away.
+    void Registry::StepGaze(ActiveMechanic& m, Milliseconds now)
+    {
+        if (!m.gaze)
+        {
+            m.finished = true;
+            return;
+        }
+        if (now < m.resolveAt && !m.detonateRequested)
+            return;
+        m.detonateRequested = false;
+        GazeState& g = *m.gaze;
+        Geo::Pose const pose = AnchorPose(m);
+        g.away.clear();
+        uint32 judged = 0;
+        for (Player* p : CandidatePlayers(m))
+        {
+            if (!IsEligible(m, p) || !Geo::Contains(m.shape, pose, ToVec(p->GetPosition())))
+                continue;
+            ++judged;
+            if (!GazeFaces(m, p->GetPosition(), p->GetOrientation()))
+                g.away.insert(p->GetGUID());
+        }
+        ResolveResult r = BaseResult(m, 0);
+        r.hits = ResolvePass(m, 0, pose, m.shape);
+        r.count = r.hits.size();
+        r.cleared.assign(g.away.begin(), g.away.end());
+        m.resolved = true;
+        m.finished = true;
+        if (GetConfig().debug || GetConfig().bots.debug)
+            LOG_INFO("module.bossmechanics", "Gaze {} (tag {}): {} judged, {} looked away, {} hit", m.id, m.tag, judged,
+                g.away.size(), r.hits.size());
+        Report(m, r);
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // Tank facing holds (Scarlet Monastery F6)
+    // ----------------------------------------------------------------------------------------------------------------
+    void Registry::HoldTankFacing(ObjectGuid owner, ObjectGuid source, Milliseconds until)
+    {
+        if (source.IsEmpty())
+            return;
+        Encounter& e = BeginEncounter(owner);
+        e.facingHolds[source] = until;
+        BumpRevision();
+    }
+
+    void Registry::ReleaseTankFacing(ObjectGuid owner, ObjectGuid source)
+    {
+        Encounter* e = FindEncounterMutable(owner);
+        if (e && e->facingHolds.erase(source))
+            BumpRevision();
+    }
+
+    bool Registry::TankFacingHeld(ObjectGuid source, Milliseconds now) const
+    {
+        if (source.IsEmpty())
+            return false;
+        for (auto const& [owner, e] : _encounters)
+        {
+            auto it = e.facingHolds.find(source);
+            if (it != e.facingHolds.end() && now < it->second)
+                return true;
+        }
+        for (auto const& [id, m] : _mechanics)
+            if (m.holdTankFacing && m.IsActive(now) && !m.decoy
+                && (m.holdFacingSource.IsEmpty() ? m.owner : m.holdFacingSource) == source)
+                return true;
+        return false;
     }
 }

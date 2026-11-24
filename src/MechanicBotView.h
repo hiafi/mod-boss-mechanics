@@ -84,7 +84,8 @@ namespace BossMechanics
         Frozen,     // HoldStill (Freeze over the window)
         Tank,       // the exempt victim of a tank-exempt Frontal/Zone (tank facing, §3.7)
         Parker,     // the victim of a Park zone's parked unit (tank parking, §3.7)
-        Jumper      // an eligible player of a Jump (Stratholme X3): hop so it is in the air at the resolve (no hold)
+        Jumper,     // an eligible player of a Jump (Stratholme X3): hop so it is in the air at the resolve (no hold)
+        Looker      // eligible and in range of a Gaze (Scarlet Monastery F13): face away, hold over the look window
     };
 
     char const* BotTaskRoleName(BotTaskRole role);
@@ -96,6 +97,17 @@ namespace BossMechanics
         BotTaskRole role = BotTaskRole::Member;
         Milliseconds from{ 0 }, to{ 0 };        // the judge window (Freeze: [resolveAt - SafetyMarginMs, expireAt])
         uint8 slot = 0;                         // Spread/RunOut carrier: Assign::SlotOf; Soak claimer: claim rank
+    };
+
+    // Scarlet Monastery F13: one Gaze the bot must not look at (BotFacing::UpdateLookAway turns it away over
+    // [from, to] +- SafetyMarginMs). The source's live position is re-read each step (sourcePos: at the view).
+    struct GazeDuty
+    {
+        uint32 mechanicId = 0;
+        ObjectGuid source;              // a unit (empty: a point source at sourcePos)
+        Geo::Vec3 sourcePos;
+        float arcDeg = 180.f;
+        Milliseconds from{ 0 }, to{ 0 };        // the look window (Gaze::LookWindow)
     };
 
     struct BotViewInfo
@@ -112,6 +124,7 @@ namespace BossMechanics
                                                 // stack count every step, a change is a view change (§3.4)
         std::vector<uint32> tankFrontals;       // tank-exempt shapes whose exempt victim is the bot (tank facing)
         std::vector<uint32> parks;              // Park shapes whose parked unit is the bot's victim (parking)
+        std::vector<GazeDuty> gazes;            // Scarlet Monastery F13: gazes the bot must look away from
         uint32 reservationRevision = 0;         // Registry::ReservationRevision() the player kinds were built from
     };
 
@@ -141,9 +154,9 @@ namespace BossMechanics
 
     // After a solve: publishes Reservation{bot, plan.target, until = the task's window end, facing (plan.facing when
     // the plan has one, else the bot's orientation), slot, claim (Claimer, Picker, Leader)} on every mechanic of
-    // info.tasks except Tank, Parker, Frozen and Jumper tasks, and unreserves the bot from every other mechanic it
-    // holds a reservation on (it left them). Registry::Reserve keeps `since` and bumps ReservationRevision only on a
-    // change.
+    // info.tasks except Tank, Parker, Frozen, Jumper and Looker tasks, and unreserves the bot from every other
+    // mechanic it holds a reservation on (it left them). Registry::Reserve keeps `since` and bumps ReservationRevision
+    // only on a change.
     void PublishReservations(Registry& reg, Player const* bot, BotViewInfo const& info, Solver::Plan const& plan,
         Milliseconds now);
     // Every reservation of the bot (released, left combat, logged out, the strategy removed).

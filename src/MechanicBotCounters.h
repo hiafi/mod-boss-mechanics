@@ -62,6 +62,7 @@ namespace BossMechanics
         uint32 facingBreaks = 0;    // casts the waker broke because they would turn the bot (look-away)
         uint32 tankRefacings = 0;   // tank moves that turn a remembered Frontal source away from the group
         uint32 refacingStops = 0;   // ...stopped on the spot because a Frontal warning started (decision §7.5)
+        uint32 tankFacingHeld = 0;  // re-facing checks skipped for a facing hold (Scarlet Monastery F6)
         uint32 parks = 0;           // parking / drag-out moves
         uint32 routesFound = 0;
         uint32 routesFailed = 0;
@@ -126,6 +127,14 @@ namespace BossMechanics
         // route search for a clear ring point.
         uint32 msChaseStranded = 0;
         uint32 strandRoutes = 0;
+        // Scarlet Monastery F-4a: routes to a safe point inside the melee ring after a refused chase
+        // (Landing::ReachSafe: Halden's band, its inner edge inside the ring), and own walks (strand or inner routes)
+        // deferred or stopped for a gaze's look window (Gaze::OwnWalkAt).
+        uint32 chaseInnerRoutes = 0;
+        uint32 lookWalkStops = 0;
+        // Scarlet Monastery F-5: hazard escapes heading into a gaze's arc that stopped inside its look window once
+        // their spot was safe (Gaze::EscapeStopAt).
+        uint32 lookEscapeStops = 0;
         // M5 CD (C6): facing-only actions (`set facing`) the lock refused while the brain walked the bot (Escape),
         // also in lockBlocks; facingBlocks stays the look-away count.
         uint32 escapeFacingBlocks = 0;

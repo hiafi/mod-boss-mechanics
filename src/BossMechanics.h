@@ -104,7 +104,8 @@ namespace BossMechanics
         // penalty (any kind but Soak)
         MechanicRef& Weakened();
         MechanicRef& WeakenedOncePerPlayer();           // implies Weakened()
-        // timing (shape kinds; Persistent also Stack and Soak: judged at every tick)
+        // timing (shape kinds; Persistent also Stack and Soak: judged at every tick; and, Scarlet Monastery F15,
+        // Spread and RunOut: every carrier's circle judged at every tick, the rings kept on their carriers)
         MechanicRef& Persistent(Milliseconds duration, Milliseconds tick);  // tick 0: one resolve, then lingers
         MechanicRef& Projectile(float speed);           // Line only: resolves as the body passes (yd/s)
         MechanicRef& ProjectileUnit(Unit const* unit);  // track this unit instead of the computed position
@@ -120,7 +121,21 @@ namespace BossMechanics
         MechanicRef& ZTolerance(float yd);
         // bot-facing
         MechanicRef& Eligible(Eligibility const& eligibility);
-        MechanicRef& Order(Ordering const& ordering);   // Soak, Bait
+        MechanicRef& Order(Ordering const& ordering);   // Soak, Bait (Ordering::roleLast: Soak, F7)
+        // Scarlet Monastery F2 (a Line Stack/Soak whose `to` end is a unit, Shapes::Line(from, to): Torment). Bots
+        // only, except that the line is made at least `yd` long (in the registering statement: the marker shows it):
+        // EndBacksOff: the `to` player's bot walks back along the line to `yd` from the source (when nearer) and holds
+        // there, so the claimers fit between them; it is never a claimer or avoider of the line itself. The claimers'
+        // region runs from the source to that end's planned spot.
+        MechanicRef& EndBacksOff(float yd);
+        // TankNearSource: a tank claimer's region is the first `yd` of the line from its source (the tank soaks at the
+        // boss's end; the role is the role provider's: the owner's victim).
+        MechanicRef& TankNearSource(float yd);
+        // Scarlet Monastery F6 (any kind but a decoy): while this is active the bot tank of `source` (nullptr: the
+        // owner) never walks round it to re-face it, though a group member's planned spot (a Spot inside the boss's
+        // Frontal: Thorne's Sow carriers in his Prune cone) stands in a remembered frontal. Escapes, parking and
+        // drag-out still move the tank. Bots only. Mechanic::HoldTankFacing holds without a mechanic.
+        MechanicRef& HoldTankFacing(Unit const* source = nullptr);
         // Soak: among the live Soaks of this tag that set it too, a bot claims at most one (many small pickups at once,
         // Malicia's souls); without it each Soak ranks its claimers alone and one bot can claim them all.
         MechanicRef& OneClaimPerBot();
@@ -289,6 +304,14 @@ namespace Mechanic
     // height band is the shape's zTolerance (default Hide::kDefaultZToleranceYd, `.ZTolerance()`); onResolve's
     // `cleared` lists who was hidden. Contains / ContainsPoint answer "the source sees it now".
     MechanicRef Hide(Unit* owner, BossMechanics::HideSpec const& spec, Milliseconds warn);
+    // Scarlet Monastery F13 (Ironspine's heroic Glare; MechanicGaze.h, README "Gaze"): at now + warn everyone eligible
+    // within spec.rangeYd of spec.source (the owner when none is given) who faces it, the source inside the player's
+    // front arc of spec.arcDeg (default 180: the front half), is hit (players only; damage, Weakened, rider and onHit
+    // as a Zone). The judge reads each player's facing at the resolve. Bots turn away from the source over the look
+    // window ([resolve - spec.lead, resolve]; lead 0 = the whole warning), to the facing nearest their victim that
+    // clears the arc, and hold their spot meanwhile. No marker (the cast and the emote are the tell). onResolve's
+    // `cleared` lists who looked away. Contains: in range and (for a unit) facing the source now.
+    MechanicRef Gaze(Unit* owner, BossMechanics::GazeSpec const& spec, Milliseconds warn);
 
     // Blackrock Spire WP-RF (rolling fronts, MechanicFront.h; README "Rolling fronts"). A Zone whose band rolls over
     // the floor from now + warn: everyone eligible it passes over is hit once (Damage, Weakened, School, Rider, OnHit
@@ -347,6 +370,12 @@ namespace Mechanic
     // A script's own summon counts as a unit of the owner's encounter (casterEntry 0 interrupt entries); not despawned
     // at the encounter's end (the script's summon list owns it).
     void TrackUnit(Unit* owner, Unit* unit);
+
+    // Scarlet Monastery F6: the bot tank of `source` (nullptr: the owner) holds its facing (no tank-facing walk round
+    // it) for `duration` (0: until ReleaseTankFacing or the owner's encounter ends). A later call replaces the time.
+    // The per-mechanic form is MechanicRef::HoldTankFacing. Bots only.
+    void HoldTankFacing(Unit* owner, Unit const* source = nullptr, Milliseconds duration = Milliseconds(0));
+    void ReleaseTankFacing(Unit* owner, Unit const* source = nullptr);
 
     // reference health for a script's own spell (a SpellScript's damage, a custom DoT): `pct` percent of the row the
     // registry would pick for `owner` (its content key on its current map: difficulty, MapLevels pin, else its

@@ -26,7 +26,7 @@ namespace
 
     std::set<std::string_view> const kTestShapes = { "circle", "donut", "cone", "rearcone", "line", "projectile",
         "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
-        "conefront", "linefront", "hide" };
+        "conefront", "linefront", "hide", "gaze" };
 
     struct Parsed
     {
@@ -67,9 +67,12 @@ namespace
     float EndMs(Drill::Step const& step, std::optional<std::uint32_t> startMs = std::nullopt)
     {
         Parsed const p = Parse(step.line);
-        float end = static_cast<float>(startMs.value_or(step.atMs)) + p.ms;
+        // `holdfacing <ms>` (Scarlet Monastery WP-G2): one number, the hold's length.
+        float end = static_cast<float>(startMs.value_or(step.atMs)) + (p.shape == "holdfacing" ? p.size : p.ms);
         if (p.shape == "holdstill")
             end += p.size * 1000.f;
+        // repeat= / every= (WP-G2: the runner honors them): the last repeat starts that much later.
+        end += static_cast<float>(Drill::StepRepeatOffsets(step.line).back());
         end += Key(step.line, "persist", 0.f);
         end += Drill::FrontRollMs(step.line);     // WP-RF: a rolling front rolls on after its warning
         return end;
@@ -197,11 +200,15 @@ namespace
                     CHECK(p.size >= 0.f && p.size <= static_cast<float>(Ids::MARKED_DRILL_MAX_STACKS));
                     continue;
                 }
-                if (p.shape == "walk" || p.shape == "leash")
+                if (p.shape == "walk" || p.shape == "leash" || p.shape == "chase" || p.shape == "holdfacing")
                 {
-                    // The drill-only steps of Blackrock Depths WP-G1: readable by the runner, never a damage step.
+                    // The drill-only steps of Blackrock Depths WP-G1 (and Scarlet Monastery WP-G1's chase, WP-G2's
+                    // holdfacing): readable by the runner, never a damage step.
                     std::string const line = Drill::StripPlanKeys(step.line);
-                    CHECK(p.shape == "walk" ? Drill::ParseWalk(line).has_value() : Drill::ParseLeash(line).has_value());
+                    CHECK(p.shape == "walk" ? Drill::ParseWalk(line).has_value()
+                        : p.shape == "leash" ? Drill::ParseLeash(line).has_value()
+                        : p.shape == "chase" ? Drill::ParseChase(line).has_value()
+                        : Drill::ParseHoldFacing(line).has_value());
                     CHECK(!Drill::DamageStep(step.line) && !Drill::Value(step.line, "dmg"));
                     continue;
                 }
@@ -227,7 +234,8 @@ namespace
         }
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
             "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
-            "blackrock-spire-followups", "rolling-fronts", "blackrock-depths-shapes", "blackrock-depths-shapes-2" })
+            "blackrock-spire-followups", "rolling-fronts", "blackrock-depths-shapes", "blackrock-depths-shapes-2",
+            "scarlet-monastery-shapes", "scarlet-monastery-shapes-2" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -501,7 +509,8 @@ namespace
     // STAGE-M3-R-REPORT n-11: alexei runs one cycle by default (2.6 minutes), deadmines-followups two (its alternating
     // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s),
     // the others three (blackrock-spire-followups: 40 s cycles, 120 s, one wave 2 row a cycle); blackrock-depths-shapes
-    // and blackrock-depths-shapes-2 two (60 s cycles: the walk or the beam, then the other rows).
+    // and blackrock-depths-shapes-2 two (60 s cycles: the walk or the beam, then the other rows),
+    // and scarlet-monastery-shapes and scarlet-monastery-shapes-2 three (60 s cycles, 180 s).
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())
