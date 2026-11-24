@@ -1596,6 +1596,45 @@ namespace BossMechanics
             return ms && ms->Initialized() && !ms->Finalized();
         }
 
+        // Scarlet Monastery F-5: a hazard's escape inside a gaze's look window (Gaze::EscapeStopAt). The spline turns
+        // the bot along its path, so one heading into a source's arc stops and holds (the hold faces away) once the
+        // spot it has reached passes the hold's own test (TargetOk to the horizon); it walks on after.
+        bool EscapeLookStopWanted(Player const* bot, MechanicBotState const& st, Milliseconds now,
+            Milliseconds until, BotConfig const& cfg)
+        {
+            if (st.viewInfo.gazes.empty())
+                return false;
+            Solver::Input const& in = st.input;
+            Milliseconds const margin = in.params.marginMs;
+            std::vector<Gaze::Window> windows;
+            for (BotTask const& t : st.viewInfo.tasks)
+                if (t.role == BotTaskRole::Looker)
+                    windows.push_back({ t.from, t.to });
+            Geo::Vec3 const here{ bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
+            std::vector<Gaze::Duty> duties;
+            for (GazeDuty const& g : st.viewInfo.gazes)
+            {
+                if (now > g.to + margin)
+                    continue;
+                Geo::Vec3 source = g.sourcePos;
+                if (!g.source.IsEmpty())
+                    if (Unit const* u = ObjectAccessor::GetUnit(*bot, g.source); u && u->IsInWorld())
+                        source = { u->GetPositionX(), u->GetPositionY(), u->GetPositionZ() };
+                duties.push_back({ Gaze::Bearing(here, source), g.arcDeg });
+            }
+            float walkFacing = bot->GetOrientation();
+            if (!SplineInFlight(bot))
+            {
+                Geo::Vec3 const target = BotBrain::MoveTarget(st);
+                if (Dist2d(here, target) > kArriveYd)
+                    walkFacing = Gaze::Bearing(here, target);
+            }
+            // The hold's own test (StepHold re-solves a spot that fails TargetOk), so the stop never flips back to an
+            // escape on the next step; it covers the hazards up to the horizon, past the hold's end.
+            bool const spotSafe = until > now && Solver::TargetOk(in, in.bot, now, now + in.params.horizon);
+            return Gaze::EscapeStopAt(windows, now, margin, walkFacing, duties, cfg.lookAwayMarginDeg, spotSafe);
+        }
+
         void StepEscape(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
             BotConfig const& cfg, ViewCtx& ctx)
         {
@@ -2513,6 +2552,27 @@ namespace BossMechanics
             PublishLookAway(*reg, bot, st, now);
             BreakMoverAuras(bot, st, cfg);
             return;
+        }
+
+        // Scarlet Monastery F-5 (Gaze/9 at the 72 s glare, whose window holds the rot's growth): a hazard's escape
+        // heading into a gaze's arc inside the window stops once its spot is safe until the hold ends, and holds
+        // facing away; the hold re-checks the spot, and the brain solves on from there after the window.
+        if (st.mode == MechanicBotMode::Escape && !st.ownWalk && !st.refacing && !st.viewInfo.gazes.empty())
+        {
+            std::vector<uint32> ids;
+            Milliseconds const until = std::max(TaskHoldUntil(st, now, &ids), now + kMinMotionHold);
+            if (EscapeLookStopWanted(bot, st, now, until, cfg))
+            {
+                HoldForTasks(st, now, until, std::move(ids));
+                ++st.counters.lookEscapeStops;
+                if (cfg.debug)
+                    LOG_INFO(kLog, "Bot {}: a look window is owed and its spot is safe, the escape stops here",
+                        bot->GetName());
+                BotFacing::UpdateLookAway(bot, st, now);
+                PublishLookAway(*reg, bot, st, now);
+                BreakMoverAuras(bot, st, cfg);
+                return;
+            }
         }
 
         // M5 CD (C5): a stranded bot asks the route search for a clear ring point (it runs just below). F-4a: a bot

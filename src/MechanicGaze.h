@@ -11,9 +11,11 @@
  * Bots (MechanicBotView.cpp GazeKind, MechanicBotFacing.cpp): an eligible bot in range (plus kReachSlackYd) owes a
  * facing outside every live gaze's arc, widened by LookAway.MarginDeg, over the look window ([resolve - lead, resolve],
  * the whole warning by default, +- SafetyMarginMs). The facing is the one nearest the bot's victim that clears the
- * arc (ChooseFacing), so a melee bot whose boss stands away from the source keeps hitting it. The face action turns
- * the bot, the lock refuses what would turn it back (a facing cast or a swing at a target in the arc) and the waker
- * breaks a cast that would; the bot holds its spot over the window (a spline turns a walking unit along its path).
+ * arc (ChooseFacing), so a melee bot whose boss stands away from the source keeps hitting it; one whose victim would be
+ * lost anyway (the victim is the source) faces straight away instead (F-5, the 4-argument ChooseFacing). The face
+ * action turns the bot, the lock refuses what would turn it back (a facing cast or a swing at a target in the arc) and
+ * the waker breaks a cast that would; the bot holds its spot over the window (a spline turns a walking unit along its
+ * path; F-5: a hazard's escape walking into the arc stops once its spot is safe, EscapeStopAt).
  * This is the carried-cone look-away (M3 decision §7.6) with the source's bearing as the thing to keep out of the arc.
  *
  * Pure header: no AzerothCore includes (tests/sm_shapes_test.cpp compiles it with the host compiler).
@@ -26,6 +28,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -190,6 +193,93 @@ namespace BossMechanics::Gaze
                 return OwnWalk::Defer;
         }
         return OwnWalk::Go;
+    }
+
+    // ---- Scarlet Monastery F-5: robust look-away facings, and a hazard's escape inside a window -----------------
+    // F-4a left the melee hit (Gaze/9, mostly the 72 s glare, whose window holds the rot's growth). Two causes:
+    // - The edge facing. With the source as the bot's victim (the drill's boss; any melee or caster whose target
+    //   casts the gaze) ChooseFacing turned to the arc's edge plus LookAway.MarginDeg: 100 degrees off a 180 degree
+    //   gaze, a 10 degree slack that the face action's 5 degree tolerance halves. A dragged boss a few yards from a
+    //   melee bot sweeps that in a tick or two, between the bot's last turn and the resolve. The victim 100 degrees
+    //   off is out of every swing and cast arc anyway, so nothing was kept for that slack.
+    // - A hazard's escape walking into the arc during the window (F-4a's open item): the spline turns the bot along
+    //   its path, and the facing waited for the walk's end.
+
+    // The victim stays usable within this of the facing (CAST_ANGLE_IN_FRONT / 2; a swing needs 60 degrees): an edge
+    // facing that turns the victim farther than this out of the front keeps nothing, so the bot faces straight away.
+    constexpr float kKeepVictimHalfRad = Geo::kPi * 0.5f;
+
+    // How far (radians) the source's bearing lies outside `facing`'s front arc (negative: inside it).
+    inline float Clearance(float facing, Duty const& d)
+    {
+        return std::fabs(Geo::WrapPi(d.bearing - facing)) - HalfArcRad(d.arcDeg);
+    }
+
+    // ChooseFacing, but an edge facing that clears every duty while the preferred bearing ends up more than
+    // `keepHalfRad` out of the front gives way to the facing with the most clearance (straight away from one gaze):
+    // the victim is lost either way, so the slack goes to the gaze. The victim beside the source keeps its edge facing.
+    inline float ChooseFacing(float preferred, std::vector<Duty> const& duties, float marginDeg, float keepHalfRad)
+    {
+        float const best = ChooseFacing(preferred, duties, marginDeg);
+        if (duties.empty() || std::fabs(Geo::WrapPi(best - preferred)) <= keepHalfRad + 1e-4f)
+            return best;
+        for (Duty const& d : duties)
+            if (Overlap(best, d.bearing, d.arcDeg, marginDeg) > 0.f)
+                return best;    // conflicting gazes: the least bad stays
+        std::vector<float> candidates{ best };
+        for (Duty const& d : duties)
+        {
+            float const need = HalfArcRad(d.arcDeg) + Geo::DegToRad(std::max(0.f, marginDeg)) + 1e-3f;
+            candidates.push_back(Geo::WrapPi(d.bearing + Geo::kPi));
+            candidates.push_back(Geo::WrapPi(d.bearing + need));
+            candidates.push_back(Geo::WrapPi(d.bearing - need));
+        }
+        for (std::size_t i = 0; i < duties.size(); ++i)
+            for (std::size_t j = i + 1; j < duties.size(); ++j)
+            {
+                // Between two sources: the bisector of the larger gap (two gazes from either side of the bot).
+                float const mid = duties[i].bearing + Geo::WrapPi(duties[j].bearing - duties[i].bearing) * 0.5f;
+                candidates.push_back(Geo::WrapPi(mid + Geo::kPi));
+                candidates.push_back(Geo::WrapPi(mid));
+            }
+        float out = best;
+        float outClear = -Geo::kPi * 4.f;
+        for (float c : candidates)
+        {
+            bool clearsAll = true;
+            float minClear = Geo::kPi * 4.f;
+            for (Duty const& d : duties)
+            {
+                clearsAll = clearsAll && Overlap(c, d.bearing, d.arcDeg, marginDeg) <= 0.f;
+                minClear = std::min(minClear, Clearance(c, d));
+            }
+            if (clearsAll && minClear > outClear + 1e-4f)
+            {
+                out = c;
+                outClear = minClear;
+            }
+        }
+        return out;
+    }
+
+    // A hazard's escape (not the bot's own walk: OwnWalkAt) while a look is owed: stop and hold once the spot it has
+    // reached is safe through the window (`spotSafe`: no hazard there, and none it would have to leave for, until the
+    // hold ends) and its walk heads into a gaze's arc widened by `marginDeg` (`walkFacing`: the spline's orientation,
+    // or the bearing of its target). A walk heading away from every source walks on; a spot still unsafe walks on.
+    inline bool EscapeStopAt(std::vector<Window> const& windows, Ms now, Ms margin, float walkFacing,
+        std::vector<Duty> const& duties, float marginDeg, bool spotSafe)
+    {
+        if (!spotSafe || duties.empty())
+            return false;
+        bool owed = false;
+        for (Window const& w : windows)
+            owed = owed || LookOwedAt(w, now, margin);
+        if (!owed)
+            return false;
+        for (Duty const& d : duties)
+            if (Overlap(walkFacing, d.bearing, d.arcDeg, marginDeg) > 0.f)
+                return true;
+        return false;
     }
 }
 

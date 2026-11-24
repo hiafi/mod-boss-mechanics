@@ -80,8 +80,14 @@ namespace BossMechanics
         else
             st.lookFacing = bot->GetOrientation();
         // The gazes win over a carried shape's facing when the two disagree (a gaze's cost lands on the bot itself).
+        // Scarlet Monastery F-5: with the gazes alone, an edge facing that loses the victim anyway (the victim is the
+        // source: 100 degrees off a 180 degree gaze, a 5-10 degree slack a dragged boss sweeps between the last turn
+        // and the resolve) gives way to straight away. A carried shape keeps the nearest edge (its facing matters).
         if (!duties.empty())
-            st.lookFacing = Gaze::ChooseFacing(st.lookFacing, duties, GetConfig().bots.lookAwayMarginDeg);
+            st.lookFacing = carried
+                ? Gaze::ChooseFacing(st.lookFacing, duties, GetConfig().bots.lookAwayMarginDeg)
+                : Gaze::ChooseFacing(st.lookFacing, duties, GetConfig().bots.lookAwayMarginDeg,
+                    Gaze::kKeepVictimHalfRad);
 
         // A move turns the bot along its spline: the facing is applied once it stands (the face action waits for
         // the spline to end). Scarlet Monastery F-4a: a gaze's facing is owed in Escape too, so a bot that stands

@@ -132,6 +132,9 @@ namespace BossMechanics
         // deferred or stopped for a gaze's look window (Gaze::OwnWalkAt).
         uint32 chaseInnerRoutes = 0;
         uint32 lookWalkStops = 0;
+        // Scarlet Monastery F-5: hazard escapes heading into a gaze's arc that stopped inside its look window once
+        // their spot was safe (Gaze::EscapeStopAt).
+        uint32 lookEscapeStops = 0;
         // M5 CD (C6): facing-only actions (`set facing`) the lock refused while the brain walked the bot (Escape),
         // also in lockBlocks; facingBlocks stays the look-away count.
         uint32 escapeFacingBlocks = 0;

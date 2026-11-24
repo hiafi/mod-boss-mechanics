@@ -3,7 +3,9 @@
 // (MechanicAssign.h); EndBacksOff / TankNearSource's back-off spot and claim region (MechanicViewRules.h) run through
 // the solver; the facing hold rule; and the pass ids of a lasting Spread (Judge::CarrierPass). F-4a: the bot's own
 // walk against its look windows (Gaze::OwnWalkAt), the route in past a refused chase (Landing::ReachSafe, Halden's
-// Close Ranks band) and Feral Charge - Cat's Behind landing beside Ironspine's rot. Build: tests/run.sh.
+// Close Ranks band) and Feral Charge - Cat's Behind landing beside Ironspine's rot. F-5: straight away when the
+// victim is the source (the 4-argument Gaze::ChooseFacing) and a hazard's escape held for a look (Gaze::EscapeStopAt).
+// Build: tests/run.sh.
 
 #include "check.h"
 #include "MechanicAssign.h"
@@ -545,6 +547,149 @@ namespace
         boss.facing = Geo::kPi;
         CHECK(!Landing::LandingUnsafe(in, spot, boss, cat, kNow, to));
     }
+
+    // ---- F-5 -------------------------------------------------------------------------------------------------------
+
+    // Ironspine's Glare after F-4a (Gaze/9 still on 10 melee specs, mostly the 72 s glare): the victim is the source,
+    // so the old choice was the arc's edge plus the margin, 100 degrees off; the victim is lost there anyway. The
+    // 4-argument ChooseFacing faces straight away then, and keeps the edge when the victim stays in front.
+    void TestStraightAway()
+    {
+        float const keep = Gaze::kKeepVictimHalfRad;
+        std::vector<Gaze::Duty> const eastGaze = { { 0.f, 180.f } };
+        // No duty, or the victim clear of the arc: unchanged.
+        CHECK_NEAR(Gaze::ChooseFacing(1.f, {}, kLookMarginDeg, keep), 1.f, kEps);
+        CHECK_NEAR(Gaze::ChooseFacing(Geo::kPi, eastGaze, kLookMarginDeg, keep), Geo::kPi, kEps);
+        CHECK_NEAR(Gaze::ChooseFacing(Geo::DegToRad(120.f), eastGaze, kLookMarginDeg, keep), Geo::DegToRad(120.f),
+            kEps);
+        // The victim is the source: straight away, not the edge (the 3-argument rule still gives the edge).
+        CHECK(std::fabs(std::fabs(Deg(Gaze::ChooseFacing(0.f, eastGaze, kLookMarginDeg))) - 100.f) < 0.2f);
+        float const away = Gaze::ChooseFacing(0.f, eastGaze, kLookMarginDeg, keep);
+        CHECK(std::fabs(std::fabs(Deg(away)) - 180.f) < 0.2f);
+        CHECK_NEAR(Gaze::Clearance(away, eastGaze[0]), Geo::kPi * 0.5f, kEps);
+        // The victim beside the source (the Eye 30 degrees off the boss): the edge keeps it within 70 degrees.
+        CHECK(std::fabs(Deg(Gaze::ChooseFacing(Geo::DegToRad(30.f), eastGaze, kLookMarginDeg, keep)) - 100.f) < 0.2f);
+        CHECK(std::fabs(Deg(Gaze::ChooseFacing(Geo::DegToRad(-30.f), eastGaze, kLookMarginDeg, keep)) + 100.f)
+            < 0.2f);
+        // A narrow gaze (90 degrees): its edge is 55 degrees off, the victim stays usable there.
+        std::vector<Gaze::Duty> const narrow = { { 0.f, 90.f } };
+        CHECK(std::fabs(std::fabs(Deg(Gaze::ChooseFacing(0.f, narrow, kLookMarginDeg, keep))) - 55.f) < 0.2f);
+        // Two 120 degree gazes from either side, the victim on one source: the edge 70 degrees off keeps it.
+        std::vector<Gaze::Duty> const two = { { 0.f, 120.f }, { Geo::kPi, 120.f } };
+        CHECK(std::fabs(std::fabs(Deg(Gaze::ChooseFacing(0.f, two, kLookMarginDeg, keep))) - 70.f) < 0.2f);
+        // Two 170 degree gazes 90 degrees apart, the victim on the first: its edges lose the victim, and the facing
+        // with the most room between the two arcs wins (straight away from their bisector, 225 degrees).
+        std::vector<Gaze::Duty> const corner = { { 0.f, 170.f }, { Geo::kPi * 0.5f, 170.f } };
+        float const c2 = Gaze::ChooseFacing(0.f, corner, kLookMarginDeg, keep);
+        CHECK(std::fabs(Deg(Geo::WrapPi(c2 - Geo::DegToRad(225.f)))) < 0.2f);
+        CHECK(Gaze::Clearance(c2, corner[0]) > Gaze::Clearance(Gaze::ChooseFacing(0.f, corner, kLookMarginDeg),
+            corner[0]) - 1e-3f);
+        // Conflicting front halves: the least bad, as before.
+        std::vector<Gaze::Duty> const clash = { { 0.f, 180.f }, { Geo::kPi, 180.f } };
+        CHECK_NEAR(Gaze::ChooseFacing(0.3f, clash, kLookMarginDeg, keep), Gaze::ChooseFacing(0.3f, clash,
+            kLookMarginDeg), kEps);
+
+        // Random: never faces a source, never less room than the edge rule, the edge (or the victim) whenever the
+        // victim stays within the keep arc of it.
+        Lcg rng;
+        std::uint32_t edges = 0;
+        std::uint32_t aways = 0;
+        for (int i = 0; i < 3000; ++i)
+        {
+            std::vector<Gaze::Duty> duties;
+            int const n = rng.Next01() < 0.7f ? 1 : 2;
+            for (int k = 0; k < n; ++k)
+                duties.push_back({ rng.Range(-Geo::kPi, Geo::kPi), rng.Next01() < 0.5f ? 180.f : rng.Range(30.f,
+                    150.f) });
+            float const victim = rng.Range(-Geo::kPi, Geo::kPi);
+            float const old = Gaze::ChooseFacing(victim, duties, kLookMarginDeg);
+            float const f = Gaze::ChooseFacing(victim, duties, kLookMarginDeg, keep);
+            bool oldClears = true;
+            float oldRoom = 10.f;
+            float room = 10.f;
+            for (Gaze::Duty const& d : duties)
+            {
+                oldClears = oldClears && Gaze::Overlap(old, d.bearing, d.arcDeg, kLookMarginDeg) <= 0.f;
+                oldRoom = std::min(oldRoom, Gaze::Clearance(old, d));
+                room = std::min(room, Gaze::Clearance(f, d));
+            }
+            if (!oldClears)
+            {
+                CHECK_NEAR(Geo::WrapPi(f - old), 0.f, kEps);
+                continue;
+            }
+            for (Gaze::Duty const& d : duties)
+                CHECK(Gaze::Overlap(f, d.bearing, d.arcDeg, kLookMarginDeg) <= 0.f);
+            CHECK(room >= oldRoom - 1e-3f);
+            if (std::fabs(Geo::WrapPi(old - victim)) <= keep)
+            {
+                CHECK_NEAR(Geo::WrapPi(f - old), 0.f, kEps);
+                ++edges;
+            }
+            else
+                ++aways;
+        }
+        std::printf("  gaze F-5: random facings: %u kept the edge or victim, %u turned straight away\n", edges, aways);
+        CHECK(edges > 300 && aways > 100);
+    }
+
+    // The sweep's case: a melee bot 3 yd from the boss (the source and its victim) faces away, then the boss, dragged
+    // by the tank at 7 yd/s, keeps walking for the lag between that turn and the resolve. The edge facing is hit
+    // within a tick or two when the boss walks toward its side; straight away holds for any drift under 90 degrees.
+    void TestDraggedSource()
+    {
+        Vec3 const bot{ 0.f, 0.f, 0.f };
+        Vec3 const boss0{ 3.f, 0.f, 0.f };
+        std::vector<Gaze::Duty> const duty = { { Gaze::Bearing(bot, boss0), 180.f } };
+        float const victim = Gaze::Bearing(bot, boss0);
+        float const edge = Gaze::ChooseFacing(victim, duty, kLookMarginDeg);
+        float const away = Gaze::ChooseFacing(victim, duty, kLookMarginDeg, Gaze::kKeepVictimHalfRad);
+        std::uint32_t edgeHits = 0;
+        std::uint32_t awayHits = 0;
+        for (float dirDeg = 0.f; dirDeg < 360.f; dirDeg += 15.f)
+            for (int lagMs = 100; lagMs <= 300; lagMs += 100)
+            {
+                float const d = 7.f * lagMs / 1000.f;
+                float const r = Geo::DegToRad(dirDeg);
+                Vec3 const boss{ boss0.x + d * std::cos(r), boss0.y + d * std::sin(r), 0.f };
+                edgeHits += Gaze::Faces(bot, edge, boss, 180.f) ? 1 : 0;
+                awayHits += Gaze::Faces(bot, away, boss, 180.f) ? 1 : 0;
+            }
+        std::printf("  gaze F-5: dragged boss, 72 drifts: edge facing hit %u, straight away hit %u\n", edgeHits,
+            awayHits);
+        CHECK(edgeHits > 0);
+        CHECK(awayHits == 0);
+        // The boss walking north past the bot's west-facing edge: 0.2 s at 7 yd/s is enough.
+        Vec3 const north{ 3.f, 1.4f, 0.f };
+        CHECK(Gaze::Faces(bot, edge, north, 180.f) || Gaze::Faces(bot, Geo::WrapPi(-edge), north, 180.f));
+        CHECK(!Gaze::Faces(bot, away, north, 180.f));
+    }
+
+    // A hazard's escape inside the window (the rot's growth at 70.5-71.5 s in the 70-72 s glare window): it stops
+    // once its spot is safe and its walk heads into the arc; heading away, unsafe, or outside the window, it walks on.
+    void TestEscapeStop()
+    {
+        Ms const m{ 300 };
+        std::vector<Gaze::Window> const glare{ Gaze::LookWindow(Ms(70000), Ms(72000), Ms(0)) };
+        std::vector<Gaze::Duty> const east = { { 0.f, 180.f } };    // the boss east of the bot
+        float const intoArc = Geo::DegToRad(40.f);
+        float const awayWalk = Geo::DegToRad(170.f);
+        float const edgeWalk = Geo::DegToRad(95.f);                 // outside the arc, inside its margin
+        CHECK(Gaze::EscapeStopAt(glare, Ms(71200), m, intoArc, east, kLookMarginDeg, true));
+        CHECK(Gaze::EscapeStopAt(glare, Ms(71200), m, edgeWalk, east, kLookMarginDeg, true));
+        CHECK(!Gaze::EscapeStopAt(glare, Ms(71200), m, awayWalk, east, kLookMarginDeg, true));
+        CHECK(!Gaze::EscapeStopAt(glare, Ms(71200), m, intoArc, east, kLookMarginDeg, false));     // still in the rot
+        CHECK(!Gaze::EscapeStopAt(glare, Ms(69000), m, intoArc, east, kLookMarginDeg, true));      // before
+        CHECK(Gaze::EscapeStopAt(glare, Ms(69700), m, intoArc, east, kLookMarginDeg, true));       // the margin
+        CHECK(Gaze::EscapeStopAt(glare, Ms(72300), m, intoArc, east, kLookMarginDeg, true));
+        CHECK(!Gaze::EscapeStopAt(glare, Ms(72301), m, intoArc, east, kLookMarginDeg, true));      // after
+        CHECK(!Gaze::EscapeStopAt(glare, Ms(71200), m, intoArc, {}, kLookMarginDeg, true));        // no gaze duty
+        CHECK(!Gaze::EscapeStopAt({}, Ms(71200), m, intoArc, east, kLookMarginDeg, true));
+        // Two sources: into either arc stops.
+        std::vector<Gaze::Duty> const two = { { 0.f, 90.f }, { Geo::kPi, 90.f } };
+        CHECK(Gaze::EscapeStopAt(glare, Ms(71000), m, Geo::DegToRad(175.f), two, kLookMarginDeg, true));
+        CHECK(!Gaze::EscapeStopAt(glare, Ms(71000), m, Geo::DegToRad(90.f), two, kLookMarginDeg, true));
+    }
 }
 
 int main()
@@ -563,5 +708,8 @@ int main()
     TestOwnWalk();
     TestReachSafe();
     TestFeralChargeLanding();
+    TestStraightAway();
+    TestDraggedSource();
+    TestEscapeStop();
     return Report("sm_shapes_test");
 }
