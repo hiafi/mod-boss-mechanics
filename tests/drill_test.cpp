@@ -26,7 +26,7 @@ namespace
 
     std::set<std::string_view> const kTestShapes = { "circle", "donut", "cone", "rearcone", "line", "projectile",
         "mine", "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
-        "conefront", "linefront", "hide", "gaze" };
+        "conefront", "linefront", "hide", "gaze", "mound", "crawl" };
 
     struct Parsed
     {
@@ -75,6 +75,8 @@ namespace
         end += static_cast<float>(Drill::StepRepeatOffsets(step.line).back());
         end += Key(step.line, "persist", 0.f);
         end += Drill::FrontRollMs(step.line);     // WP-RF: a rolling front rolls on after its warning
+        if (p.shape == "mound")                   // Ragefire Chasm WP-G1: the eruption follows the chase
+            end += Key(step.line, "boom", static_cast<float>(Drill::kEruptMs));
         return end;
     }
 
@@ -200,14 +202,17 @@ namespace
                     CHECK(p.size >= 0.f && p.size <= static_cast<float>(Ids::MARKED_DRILL_MAX_STACKS));
                     continue;
                 }
-                if (p.shape == "walk" || p.shape == "leash" || p.shape == "chase" || p.shape == "holdfacing")
+                if (p.shape == "walk" || p.shape == "leash" || p.shape == "chase" || p.shape == "holdfacing"
+                    || p.shape == "blink" || p.shape == "cast")
                 {
                     // The drill-only steps of Blackrock Depths WP-G1 (and Scarlet Monastery WP-G1's chase, WP-G2's
-                    // holdfacing): readable by the runner, never a damage step.
+                    // holdfacing, Ragefire Chasm WP-G1's blink and cast): readable by the runner, never a damage step.
                     std::string const line = Drill::StripPlanKeys(step.line);
                     CHECK(p.shape == "walk" ? Drill::ParseWalk(line).has_value()
                         : p.shape == "leash" ? Drill::ParseLeash(line).has_value()
                         : p.shape == "chase" ? Drill::ParseChase(line).has_value()
+                        : p.shape == "blink" ? Drill::ParseBlink(line).has_value()
+                        : p.shape == "cast" ? Drill::ParseCast(line).has_value()
                         : Drill::ParseHoldFacing(line).has_value());
                     CHECK(!Drill::DamageStep(step.line) && !Drill::Value(step.line, "dmg"));
                     continue;
@@ -235,7 +240,7 @@ namespace
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
             "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
             "blackrock-spire-followups", "rolling-fronts", "blackrock-depths-shapes", "blackrock-depths-shapes-2",
-            "scarlet-monastery-shapes", "scarlet-monastery-shapes-2" })
+            "scarlet-monastery-shapes", "scarlet-monastery-shapes-2", "ragefire-chasm-shapes" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -510,7 +515,7 @@ namespace
     // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s),
     // the others three (blackrock-spire-followups: 40 s cycles, 120 s, one wave 2 row a cycle); blackrock-depths-shapes
     // and blackrock-depths-shapes-2 two (60 s cycles: the walk or the beam, then the other rows),
-    // and scarlet-monastery-shapes and scarlet-monastery-shapes-2 three (60 s cycles, 180 s).
+    // and scarlet-monastery-shapes, scarlet-monastery-shapes-2 and ragefire-chasm-shapes three (60 s cycles, 180 s).
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())

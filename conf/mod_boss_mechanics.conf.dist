@@ -40,10 +40,15 @@ BossMechanics.Debug = 0
 #                     measurement 2026-11-17: the sheet max health of the reworked classes in item level
 #                     level-8..level+10 blues, required level <= row level; level 54 interpolates) and the
 #                     Scarlet Monastery normal rows 35 and 40 (REF measurement 2026-11-20, the same recipe: levels
-#                     32, 34 and 37 interpolate between rows 20, 35 and 40).
+#                     32, 34 and 37 interpolate between rows 20, 35 and 40) and the Ragefire Chasm row 16 (1100 /
+#                     1080: rows 20 and 35 extended down, 1103 / 1081 on that line, no REF run: the lookup clamps
+#                     below the first row, so a level 16 boss would read the level 20 row, about 18% too heavy; the
+#                     Ragefire Chasm build, handoff 7 #3 A). Levels 17 to 19 interpolate between rows 16 and 20.
+#                     Do not copy row 16 into DungeonDifficulties.ReferenceHealth (otherwise the same rows): it would
+#                     move Deadmines' level 17 to 19 heroic stock spells there.
 #
 
-BossMechanics.ReferenceHealth.Rows = "20:1300:1290 35:2038:2072 40:2278:2307 52:3032:3126 53:3182:3266 55:3362:3629 56:3456:3727 60:3670:3710 60h:4120:4110"
+BossMechanics.ReferenceHealth.Rows = "16:1100:1080 20:1300:1290 35:2038:2072 40:2278:2307 52:3032:3126 53:3182:3266 55:3362:3629 56:3456:3727 60:3670:3710 60h:4120:4110"
 
 #
 #    BossMechanics.ReferenceHealth.MapLevels
@@ -64,10 +69,12 @@ BossMechanics.ReferenceHealth.Rows = "20:1300:1290 35:2038:2072 40:2278:2307 52:
 #                     heroic only (level 60); its normal bosses (levels 51 to 56) read the reference health of
 #                     their own level, interpolated between the rows of Rows, one number per section. Scarlet
 #                     Monastery pins heroic only too (level 60): its four wings' normal bosses (levels 32 to 40)
-#                     read the reference health of their own level.
+#                     read the reference health of their own level. Ragefire Chasm pins heroic only (level 60): its
+#                     normal bosses (level 16) read the row 16 of Rows; Deadmines (levels 17 to 21) and Shadowfang Keep
+#                     are pinned to row 20 above, so the new row moves no other dungeon.
 #
 
-BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 189h:60"
+BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 189h:60 389h:60"
 
 #
 #    BossMechanics.Telegraph.FollowMode

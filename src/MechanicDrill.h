@@ -105,11 +105,13 @@ namespace BossMechanics::Drill
     };
 
     // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage (a bell soak's
-    // landing does: DamageStep), nor the drill-only steps marker, walk, leash, chase and holdfacing.
+    // landing does: DamageStep), nor the drill-only steps marker, walk, leash, chase, holdfacing, blink and cast, nor
+    // `crawl` (a soak on a moving unit).
     inline bool DamageShape(std::string_view shape)
     {
         return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker"
-            && shape != "walk" && shape != "leash" && shape != "chase" && shape != "holdfacing";
+            && shape != "walk" && shape != "leash" && shape != "chase" && shape != "holdfacing" && shape != "crawl"
+            && shape != "blink" && shape != "cast";
     }
 
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
@@ -1220,6 +1222,193 @@ namespace BossMechanics::Drill
         return { source.x * c + source.y * s, -source.x * s + source.y * c, 0.f };
     }
 
+    // ---- Ragefire Chasm shapes (Ragefire Chasm build §3.9, WP-G1, drill `ragefire-chasm-shapes`) -------------------
+    // The eight rows of HANDOFF §3.9 (and the reported ninth's burst half) on the heroic numbers of their bosses (pct=
+    // in the percent mode). Each step registers what the boss WP registers (the boss's SP row is named at each tag and
+    // step); change both together. Grammar added for it (MechanicCommand.cpp):
+    //   mound <r> <arm ms> persist=<ms> [speed=5] [erupt=4] [boom=2000] [pick=]
+    //       Oggleflint's Borer: a chaser (a Mechanic Marker) starts at the selected unit and runs at one member (pick=)
+    //       at speed= yd/s for <arm> + persist, re-aimed every kMoundAimMs (DungeonKit::Chaser). A circle of <r> on it,
+    //       that member only, no damage, no telegraph, Persistent(persist, tick 0): the first pass at <arm> (ledger
+    //       tag=). Where it stops, a circle of erupt= with a boom= warning and the step's damage keys, for everyone
+    //       (MoundEruptTag: tag= + 1). A hunted member that dies: the mound stops, its ring still erupts (§7 #36).
+    //   crawl <r> <life ms> yd=<yd> [bearing=0] [off=4] [speed=3] [need=1] [last=<role>] [pick=]
+    //       Jergosh's wisp, registered as DungeonKit::CrawlPickups does: a Soak of <r> and need= bodies on a unit that
+    //       starts off= yd from a member (pick=) and crawls at speed= yd/s to the point yd= from the selected unit's
+    //       start at bearing= from the run's facing. Telegraph only (MissedSoak Never, one claim per bot, the whole
+    //       fight's warning); a member within <r> takes it (polled every kCrawlPollMs); reaching the point (or <life
+    //       ms>) is a group failure, `Soak/<tag>`.
+    //   pick=fresh
+    //       a member, the tank included, the chain has not picked (PickPool): the second mound's own player, the beaten
+    //       who is never hunted, the spots' rotation.
+    //   inside=<yd>:<ahead>
+    //       the Within circle fixed on the selected unit's place at the parse (the drill's start), moved <ahead> along
+    //       the run's facing (negative: toward the group): a room, as the bosses' FloorBounds (inside=<yd> alone stays
+    //       on the unit).
+    //   hide ... of=<n> scale=<s>
+    //       the blockers stand on random distinct points of n on the ring; each game object scaled (its collision model
+    //       too).
+    //   marker 0 one=1
+    //       Marked off one random holder only (a dispel in the middle of a cast).
+    // And two drill-only steps (ParseBlink, ParseCast below; nothing registers):
+    //   blink <yd> 0 [pick=any|fresh|nontank|same]
+    //       the selected unit appears <yd> behind a member, facing it; `blink 0 0 at=prev`: on the last point circle's
+    //       centre (a leap's landing); `blink 0 0 home=1`: back where it stood before the run's first blink.
+    //   cast <spell> <ms> [kick=1] [every=<ms>] tag=<n>
+    //       the selected unit casts <spell> at its victim. kick=1: it goes on the encounter's interrupt list
+    //       (InterruptEntry, NoteNextCast with every=) and is a group failure when it still runs kCastJudgeLeadMs
+    //       before <ms>, or never started. Without kick=1 it is a must-play bar: a group failure when it does not run
+    //       to its end (a school lockout, a kick). `Soak/<tag>`, MissedSoak.
+    // Tags (sweep keys `<Kind>/<tag>`):
+    constexpr std::uint32_t kRfcTagChase = 1;           // OG1: the 3 yd chase circle (no damage), reported
+    constexpr std::uint32_t kRfcTagErupt = 2;           // OG2 heroic: the 4 yd eruption (MoundEruptTag of 1)
+    constexpr std::uint32_t kRfcTagBlow = 3;            // OG4 heroic: the Beating's 3 yd blows
+    constexpr std::uint32_t kRfcTagBlowChase = 4;       // OG1 beside the Beating, reported
+    constexpr std::uint32_t kRfcTagBlowErupt = 5;       // OG2 beside the Beating (MoundEruptTag of 4)
+    constexpr std::uint32_t kRfcTagBurn = 6;            // JR2 heroic: a 6 yd Conflagrate ring on someone else
+    constexpr std::uint32_t kRfcTagWisp = 7;            // JR5: a wisp eaten (group)
+    constexpr std::uint32_t kRfcTagFan = 8;             // BZ5: the 8 yd tank-inclusive Fan of Knives
+    constexpr std::uint32_t kRfcTagStepFan = 9;         // BZ7 heroic: the 6 yd spin after each Shadowstep
+    constexpr std::uint32_t kRfcTagRing = 10;           // TG3 heroic: a tick of the 10 yd Felstorm ring
+    constexpr std::uint32_t kRfcTagSpot = 11;           // TG5 heroic: a 4 yd fel spot
+    constexpr std::uint32_t kRfcTagHideThree = 12;      // TG6 normal's three spikes, seen at the Nova's end
+    constexpr std::uint32_t kRfcTagHideTwo = 13;        // TG6 heroic's opposite pair of spikes, 2 + 3 behind them
+    constexpr std::uint32_t kRfcTagKick = 14;           // TG2: the 5 s channel went uninterrupted (group)
+    constexpr std::uint32_t kRfcTagBarSame = 15;        // a bar of the kicked school blocked or cut (group, reported)
+    constexpr std::uint32_t kRfcTagBarOther = 16;       // a bar of another school blocked or cut (group)
+    constexpr std::uint32_t kRfcTagBurst = 17;          // TG9 hard mode: the 6 yd globule bursts, reported (humans)
+    constexpr std::uint32_t kRfcTagFiveChase = 18;      // OG1 with five mounds (from 160 s live), reported
+    constexpr std::uint32_t kRfcTagFiveErupt = 19;      // OG2 with five mounds (MoundEruptTag of 18), reported first
+    constexpr std::uint32_t kRfcTagKickThree = 20;      // JR4's window: the 3 s cast went uninterrupted (group)
+    constexpr std::uint32_t kRfcTagKickTwo = 21;        // BZ3, BZ6's window: the 2 s cast went uninterrupted (group)
+    constexpr std::uint32_t kRfcLastTag = kRfcTagKickTwo;
+    constexpr std::uint32_t kRfcBarTags[] = { 2, 3, 5, 6, 8, 9, 10, 11, 12, 13 };
+    constexpr std::uint32_t kRfcGroupTags[] = { 7, 14, 16, 20, 21 };
+    // Barred on the reference members too: the pool is every member (§7 #33 A), or the tank must step out.
+    constexpr std::uint32_t kRfcReferenceTags[] = { 2, 3, 5, 9, 10, 11 };
+
+    inline bool RfcBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kRfcBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // A mound's eruption counts under its chase circle's tag + 1.
+    constexpr std::uint32_t MoundEruptTag(std::uint32_t moundTag)
+    {
+        return moundTag + 1;
+    }
+
+    constexpr std::uint32_t kRfcCycleMs = 60000;
+    constexpr std::uint32_t kRfcCycles = 3;
+    // Oggleflint (D1, SP OG1, OG2, OG4 heroic). The Borer lives 4 s: the circle arms kMoundArmMs after the summon and
+    // stands for the rest, so it ends with the chase (Persistent(kMoundLifeMs - kMoundArmMs, 0)).
+    constexpr float kMoundYd = 3.f;
+    constexpr std::uint32_t kMoundLifeMs = 4000;
+    constexpr std::uint32_t kMoundArmMs = 500;
+    constexpr float kMoundSpeedYdS = 5.f;               // heroic (normal 4)
+    constexpr float kMoundSpeedNormalYdS = 4.f;
+    constexpr std::uint32_t kMoundAimMs = 250;          // DungeonKit::ChaserSpec::repath
+    constexpr float kEruptYd = 4.f;
+    constexpr std::uint32_t kEruptMs = 2000;
+    constexpr std::uint32_t kHuntEveryMs = 12000;       // heroic
+    constexpr float kBlowYd = 3.f;
+    constexpr std::uint32_t kBlowMs = 1500;
+    constexpr std::uint32_t kBeatingBlows = 3;
+    // The den (§3.8: 527 sq yd, a 13 yd circle of its area; the tank spot at the north wall, so the circle lies 8 yd
+    // from him toward the group).
+    constexpr float kDenYd = 13.f;
+    constexpr float kDenAheadYd = -8.f;
+    // Jergosh (D2, SP JR2, JR5 heroic)
+    constexpr float kBurnYd = 6.f;
+    constexpr std::uint32_t kBurnMs = 2500;
+    constexpr float kWispYd = 2.f;
+    constexpr float kWispSpeedYdS = 3.f;
+    constexpr float kWispGoalYd = 50.f;                 // §7 #21 A
+    constexpr float kWispOffYd = 4.f;                   // §7 #29 A
+    constexpr float kWispReachYd = 1.5f;                // DungeonKit::CrawlPickupSpec::reach
+    constexpr std::uint32_t kWispLifeMs = 25000;        // the drill's safety: 50 yd take 16.7 s, 62 yd 20.7 s
+    constexpr std::uint32_t kCrawlPollMs = 250;         // DungeonKit::CrawlPickups::kPollMs
+    constexpr std::uint32_t kCrawlRepathMs = 1000;      // ... CrawlPickupSpec::repath
+    constexpr float kCrawlZBandYd = 6.f;
+    // Bazzalan (D3, SP BZ5, BZ7 heroic; §3.8: his arena ends 4 yd short of the rims, a 15 yd circle)
+    constexpr float kFanYd = 8.f;
+    constexpr float kStepFanYd = 6.f;
+    constexpr std::uint32_t kFanMs = 2000;
+    constexpr std::uint32_t kShadowsteps = 3;
+    constexpr float kStepBehindYd = 2.f;
+    constexpr float kRidgeYd = 15.f;
+    constexpr float kRidgeAheadYd = -6.f;
+    // Taragaman (D4, SP TG3, TG5, TG6 heroic; §3.8: 1,040 sq yd of plateau, an 18 yd circle)
+    constexpr float kFelRingYd = 10.f;
+    constexpr std::uint32_t kFelCastMs = 2000;
+    constexpr std::uint32_t kFelSpinMs = 5000;          // heroic: five ticks
+    constexpr float kFelSpotYd = 4.f;
+    constexpr float kFelSpotOffYd = 4.f;                // the center 0 to 4 yd from the player
+    constexpr std::uint32_t kFelSpotMs = 1500;
+    constexpr std::uint32_t kFelSpotEveryMs = 500;
+    constexpr std::uint32_t kFelSpots = 10;
+    constexpr float kPlateauYd = 18.f;
+    constexpr std::uint32_t kNovaMs = 4000;
+    constexpr float kSpikeRingYd = 10.f;
+    constexpr float kSpikeRadiusYd = 2.f;               // §7 #19 A: HideSpec radius 2.0 and eye 3.05, so the spots lie
+    constexpr float kSpikeEyeYd = 3.05f;                // 5 yd behind the spike's centre (the default behind, 3 yd)
+    constexpr float kSpikeScale = 2.f;
+    constexpr std::uint32_t kSpikeDisplay = 5073;       // Stalagmite01.m2
+    constexpr std::uint32_t kSpikePoints = 4;
+    // The kick row's stock stand-ins (neither in spell_dbc nor scripted, live and Spell.dbc 2026-11-24): a 5 s Shadow
+    // channel (PreventionType 1, CHANNEL_INTERRUPT_FLAG_INTERRUPT), a 2 s Shadow bar and a 2 s Frost one, both
+    // PreventionType 0 and InterruptFlags 0.
+    constexpr std::uint32_t kKickChannelSpell = 36224;  // Drain Life
+    constexpr std::uint32_t kBarSameSpell = 18088;      // Corruption
+    constexpr std::uint32_t kBarOtherSpell = 50097;     // Ice Spike Trigger (a dummy on itself)
+    constexpr std::uint32_t kKickChannelMs = 5000;
+    constexpr std::uint32_t kKickEveryMs = 15000;       // heroic Devour
+    // ... and the module's own kickable casts (InterruptFlags 15, PreventionType 1, 50 damage) for the short windows.
+    constexpr std::uint32_t kKickThreeSpell = 205012;   // Fireball (drill)
+    constexpr std::uint32_t kKickThreeMs = 3000;        // Drain Soul's channel
+    constexpr std::uint32_t kKickTwoSpell = 205010;     // Frost Bolt (drill)
+    constexpr std::uint32_t kKickTwoMs = 2000;          // Eviscerate and Envenom, Jergosh's Immolate
+    constexpr std::uint32_t kKickShortEveryMs = 20000;  // theirs: two short windows are never closer
+    constexpr std::uint32_t kBarMs = 2000;
+
+    // `blink`: the spot `yd` behind a member at `pos` facing `o` (Shadowstep), and the facing back at it.
+    inline Geo::Vec3 BehindSpot(Geo::Vec3 const& pos, float o, float yd)
+    {
+        return Shifted(pos, o, -yd, 0.f);
+    }
+
+    // `crawl`: where the pickup starts, `off` yd from `from` toward `goal` (never past the goal).
+    inline Geo::Vec3 CrawlStart(Geo::Vec3 const& from, Geo::Vec3 const& goal, float off)
+    {
+        float const dx = goal.x - from.x;
+        float const dy = goal.y - from.y;
+        float const d = std::sqrt(dx * dx + dy * dy);
+        if (d <= 0.01f)
+            return from;
+        float const u = std::min(1.f, off / d);
+        return { from.x + dx * u, from.y + dy * u, from.z };
+    }
+
+    // `inside=<yd>[:<ahead>]`: the radius and (with ahead) the fixed centre's offset along the run's facing.
+    struct InsideSpec
+    {
+        float yd = 0.f;
+        std::optional<float> ahead;
+    };
+
+    // ---- the rows (the drill entry below) ----
+    // The 2 s and 3 s kick windows stand in the quiet seconds of cycles 0 and 2, at least 20 s apart.
+    // Cycle 0 (0/3), Oggleflint: borer-den (two, three, four mounds on distinct members, tank included, 12 s apart, the
+    // unit chasing a hunted tank; five at the cycle's end, reported) and beating-chain (one, then two mounds, and three
+    // chained blows on a member none of them hunts; the unit lands on each blow). Cycle 1 (1/3), Jergosh and Bazzalan:
+    // burn-spread (2, 3 with one dispelled in the middle of the cast, 5 carriers), wisp-soak (two wisps across the
+    // rings), kick-lockout (three 5 s channels 15 s apart, each followed by a bar of another school and one of the
+    // same), shadowstep-fans. Cycle 2 (2/3), Taragaman: felstorm-spots three times, spike-hide with three spikes, then
+    // an opposite pair, the hard mode bursts.
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -2025,6 +2214,142 @@ namespace BossMechanics::Drill
                     { 50500, "line 10 1500 width=4 offset=240 shift=1.5:2.6 school=holy pct=45 weak=1 cycle=2/3 "
                         "tag=39" },
                 }, 3 },     // three cycles a run (180 s): the sweep runs scarlet-monastery-shapes-2:3
+
+            // Ragefire Chasm build §3.9 (WP-G1): see kRfcTagChase above.
+            { "ragefire-chasm-shapes", "mounds hunting distinct players with eruptions, a chained beating, a spread on "
+                "burning carriers, crawling wisps to catch, a kickable channel with must-play bars, spins after "
+                "teleports, a ring with aimed spots, hides behind spikes", 60000, false, {
+                    // borer-den: Oggleflint OG1 + OG2 heroic
+                    { 0, "chase 8 33000 home=1 cycle=0/3" },
+                    { 0, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=any inside=13:-8 pct=45 tankpct=45 "
+                        "weak=1 cycle=0/3 tag=1" },
+                    { 0, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 tankpct=45 "
+                        "weak=1 cycle=0/3 tag=1" },
+                    { 12000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=any inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    { 12000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    { 12000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    // a 2 s kick window (kick-lockout's short half) between two hunts
+                    { 19000, "cast 205010 2000 kick=1 cycle=0/3 tag=21" },
+                    { 24000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=any inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    { 24000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    { 24000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    { 24000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=1" },
+                    // beating-chain: OG4 heroic, the unit landing on each blow, then home
+                    { 36000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=any inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=4" },
+                    { 36500, "circle 3 1500 at=member pick=fresh inside=13:-8 pct=35 tankpct=35 weak=1 cycle=0/3 "
+                        "tag=3" },
+                    { 38000, "blink 0 0 at=prev cycle=0/3" },
+                    { 38000, "circle 3 1500 at=member pick=same inside=13:-8 pct=35 tankpct=35 weak=1 cycle=0/3 "
+                        "tag=3" },
+                    { 39500, "blink 0 0 at=prev cycle=0/3" },
+                    { 39500, "circle 3 1500 at=member pick=same inside=13:-8 pct=35 tankpct=35 weak=1 cycle=0/3 "
+                        "tag=3" },
+                    { 41000, "blink 0 0 at=prev cycle=0/3" },
+                    { 42000, "blink 0 0 home=1 cycle=0/3" },
+                    // a 3 s kick window between two Beatings
+                    { 43000, "cast 205012 3000 kick=1 cycle=0/3 tag=20" },
+                    { 48000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=any inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=4" },
+                    { 48000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=4" },
+                    { 48500, "circle 3 1500 at=member pick=fresh inside=13:-8 pct=35 tankpct=35 weak=1 cycle=0/3 "
+                        "tag=3" },
+                    { 50000, "blink 0 0 at=prev cycle=0/3" },
+                    { 50000, "circle 3 1500 at=member pick=same inside=13:-8 pct=35 tankpct=35 weak=1 cycle=0/3 "
+                        "tag=3" },
+                    { 51500, "blink 0 0 at=prev cycle=0/3" },
+                    { 51500, "circle 3 1500 at=member pick=same inside=13:-8 pct=35 tankpct=35 weak=1 cycle=0/3 "
+                        "tag=3" },
+                    { 53000, "blink 0 0 at=prev cycle=0/3" },
+                    { 54000, "blink 0 0 home=1 cycle=0/3" },
+                    // five mounds, every member hunted (reported)
+                    { 54000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=any inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=18" },
+                    { 54000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=18" },
+                    { 54000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=18" },
+                    { 54000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=18" },
+                    { 54000, "mound 3 500 persist=3500 speed=5 erupt=4 boom=2000 pick=fresh inside=13:-8 pct=45 "
+                        "tankpct=45 weak=1 cycle=0/3 tag=18" },
+                    // burn-spread (JR2 heroic), wisp-soak (JR5) and kick-lockout over each other, as Jergosh runs them
+                    // (0.5 s after cycle 0's last eruption: no two rows in one instant)
+                    { 500, "marker 1 pick=any cycle=1/3" },
+                    { 500, "marker 1 pick=any cycle=1/3" },
+                    { 4000, "spread 6 2500 self=205009:1 school=fire pct=45 tankpct=45 weak=1 cycle=1/3 tag=6" },
+                    { 7000, "marker 0 cycle=1/3" },
+                    { 8000, "crawl 2 25000 yd=50 bearing=90 off=4 speed=3 need=1 last=healer pick=any cycle=1/3 "
+                        "tag=7" },
+                    { 9000, "cast 36224 5000 kick=1 every=15000 cycle=1/3 tag=14" },
+                    { 14000, "marker 1 pick=any cycle=1/3" },
+                    { 14000, "marker 1 pick=any cycle=1/3" },
+                    { 14000, "marker 1 pick=any cycle=1/3" },
+                    { 14500, "cast 50097 2000 cycle=1/3 tag=16" },
+                    { 17000, "cast 18088 2000 cycle=1/3 tag=15" },
+                    { 18000, "spread 6 2500 self=205009:1 school=fire pct=45 tankpct=45 weak=1 cycle=1/3 tag=6" },
+                    { 19250, "marker 0 one=1 cycle=1/3" },
+                    { 21000, "marker 0 cycle=1/3" },
+                    { 24000, "cast 36224 5000 kick=1 every=15000 cycle=1/3 tag=14" },
+                    { 25000, "crawl 2 25000 yd=50 bearing=270 off=4 speed=3 need=1 last=healer pick=any cycle=1/3 "
+                        "tag=7" },
+                    { 28000, "marker 1 pick=any cycle=1/3" },
+                    { 28000, "marker 1 pick=any cycle=1/3" },
+                    { 28000, "marker 1 pick=any cycle=1/3" },
+                    { 28000, "marker 1 pick=any cycle=1/3" },
+                    { 28000, "marker 1 pick=any cycle=1/3" },
+                    { 29500, "cast 50097 2000 cycle=1/3 tag=16" },
+                    { 32000, "spread 6 2500 self=205009:1 school=fire pct=45 tankpct=45 weak=1 cycle=1/3 tag=6" },
+                    { 32000, "cast 18088 2000 cycle=1/3 tag=15" },
+                    { 35000, "marker 0 cycle=1/3" },
+                    { 39000, "cast 36224 5000 kick=1 cycle=1/3 tag=14" },
+                    { 44500, "cast 50097 2000 cycle=1/3 tag=16" },
+                    { 47000, "cast 18088 2000 cycle=1/3 tag=15" },
+                    // shadowstep-fans: Bazzalan BZ5, then BZ7 heroic, 2 s a step
+                    { 50000, "circle 8 2000 anchor=target inside=15:-6 pct=35 tankpct=35 weak=1 cycle=1/3 tag=8" },
+                    { 52500, "blink 2 0 pick=any cycle=1/3" },
+                    { 52500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
+                    { 54500, "blink 2 0 pick=fresh cycle=1/3" },
+                    { 54500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
+                    { 56500, "blink 2 0 pick=fresh cycle=1/3" },
+                    { 56500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
+                    { 58700, "blink 0 0 home=1 cycle=1/3" },
+                    // felstorm-spots: Taragaman TG3 + TG5 heroic
+                    { 0, "circle 10 2000 anchor=target persist=5000 tick=1000 inside=18:0 pct=20 tankpct=20 cycle=2/3 "
+                        "tag=10" },
+                    { 2000, "circle 4 1500 at=member pick=fresh scatter=4 repeat=10 every=500 inside=18:0 school=fire "
+                        "pct=35 tankpct=35 weak=1 cycle=2/3 tag=11" },
+                    // spike-hide: TG6 with three spikes (normal's count), then heroic's opposite pair
+                    { 11500, "hide 60 4000 blockers=3 of=4 apart=10 r=2 eye=3.05 display=5073 scale=2 linger=500 "
+                        "school=fire pct=75 tankpct=75 cycle=2/3 tag=12" },
+                    // a 2 s kick window, the group coming back from the spikes; the 3 s one below
+                    { 17000, "cast 205010 2000 kick=1 cycle=2/3 tag=21" },
+                    { 20000, "circle 10 2000 anchor=target persist=5000 tick=1000 inside=18:0 pct=20 tankpct=20 "
+                        "cycle=2/3 tag=10" },
+                    { 22000, "circle 4 1500 at=member pick=fresh scatter=4 repeat=10 every=500 inside=18:0 school=fire "
+                        "pct=35 tankpct=35 weak=1 cycle=2/3 tag=11" },
+                    { 31500, "hide 60 4000 blockers=2 apart=10 r=2 eye=3.05 display=5073 scale=2 linger=500 "
+                        "school=fire pct=75 tankpct=75 cycle=2/3 tag=13" },
+                    { 37000, "cast 205012 3000 kick=1 cycle=2/3 tag=20" },
+                    { 40000, "circle 10 2000 anchor=target persist=5000 tick=1000 inside=18:0 pct=20 tankpct=20 "
+                        "cycle=2/3 tag=10" },
+                    { 42000, "circle 4 1500 at=member pick=fresh scatter=4 repeat=10 every=500 inside=18:0 school=fire "
+                        "pct=35 tankpct=35 weak=1 cycle=2/3 tag=11" },
+                    // globule-walkers, reported: TG9's bursts where the four die on their way in (the kill order itself
+                    // is NearUnit on a TargetEntry, no row)
+                    { 52000, "circle 6 1500 shift=12:0 school=shadow pct=30 weak=1 cycle=2/3 tag=17" },
+                    { 53000, "circle 6 1500 shift=-12:0 school=shadow pct=30 weak=1 cycle=2/3 tag=17" },
+                    { 54000, "circle 6 1500 shift=0:8 school=shadow pct=30 weak=1 cycle=2/3 tag=17" },
+                    { 55000, "circle 6 1500 shift=0:-8 school=shadow pct=30 weak=1 cycle=2/3 tag=17" },
+                }, 3 },     // three cycles a run (180 s): the sweep runs ragefire-chasm-shapes:3
         };
         return drills;
     }
@@ -2271,7 +2596,8 @@ namespace BossMechanics::Drill
         Any,
         NonTank,        // never the selected unit's victim
         Other,          // a non-tank the chain has not picked yet (see PickPool)
-        Tank            // the selected unit's victim (Scarlet Monastery G1: Torment on the tank); none: anyone
+        Tank,           // the selected unit's victim (Scarlet Monastery G1: Torment on the tank); none: anyone
+        Fresh           // a member, the tank included, the chain has not picked (Ragefire Chasm G1; see PickPool)
     };
 
     // One member as a pick sees it (members in guid order).
@@ -2285,7 +2611,9 @@ namespace BossMechanics::Drill
 
     // The members a pick draws from (indices into `c`, in order; empty: nobody). pick=other: a non-tank outside the
     // chain, else a non-tank other than the previous pick, else any non-tank (a small group runs out of fresh
-    // targets). min > 0: of those, the ones at least `min` yd from the source, else the single farthest one.
+    // targets). pick=fresh (Ragefire Chasm G1): a member, the tank included, outside the chain; everyone picked: anyone
+    // but the previous pick, and the chain starts over (a shuffled rotation; FreshRestarts). min > 0: of those, the
+    // ones at least `min` yd from the source, else the single farthest one.
     inline std::vector<std::size_t> PickPool(std::vector<PickCandidate> const& c, PickRule rule, float min)
     {
         std::vector<std::size_t> pool;
@@ -2304,6 +2632,14 @@ namespace BossMechanics::Drill
         }
         else if (rule == PickRule::Any)
             collect([](PickCandidate const&) { return true; });
+        else if (rule == PickRule::Fresh)
+        {
+            collect([](PickCandidate const& m) { return !m.chained; });
+            if (pool.empty())
+                collect([](PickCandidate const& m) { return !m.last; });
+            if (pool.empty())
+                collect([](PickCandidate const&) { return true; });
+        }
         else
         {
             if (rule == PickRule::Other)
@@ -2331,6 +2667,15 @@ namespace BossMechanics::Drill
             pool = far;
         }
         return pool;
+    }
+
+    // pick=fresh with every member in the chain: the pick starts a new round (the runner clears the chain first).
+    inline bool FreshRestarts(std::vector<PickCandidate> const& c)
+    {
+        for (PickCandidate const& m : c)
+            if (!m.chained)
+                return false;
+        return true;
     }
 
     // ---- fixed lines (fix=1, reach=1, at=last) ---------------------------------------------------------------------
@@ -2530,6 +2875,145 @@ namespace BossMechanics::Drill
             || *ms != std::floor(*ms))
             return std::nullopt;
         return static_cast<std::uint32_t>(*ms);
+    }
+
+    // `blink <yd> 0 [pick=any|fresh|nontank|same] [at=prev] [home=1]` (Ragefire Chasm G1; plan keys stripped; the 0 is
+    // the warning column, a blink takes none): exactly one of a pick (yd in (0, kMaxBlinkYd]; default any), at=prev
+    // (yd 0) and home=1 (yd 0); nullopt otherwise.
+    constexpr float kMaxBlinkYd = 10.f;
+
+    struct BlinkStep
+    {
+        float yd = 0.f;
+        bool atPrev = false;            // at=prev: the last point circle's centre
+        bool home = false;              // home=1: where the unit stood before the run's first blink
+        PickRule pick = PickRule::Any;
+        bool same = false;              // pick=same: the last pick (else as PickRule::Any)
+    };
+
+    inline std::optional<BlinkStep> ParseBlink(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "blink" || t[2] != "0" || !OnlyKeys(t, { "pick", "at", "home" }))
+            return std::nullopt;
+        std::optional<float> const yd = Number(t[1]);
+        if (!yd || *yd > kMaxBlinkYd)
+            return std::nullopt;
+        BlinkStep b;
+        b.yd = *yd;
+        std::optional<std::string_view> const at = Value(line, "at");
+        std::optional<std::string_view> const home = Value(line, "home");
+        std::optional<std::string_view> const pick = Value(line, "pick");
+        if ((at && *at != "prev") || (home && *home != "1"))
+            return std::nullopt;
+        b.atPrev = at.has_value();
+        b.home = home.has_value();
+        if (b.atPrev || b.home)
+            return (b.atPrev && b.home) || pick || b.yd > 0.f ? std::nullopt : std::optional<BlinkStep>(b);
+        if (b.yd <= 0.f)
+            return std::nullopt;
+        if (pick)
+        {
+            if (*pick == "fresh")
+                b.pick = PickRule::Fresh;
+            else if (*pick == "nontank")
+                b.pick = PickRule::NonTank;
+            else if (*pick == "same")
+                b.same = true;
+            else if (*pick != "any")
+                return std::nullopt;
+        }
+        return b;
+    }
+
+    // `cast <spell> <ms> [kick=1] [every=<ms>] tag=<n>` (Ragefire Chasm G1; plan keys stripped): ms from kMinCastMs to
+    // kMaxCastMs, every= (with kick=1 only) longer than ms, a whole tag >= 1; nullopt otherwise. `<ms>` is the cast's
+    // own length: the judge reads it kCastJudgeLeadMs before its end.
+    constexpr std::uint32_t kMinCastMs = 500;
+    constexpr std::uint32_t kMaxCastMs = 30000;
+    constexpr std::uint32_t kCastJudgeLeadMs = 150;
+
+    struct CastStep
+    {
+        std::uint32_t spell = 0;
+        std::uint32_t ms = 0;
+        std::uint32_t everyMs = 0;      // 0: no cadence noted
+        bool kick = false;
+        std::uint32_t ledgerTag = 0;
+    };
+
+    // Is the cast a group failure? `running`: it still runs kCastJudgeLeadMs before its end (false: it never started,
+    // was interrupted, or was cut). A kick=1 cast fails when nobody stopped it, and when it never started (a row that
+    // did not run must not read as a pass); a must-play bar when it does not run to its end.
+    constexpr bool CastFails(bool kick, bool started, bool running)
+    {
+        return kick ? !started || running : !running;
+    }
+
+    inline std::optional<CastStep> ParseCast(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "cast" || !OnlyKeys(t, { "kick", "every", "tag" }))
+            return std::nullopt;
+        std::optional<float> const ms = Number(t[2]);
+        if (!ms || *ms < static_cast<float>(kMinCastMs) || *ms > static_cast<float>(kMaxCastMs))
+            return std::nullopt;
+        CastStep c;
+        for (char const ch : t[1])      // a spell id does not fit a float: whole digits only
+        {
+            if (ch < '0' || ch > '9' || c.spell > 99999999u)
+                return std::nullopt;
+            c.spell = c.spell * 10 + static_cast<std::uint32_t>(ch - '0');
+        }
+        if (!c.spell)
+            return std::nullopt;
+        c.ms = static_cast<std::uint32_t>(*ms);
+        if (std::optional<std::string_view> const v = Value(line, "kick"))
+        {
+            if (*v != "0" && *v != "1")
+                return std::nullopt;
+            c.kick = *v == "1";
+        }
+        if (std::optional<std::string_view> const v = Value(line, "every"))
+        {
+            std::optional<float> const every = Number(*v);
+            if (!every || !c.kick || *every <= *ms)
+                return std::nullopt;
+            c.everyMs = static_cast<std::uint32_t>(*every);
+        }
+        std::optional<std::string_view> const tag = Value(line, "tag");
+        std::optional<float> const n = tag ? Number(*tag) : std::nullopt;
+        if (!n || *n < 1.f || *n != std::floor(*n))
+            return std::nullopt;
+        c.ledgerTag = static_cast<std::uint32_t>(*n);
+        return c;
+    }
+
+    // A signed decimal number (Number reads none).
+    inline std::optional<float> SignedNumber(std::string_view s)
+    {
+        bool const minus = !s.empty() && s.front() == '-';
+        std::optional<float> const v = Number(minus ? s.substr(1) : s);
+        return v && minus ? std::optional<float>(-*v) : v;
+    }
+
+    // `inside=<yd>` or `inside=<yd>:<ahead>` (Ragefire Chasm G1): yd > 0, ahead at most 50 yd either way; nullopt
+    // otherwise.
+    inline std::optional<InsideSpec> ParseInside(std::string_view value)
+    {
+        std::size_t const colon = value.find(':');
+        std::optional<float> const yd = Number(value.substr(0, colon));
+        if (!yd || *yd <= 0.f)
+            return std::nullopt;
+        InsideSpec out;
+        out.yd = *yd;
+        if (colon != std::string_view::npos)
+        {
+            out.ahead = SignedNumber(value.substr(colon + 1));
+            if (!out.ahead || std::fabs(*out.ahead) > 50.f)
+                return std::nullopt;
+        }
+        return out;
     }
 
     // ---- repeat= and every= on a drill step (Scarlet Monastery G2: the runner used to drop them) -------------------
