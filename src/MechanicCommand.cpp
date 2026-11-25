@@ -12,7 +12,7 @@
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
  *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
  *               |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes
- *               |scarlet-monastery-shapes-2> [cycles=3] [seed=] [dmg=1] [self=0]
+ *               |scarlet-monastery-shapes-2|ragefire-chasm-shapes> [cycles=3] [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -132,6 +132,16 @@
  * dropped them: `pass-eggs` laid one egg per cycle), keeping the step's tag on every repeat (MechanicDrill.h
  * "repeat= and every= on a drill step").
  *
+ * Ragefire Chasm build (WP-G1 §3.9, drill `ragefire-chasm-shapes`): `mound <r> <arm ms> persist=<ms>` is Oggleflint's
+ * Borer (a chaser with a no-damage circle only the hunted member sees, then an eruption circle where it stops:
+ * RegisterMound) and `crawl <r> <life ms> yd=<yd>` Jergosh's wisp (a telegraph-only Soak on a unit crawling to a point,
+ * taken on touch: RegisterCrawl); `pick=fresh` picks a member, the tank included, the chain has not picked;
+ * `inside=<yd>:<ahead>` fixes the bots' bounds on the drill's start; `hide of=<n> scale=<s>` stands the blockers on
+ * random points of n and scales them; `marker 0 one=1` takes Marked off one holder; and two drill-only steps: `blink`
+ * (the selected creature appears behind a member, on the last circle's centre or back home: ScheduleBlink) and `cast`
+ * (it casts a spell, kickable or a must-play bar, judged near its end: ScheduleCast). MechanicDrill.h "Ragefire Chasm
+ * shapes".
+ *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
 
@@ -161,6 +171,7 @@
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "Random.h"
+#include "Spell.h"
 #include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
@@ -510,7 +521,8 @@ namespace
             NonTank,            // a random member other than the selected unit's victim
             Same,               // the member the previous pick of this command landed on (else a random one)
             Other,              // a non-tank the chain has not picked (Drill::PickPool)
-            Tank                // the selected unit's victim, else a random member (Scarlet Monastery WP-G1)
+            Tank,               // the selected unit's victim, else a random member (Scarlet Monastery WP-G1)
+            Fresh               // a member, the tank included, the chain has not picked (Ragefire Chasm WP-G1)
         };
         enum class To : uint8
         {
@@ -618,13 +630,25 @@ namespace
         // Scarlet Monastery build WP-G2 (drill `scarlet-monastery-shapes-2`)
         bool alongTarget = false;       // along=target: a point's axes follow the selected unit's facing
         float past = 0.f;               // line past=: a reach=1 line runs this far past the to= unit
+        // Ragefire Chasm build WP-G1 (drill `ragefire-chasm-shapes`)
+        bool insideFixed = false;       // inside=<yd>:<ahead>: insideCentre set at the parse, never moved
+        float moundSpeed = Drill::kMoundSpeedYdS;   // mound speed= (yd/s)
+        float moundErupt = Drill::kEruptYd;         // mound erupt=: the eruption's radius
+        Milliseconds moundBoom{ Drill::kEruptMs };  // mound boom=: the eruption's warning
+        float crawlYd = 0.f;            // crawl yd=: the goal, this far from the selected unit's start
+        float crawlBearing = 0.f;       // crawl bearing=: degrees from the run's facing, counterclockwise
+        float crawlOff = Drill::kWispOffYd;         // crawl off=: it starts this far from the picked member
+        float crawlSpeed = Drill::kWispSpeedYdS;    // crawl speed= (yd/s)
+        uint32 hideOf = 0;              // hide of=: the blockers stand on random points of this many (0: all of them)
+        std::vector<uint32> hideSlots;  // ... which, drawn when the repeat registers
+        float hideScale = 1.f;          // hide scale=: the game objects' scale
     };
 
     bool IsShapeName(std::string const& s)
     {
         static char const* const shapes[] = { "circle", "donut", "cone", "rearcone", "line", "projectile", "mine",
             "lanes", "spread", "runout", "stack", "soak", "frontal", "bait", "holdstill", "spot", "hunt", "jump",
-            "conefront", "linefront", "hide", "gaze" };
+            "conefront", "linefront", "hide", "gaze", "mound", "crawl" };
         for (char const* name : shapes)
             if (s == name)
                 return true;
@@ -1016,8 +1040,10 @@ namespace
             uint32 const lifeSecs = static_cast<uint32>((life.count() + 999) / 1000);
             for (uint32 i = 0; i < spec.hideBlockers; ++i)
             {
-                float const a = Geo::WrapPi(spec.facing + Geo::kTwoPi * static_cast<float>(i)
-                    / static_cast<float>(spec.hideBlockers));
+                // of=<n> (Ragefire Chasm WP-G1): on the drawn points of n, else the blockers' own ring.
+                bool const drawn = spec.hideOf && i < spec.hideSlots.size();
+                float const a = Geo::WrapPi(spec.facing + Geo::kTwoPi * static_cast<float>(drawn ? spec.hideSlots[i]
+                    : i) / static_cast<float>(drawn ? spec.hideOf : spec.hideBlockers));
                 float const x = source->GetPositionX() + std::cos(a) * spec.hideApart;
                 float const y = source->GetPositionY() + std::sin(a) * spec.hideApart;
                 float const z0 = source->GetPositionZ();
@@ -1029,8 +1055,11 @@ namespace
                     err = Acore::StringFormat("game object {} could not be summoned (go=)", spec.hideGo);
                     return ids;
                 }
-                if (spec.hideDisplay && go->GetDisplayId() != spec.hideDisplay)
-                    go->SetDisplayId(spec.hideDisplay);     // recreates its collision model (GameObject::UpdateModel)
+                if (spec.hideScale != 1.f)
+                    go->SetObjectScale(spec.hideScale);     // the collision model reads it when it is recreated below
+                uint32 const display = spec.hideDisplay ? spec.hideDisplay : go->GetDisplayId();
+                if (go->GetDisplayId() != display || spec.hideScale != 1.f)
+                    go->SetDisplayId(display);      // recreates its collision model (GameObject::UpdateModel)
                 // The respawn timer above runs on GameTime::GetGameTime(), wall-clock seconds even under the sim's
                 // clock override, so in an accelerated sim a 7 s Boulder outlived its run by minutes of sim time and
                 // stood on the next iteration's Roccor road, breaking the bots' line of sight to the walking boss
@@ -1173,13 +1202,16 @@ namespace
         }
         Drill::PickRule const rule = spec.pick == TestSpec::Pick::Any ? Drill::PickRule::Any
             : spec.pick == TestSpec::Pick::Other ? Drill::PickRule::Other
-            : spec.pick == TestSpec::Pick::Tank ? Drill::PickRule::Tank : Drill::PickRule::NonTank;
+            : spec.pick == TestSpec::Pick::Tank ? Drill::PickRule::Tank
+            : spec.pick == TestSpec::Pick::Fresh ? Drill::PickRule::Fresh : Drill::PickRule::NonTank;
         std::vector<std::size_t> const pool = Drill::PickPool(candidates, rule, source ? spec.minDist : 0.f);
         if (pool.empty())
             return nullptr;
         Player* p = members[pool[dice.rng.Index(static_cast<uint32>(pool.size()))]];
         dice.lastMember = p->GetGUID();
-        if (spec.pick != TestSpec::Pick::Other)
+        bool const keeps = spec.pick == TestSpec::Pick::Other || (spec.pick == TestSpec::Pick::Fresh
+            && !Drill::FreshRestarts(candidates));
+        if (!keeps)
             dice.chain.clear();
         dice.chain.push_back(p->GetGUID());
         return p;
@@ -1401,6 +1433,232 @@ namespace
         return ids;
     }
 
+    // inside= (Blackrock Spire WP-G2): the bounds' centre is the selected unit where it stands now (else the parsed
+    // point); inside=<yd>:<ahead> (Ragefire Chasm WP-G1) fixed it at the parse.
+    void PlaceInside(Creature* owner, TestSpec& spec)
+    {
+        if (spec.insideYd <= 0.f || spec.insideFixed)
+            return;
+        spec.insideCentre = spec.point;
+        if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
+            spec.insideCentre = selected->GetPosition();
+    }
+
+    // ---- the mound and the crawl (Ragefire Chasm WP-G1; MechanicDrill.h "Ragefire Chasm shapes") --------------------
+    // A Mechanic Marker that moves: passive, the owner's level and phase, gone `life` later at the latest.
+    Creature* SummonMover(Creature* owner, Position const& at, Milliseconds life)
+    {
+        TempSummon* unit = owner->SummonCreature(Ids::NPC_MECHANIC_MARKER, at.GetPositionX(), at.GetPositionY(),
+            at.GetPositionZ(), at.GetOrientation(), TEMPSUMMON_TIMED_DESPAWN, static_cast<uint32>(life.count()));
+        if (!unit)
+            return nullptr;
+        unit->SetReactState(REACT_PASSIVE);
+        unit->SetLevel(owner->GetLevel(), false);
+        if (unit->GetPhaseMask() != owner->GetPhaseMask())
+            unit->SetPhaseMask(owner->GetPhaseMask(), true);
+        return unit;
+    }
+
+    // `mound` (OG1 + OG2): the Borer at the selected unit runs at the picked member for warn + persist, re-aimed every
+    // kMoundAimMs (DungeonKit::Chaser's repath); its circle is the hunted member's alone (players only), deals nothing,
+    // draws nothing (the mound is the tell) and stands from `warn` to the chase's end (Persistent, tick 0). At the end
+    // it stops and the eruption circle (moundErupt, moundBoom, the step's damage keys, everyone) registers there under
+    // MoundEruptTag. The hunted member gone or dead: the mound stands and still erupts (§7 #36 A).
+    std::vector<uint32> RegisterMound(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
+    {
+        Unit* start = ObjectAccessor::GetUnit(*owner, spec.selected);
+        if (!start || !start->IsInWorld() || start->GetMap() != owner->GetMap())
+        {
+            err = "the mound's start unit (the selected creature) is gone";
+            return {};
+        }
+        Player* hunted = PickMember(owner, spec, dice);
+        if (!hunted)
+        {
+            err = kNoMemberMessage;
+            return {};
+        }
+        Milliseconds const life = spec.warn + spec.persist;
+        Creature* mound = SummonMover(owner, start->GetPosition(), life + spec.moundBoom + kChaserLinger);
+        if (!mound)
+        {
+            err = Acore::StringFormat("could not summon the mound ({})", Ids::NPC_MECHANIC_MARKER);
+            return {};
+        }
+        // The run speed the bots read for the circle's drift (MechanicBotView AnchorDriftSpeed) and the walk uses.
+        mound->SetSpeed(MOVE_RUN, spec.moundSpeed / Drill::kPlayerRunYdS, true);
+
+        PlaceInside(owner, spec);
+        TestSpec circle = spec;
+        circle.shape = "circle";
+        circle.unitAnchor = true;
+        circle.unit = mound->GetGUID();
+        circle.target = hunted->GetGUID();
+        circle.pct = 0.f;
+        circle.tankPct = -1.f;
+        circle.weak = false;
+        circle.once = false;
+        circle.rider = 0;
+        circle.tele = false;
+        circle.tick = Milliseconds(0);
+        Eligibility elig = spec.eligibility.value_or(Eligibility());
+        elig.carriers = { hunted->GetGUID() };
+        elig.playersOnly = true;
+        circle.eligibility = elig;
+        std::vector<uint32> ids = RegisterTest(owner, circle, err);
+        if (ids.empty())
+        {
+            mound->DespawnOrUnsummon();
+            return ids;
+        }
+
+        TestSpec boom = spec;
+        boom.shape = "circle";
+        boom.size = spec.moundErupt;
+        boom.warn = spec.moundBoom;
+        boom.persist = Milliseconds(0);
+        boom.unitAnchor = false;
+        boom.tag = Drill::MoundEruptTag(spec.tag);
+        Registry& reg = Registry::GetOrCreate(owner->GetMap());
+        Milliseconds const now = GameTime::GetGameTimeMS();
+        ObjectGuid const moundGuid = mound->GetGUID();
+        ObjectGuid const huntedGuid = hunted->GetGUID();
+        for (Milliseconds at(0); at < life; at += Milliseconds(Drill::kMoundAimMs))
+            reg.Schedule(owner->GetGUID(), now + at, [moundGuid, huntedGuid, speed = spec.moundSpeed](Creature* o)
+            {
+                Creature* unit = o->GetMap()->GetCreature(moundGuid);
+                Player* member = unit ? ObjectAccessor::GetPlayer(*unit, huntedGuid) : nullptr;
+                if (!unit)
+                    return;
+                if (!member || !member->IsAlive())
+                {
+                    unit->GetMotionMaster()->Clear();
+                    unit->StopMoving();
+                    return;
+                }
+                unit->GetMotionMaster()->MovePoint(0, member->GetPosition(), FORCED_MOVEMENT_NONE, speed);
+            });
+        reg.Schedule(owner->GetGUID(), now + life, [moundGuid, boom](Creature* o)
+        {
+            Creature* unit = o->GetMap()->GetCreature(moundGuid);
+            if (!unit)
+                return;
+            unit->GetMotionMaster()->Clear();
+            unit->StopMoving();
+            TestSpec at = boom;
+            at.point = unit->GetPosition();
+            at.point.SetOrientation(boom.facing);
+            std::string ignored;
+            RegisterTest(o, at, ignored);
+        });
+        return ids;
+    }
+
+    // `crawl` (JR5): a pickup as DungeonKit::CrawlPickups registers it (a Soak on its own unit, telegraph only:
+    // MissedSoak Never, NoFillTimer, OneClaimPerBot, the whole fight's warning), starting crawlOff yd from the picked
+    // member toward its goal and crawling there at crawlSpeed (re-pathed every kCrawlRepathMs). An eligible member
+    // within `size` takes it (polled every kCrawlPollMs); the goal reached, or `warn` gone, is a group failure
+    // (MissedSoak under the step's tag).
+    struct CrawlState
+    {
+        ObjectGuid unit;
+        uint32 soak = 0;
+        bool done = false;
+    };
+
+    std::vector<uint32> RegisterCrawl(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
+    {
+        Player* from = PickMember(owner, spec, dice);
+        if (!from)
+        {
+            err = kNoMemberMessage;
+            return {};
+        }
+        Geo::Vec3 const g = Drill::Shifted({ spec.point.GetPositionX(), spec.point.GetPositionY(),
+            spec.point.GetPositionZ() }, spec.facing + Geo::DegToRad(spec.crawlBearing), spec.crawlYd, 0.f);
+        Position const goal(g.x, g.y, GroundZ(owner, g.x, g.y, g.z), 0.f);
+        Geo::Vec3 const s = Drill::CrawlStart({ from->GetPositionX(), from->GetPositionY(), from->GetPositionZ() },
+            { goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ() }, spec.crawlOff);
+        Position const start(s.x, s.y, GroundZ(owner, s.x, s.y, s.z), 0.f);
+        Creature* unit = SummonMover(owner, start, spec.warn + kChaserLinger);
+        if (!unit)
+        {
+            err = Acore::StringFormat("could not summon the crawling unit ({})", Ids::NPC_MECHANIC_MARKER);
+            return {};
+        }
+        Registry& reg = Registry::GetOrCreate(owner->GetMap());
+        reg.AddScopePlayer(owner->GetGUID(), spec.gm);
+        auto const state = std::make_shared<CrawlState>();
+        state->unit = unit->GetGUID();
+        {
+            MechanicRef ref = Mechanic::Soak(owner, unit, spec.size, std::max<uint8>(1, spec.need),
+                Milliseconds(4 * 3600 * 1000));     // CrawlPickups::kWholeFight
+            if (!ref.IsValid())
+            {
+                unit->DespawnOrUnsummon();
+                err = "the registry refused the crawl's soak";
+                return {};
+            }
+            ref.MissedSoak(MissedSoakMode::Never).NoFillTimer().OneClaimPerBot();
+            ref.Eligible(spec.eligibility.value_or(Eligibility()));
+            if (spec.ordering)
+                ref.Order(*spec.ordering);
+            ref.Tag(spec.tag);
+            state->soak = ref.Id();
+        }
+        Milliseconds const now = GameTime::GetGameTimeMS();
+        Milliseconds const step(Drill::kCrawlPollMs);
+        for (Milliseconds at(0); at <= spec.warn; at += step)
+        {
+            bool const repath = at.count() % Drill::kCrawlRepathMs == 0;
+            bool const last = at + step > spec.warn;
+            reg.Schedule(owner->GetGUID(), now + at, [state, spec, goal, repath, last](Creature* o)
+            {
+                if (state->done)
+                    return;
+                Registry& reg = Registry::GetOrCreate(o->GetMap());
+                Creature* unit = o->GetMap()->GetCreature(state->unit);
+                auto const end = [&state, &reg, unit]()
+                {
+                    state->done = true;
+                    reg.Cancel(state->soak);
+                    if (unit)
+                        unit->DespawnOrUnsummon();
+                };
+                if (!unit || !unit->IsAlive())
+                {
+                    end();
+                    return;
+                }
+                ActiveMechanic const* soak = reg.Find(state->soak);
+                for (Player const* p : GroupMembers(o, spec.gm, spec.includeGm))
+                    if (p->GetExactDist2d(unit) <= spec.size
+                        && std::fabs(p->GetPositionZ() - unit->GetPositionZ()) <= Drill::kCrawlZBandYd
+                        && (!soak || reg.IsEligible(*soak, p)))
+                    {
+                        end();
+                        return;
+                    }
+                if (last || unit->GetExactDist2d(&goal) <= Drill::kWispReachYd)
+                {
+                    FailureEvent e;
+                    e.encounter = o->GetGUID();
+                    e.mechanicId = state->soak;
+                    e.tag = spec.tag;
+                    e.kind = Kind::Soak;
+                    e.type = FailureEvent::Type::MissedSoak;
+                    e.at = GameTime::GetGameTimeMS();
+                    reg.PostFailure(e);
+                    end();
+                    return;
+                }
+                if (repath)
+                    unit->GetMotionMaster()->MovePoint(0, goal, FORCED_MOVEMENT_NONE, spec.crawlSpeed);
+            });
+        }
+        return { state->soak };
+    }
+
     // `at=predict` (Scholomance build §3.9, IB1): where `p` will stand `lead` from now at its heading and speed, read
     // from its movement keys (a bot's spline move sets forward and faces along the path), snapped to the floor; where
     // it stands while it does not move (MechanicDrill.h MoveHeading, PredictSpot).
@@ -1443,13 +1701,18 @@ namespace
 
     // One repeat of `.mech test`: resolves the landing (at=member|group|gm|last|each|prev|predict, anchor=member, to=,
     // away=, shift=, scatter=, fix=) and the spot ring now, so a delayed repeat follows the bots, then registers.
-    // `hunt` and `soak bell=` place themselves (RegisterHunt, RegisterBell); `grid=` lays its circles (RegisterGrid).
+    // `hunt`, `soak bell=`, `mound` and `crawl` place themselves (RegisterHunt, RegisterBell, RegisterMound,
+    // RegisterCrawl); `grid=` lays its circles (RegisterGrid).
     std::vector<uint32> RegisterRepeat(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
     {
         if (spec.shape == "hunt")
             return RegisterHunt(owner, spec, dice, err);
         if (spec.shape == "soak" && spec.bells)
             return RegisterBell(owner, spec, dice, err);
+        if (spec.shape == "mound")
+            return RegisterMound(owner, spec, dice, err);
+        if (spec.shape == "crawl")
+            return RegisterCrawl(owner, spec, dice, err);
         Barrage::Rng& rng = dice.rng;
         if (spec.atEach)
         {
@@ -1628,13 +1891,10 @@ namespace
             elig.playersOnly = true;
             spec.eligibility = elig;
         }
-        if (spec.insideYd > 0.f)
-        {
-            // inside= (WP-G2): the bounds' centre is the selected unit where it stands now (else the parsed point).
-            spec.insideCentre = spec.point;
-            if (Unit* selected = ObjectAccessor::GetUnit(*owner, spec.selected))
-                spec.insideCentre = selected->GetPosition();
-        }
+        PlaceInside(owner, spec);
+        if (spec.hideOf)
+            spec.hideSlots = Drill::PickDistinct(spec.hideOf, spec.hideBlockers,
+                [&rng](uint32 n) { return rng.Index(n); });
         if (spec.exemptTo && !spec.toUnit.IsEmpty())
         {
             // exempt=target: every scope member but the aimed one is eligible (the GM too, as for any zone), so the
@@ -2055,6 +2315,31 @@ namespace
             if (spec.huntRate <= 0.f || spec.huntRate > Drill::kMaxHuntRate)
                 opt.MarkBad("speed");
         }
+        // Ragefire Chasm WP-G1: `mound <r> <arm ms>` and `crawl <r> <life ms>`.
+        if (s == "mound")
+        {
+            spec.moundSpeed = opt.Float("speed", Drill::kMoundSpeedYdS);
+            spec.moundErupt = opt.Float("erupt", Drill::kEruptYd);
+            spec.moundBoom = opt.Ms("boom", Milliseconds(Drill::kEruptMs));
+            if (spec.moundSpeed <= 0.f || spec.moundSpeed > Drill::kMaxHuntRate * Drill::kPlayerRunYdS)
+                opt.MarkBad("speed");
+            if (spec.moundErupt <= 0.f)
+                opt.MarkBad("erupt");
+        }
+        if (s == "crawl")
+        {
+            spec.need = static_cast<uint8>(std::clamp<int32>(opt.Int("need", 1), 1, 40));
+            spec.crawlYd = opt.Float("yd", 0.f);
+            spec.crawlBearing = opt.Float("bearing", 0.f);
+            spec.crawlOff = opt.Float("off", Drill::kWispOffYd);
+            spec.crawlSpeed = opt.Float("speed", Drill::kWispSpeedYdS);
+            if (spec.crawlYd <= 0.f || spec.crawlYd > 100.f)
+                opt.MarkBad("yd");
+            if (spec.crawlOff < 0.f)
+                opt.MarkBad("off");
+            if (spec.crawlSpeed <= 0.f)
+                opt.MarkBad("speed");
+        }
         if (s == "stack" || s == "soak")
         {
             std::string const shape = opt.Str("shape", "circle");
@@ -2149,6 +2434,16 @@ namespace
                 opt.MarkBad("display");
             else
                 spec.hideDisplay = static_cast<uint32>(display);
+            // of=<n> and scale=<s> (Ragefire Chasm WP-G1)
+            int32 const of = opt.Int("of", 0);
+            if (of != 0 && (of < static_cast<int32>(spec.hideBlockers) || of > static_cast<int32>(
+                Hide::kTestMaxBlockers)))
+                opt.MarkBad("of");
+            else
+                spec.hideOf = static_cast<uint32>(of);
+            spec.hideScale = opt.Float("scale", 1.f);
+            if (!(spec.hideScale > 0.f && spec.hideScale <= 10.f))
+                opt.MarkBad("scale");
         }
         if (s == "circle" || s == "donut" || s == "cone" || s == "rearcone" || s == "line" || s == "conefront")
             spec.park = opt.Bool("park", false);
@@ -2280,8 +2575,19 @@ namespace
         }
         if (opt.Has("inside"))
         {
-            spec.insideYd = opt.Float("inside", 0.f);
-            if (spec.insideYd <= 0.f)
+            // inside=<yd>[:<ahead>] (the fixed form: Ragefire Chasm WP-G1)
+            if (std::optional<Drill::InsideSpec> const in = Drill::ParseInside(opt.Str("inside", "")))
+            {
+                spec.insideYd = in->yd;
+                spec.insideFixed = in->ahead.has_value();
+                if (in->ahead)
+                {
+                    Geo::Vec3 const c = Drill::Shifted({ selected->GetPositionX(), selected->GetPositionY(),
+                        selected->GetPositionZ() }, ctx.facing, *in->ahead, 0.f);
+                    spec.insideCentre = Position(c.x, c.y, c.z, ctx.facing);
+                }
+            }
+            else
                 opt.MarkBad("inside");
         }
         if (opt.Has("lethal"))
@@ -2299,7 +2605,7 @@ namespace
                 opt.MarkBad("order");
         }
         // Scarlet Monastery F7: last=<role> (a soak's Ordering::roleLast; with or without order=).
-        if (s == "soak" && opt.Has("last"))
+        if ((s == "soak" || s == "crawl") && opt.Has("last"))
         {
             if (std::optional<Role> role = ParseRole(opt.Str("last", "")); role && *role != Role::Any)
             {
@@ -2325,7 +2631,8 @@ namespace
 
         // common keys
         // A bell soak reads the damage keys for its landing (LandAtBell).
-        bool const noDamage = s == "stack" || (s == "soak" && !spec.bells) || s == "holdstill" || s == "spot";
+        bool const noDamage = s == "crawl" || s == "stack" || (s == "soak" && !spec.bells) || s == "holdstill"
+            || s == "spot";
         if (!noDamage)
         {
             spec.dmg = opt.Int("dmg", -1);
@@ -2405,6 +2712,8 @@ namespace
             spec.pick = TestSpec::Pick::Other;
         else if (pick == "tank")
             spec.pick = TestSpec::Pick::Tank;
+        else if (pick == "fresh")
+            spec.pick = TestSpec::Pick::Fresh;
         else if (pick != "any")
             opt.MarkBad("pick");
         if (opt.Has("shift"))
@@ -2553,6 +2862,20 @@ namespace
             if (spec.tick <= Milliseconds(0))
                 return "hunt needs tick= > 0: how often the chase is re-aimed and judged";
         }
+        if (s == "mound" || s == "crawl")
+        {
+            if (selected == gm)
+                return "mound and crawl need a selected unit: the mound starts at it, the crawl's goal is measured "
+                    "from it";
+            if (atPoint || spec.unitAnchor || spec.anchorMember || spec.to != TestSpec::To::None || spec.shifted
+                || spec.onlyMember)
+                return "mound and crawl place themselves and pick a member (pick=): leave at=, anchor=, only= and "
+                    "shift= out";
+            if (s == "mound" && spec.persist <= Milliseconds(0))
+                return "mound needs persist=<ms>: how long it chases after its arm time";
+            if (s == "crawl" && spec.warn < Milliseconds(Drill::kCrawlPollMs))
+                return "crawl needs a life (its second number, ms): how long it crawls at most";
+        }
         if (spec.bells)
         {
             if (spec.lane || spec.ordering || atPoint || spec.unitAnchor || spec.anchorMember || spec.shifted
@@ -2581,11 +2904,23 @@ namespace
     // Never touches Weakened: drill setup hands out no Weakened, and a reset leaves the Weakened members earned from
     // real failures (orchestrator ruling on STAGE-M4-R-REPORT M-2). The encounter records the players, so its end
     // (and `.mech clear`) removes Marked too. The spell row was checked when the drill was parsed.
-    void DrillMarker(Creature* owner, TestSpec const& spec, uint8 stacks, Dice& dice)
+    // `marker 0 one=1` (`one`; Ragefire Chasm WP-G1) removes it from one random holder only (a dispel).
+    void DrillMarker(Creature* owner, TestSpec const& spec, uint8 stacks, bool one, Dice& dice)
     {
         std::vector<Player*> members = GroupMembers(owner, spec.gm, spec.includeGm);
         if (!stacks)
         {
+            if (one)
+            {
+                members.erase(std::remove_if(members.begin(), members.end(), [](Player const* p)
+                {
+                    return !p->HasAura(Ids::SPELL_MARKED_DRILL);
+                }), members.end());
+                if (!members.empty())
+                    members[dice.rng.Index(static_cast<uint32>(members.size()))]->RemoveAurasDueToSpell(
+                        Ids::SPELL_MARKED_DRILL);
+                return;
+            }
             for (Player* p : members)
                 p->RemoveAurasDueToSpell(Ids::SPELL_MARKED_DRILL);
             return;
@@ -2796,6 +3131,108 @@ namespace
         }
     }
 
+    // Drill step `blink` (Ragefire Chasm WP-G1, MechanicDrill.h): the selected creature appears `b.yd` behind a member
+    // picked now, facing it (a Shadowstep); at=prev: on the last point circle's centre (a leap's landing); home=1: back
+    // where it stood before the run's first blink (`home`, shared by the run; a later blink remembers again).
+    // NearTeleportTo: the sim's rooted stand-in moves too. A creature only: never a player.
+    void ScheduleBlink(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::BlinkStep const& b, RngPtr const& rng, std::shared_ptr<std::optional<Position>> const& home)
+    {
+        schedule(delay, [spec, b, rng, home](Creature* testOwner)
+        {
+            Creature* unit = ObjectAccessor::GetCreature(*testOwner, spec.selected);
+            if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                return;
+            if (b.home)
+            {
+                if (*home)
+                    unit->NearTeleportTo((*home)->GetPositionX(), (*home)->GetPositionY(), (*home)->GetPositionZ(),
+                        (*home)->GetOrientation());
+                home->reset();
+                return;
+            }
+            Position to;
+            if (b.atPrev)
+            {
+                if (!rng->lastCircle)
+                    return;
+                to = *rng->lastCircle;
+                to.SetOrientation(unit->GetOrientation());
+            }
+            else
+            {
+                Player const* member = PickMember(testOwner, spec, *rng);
+                if (!member)
+                    return;
+                Geo::Vec3 const p = Drill::BehindSpot({ member->GetPositionX(), member->GetPositionY(),
+                    member->GetPositionZ() }, member->GetOrientation(), b.yd);
+                to = Position(p.x, p.y, GroundZ(testOwner, p.x, p.y, p.z), member->GetOrientation());
+            }
+            if (!*home)
+                *home = unit->GetPosition();
+            unit->NearTeleportTo(to.GetPositionX(), to.GetPositionY(), to.GetPositionZ(), to.GetOrientation());
+        });
+    }
+
+    // Drill step `cast` (Ragefire Chasm WP-G1, MechanicDrill.h): the selected creature casts `c.spell` at its victim
+    // (itself with none), not triggered, so a kick, the school lockout after one and the cast rules apply. kick=1 puts
+    // it on the encounter's interrupt list first (an entry of the descriptor; NoteNextCast with every=). Judged
+    // kCastJudgeLeadMs before the end (Drill::CastFails): a failure is the group's (MissedSoak under the step's tag).
+    void ScheduleCast(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec, Drill::CastStep const& c)
+    {
+        auto const started = std::make_shared<bool>(false);
+        schedule(delay, [selected = spec.selected, c, started](Creature* testOwner)
+        {
+            Creature* unit = ObjectAccessor::GetCreature(*testOwner, selected);
+            if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                return;
+            Registry& reg = Registry::GetOrCreate(testOwner->GetMap());
+            Milliseconds const now = GameTime::GetGameTimeMS();
+            if (c.kick)
+            {
+                if (unit != testOwner)
+                    Mechanic::TrackUnit(testOwner, unit);
+                reg.EditDescriptor(testOwner->GetGUID(), [&c](Descriptor& d)
+                {
+                    for (InterruptEntry const& e : d.interrupts)
+                        if (e.spellId == c.spell)
+                            return;
+                    d.interrupts.emplace_back(0, c.spell, 1, std::chrono::milliseconds(c.everyMs));
+                });
+                if (c.everyMs)
+                    reg.NoteNextCast(unit->GetGUID(), unit->GetEntry(), c.spell, now + Milliseconds(c.everyMs));
+            }
+            Unit* target = unit->GetVictim() ? unit->GetVictim() : unit;
+            SpellCastResult const result = unit->CastSpell(target, c.spell, false);
+            *started = result == SPELL_CAST_OK;
+            if (*started)
+                reg.NoteCastStarted(unit->GetGUID(), unit->GetEntry(), c.spell, now);
+            else
+                LOG_DEBUG("module.bossmechanics", "Drill cast {} by {} failed ({})", c.spell,
+                    unit->GetGUID().ToString(), static_cast<uint32>(result));
+        });
+        schedule(delay + Milliseconds(c.ms - Drill::kCastJudgeLeadMs), [selected = spec.selected, c, started](
+            Creature* testOwner)
+        {
+            Creature* unit = ObjectAccessor::GetCreature(*testOwner, selected);
+            if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                return;
+            bool running = false;
+            for (CurrentSpellTypes slot : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+                if (Spell const* spell = unit->GetCurrentSpell(slot))
+                    running = running || spell->GetSpellInfo()->Id == c.spell;
+            if (!Drill::CastFails(c.kick, *started, running))
+                return;
+            FailureEvent e;
+            e.encounter = testOwner->GetGUID();
+            e.tag = c.ledgerTag;
+            e.kind = Kind::Soak;
+            e.type = FailureEvent::Type::MissedSoak;
+            e.at = GameTime::GetGameTimeMS();
+            Registry::GetOrCreate(testOwner->GetMap()).PostFailure(e);
+        });
+    }
+
     // RunDrill with the run's dice (a program shares one across its entries).
     bool RunDrillWith(Creature* owner, Unit* boss, ObjectGuid scopeGuid, Drill::Def const& def,
         DrillOptions const& opt, RngPtr const& rng, DrillResult& out, std::string& err)
@@ -2825,6 +3262,9 @@ namespace
         {
             bool marker = false;
             uint8 stacks = 0;
+            bool one = false;                           // `marker 0 one=1` (Ragefire Chasm WP-G1)
+            std::optional<Drill::BlinkStep> blink;      // `blink`
+            std::optional<Drill::CastStep> cast;        // `cast`
             std::optional<Drill::WalkStep> walk;        // `walk` (Blackrock Depths WP-G1)
             std::optional<Drill::LeashStep> leash;      // `leash`
             std::optional<Drill::ChaseSpec> chase;      // `chase` (Scarlet Monastery WP-G1)
@@ -2872,6 +3312,42 @@ namespace
                     return false;
                 }
                 p.spec.pick = pick && *pick == "nontank" ? TestSpec::Pick::NonTank : TestSpec::Pick::Any;
+                std::optional<std::string_view> const one = Drill::Value(line, "one");
+                if (one && (*one != "1" || *n))
+                {
+                    err = Acore::StringFormat("Drill {}: bad step '{}' (one=1 is for marker 0)", def.name, step.line);
+                    return false;
+                }
+                p.one = one.has_value();
+                planned.push_back(std::move(p));
+                continue;
+            }
+            if (!head.empty() && (head[0] == "blink" || head[0] == "cast"))
+            {
+                // Drill-only (MechanicDrill.h "Ragefire Chasm shapes"): the selected unit appears elsewhere, or casts.
+                if (head[0] == "blink")
+                    p.blink = Drill::ParseBlink(line);
+                else
+                    p.cast = Drill::ParseCast(line);
+                if (!p.blink && !p.cast)
+                {
+                    err = Acore::StringFormat("Drill {}: bad step '{}' (blink <yd> 0 [pick=any|fresh|nontank|same], "
+                        "blink 0 0 at=prev|home=1, cast <spell> <ms> [kick=1] [every=<ms>] tag=<n>)", def.name,
+                        step.line);
+                    return false;
+                }
+                if (p.cast && !sSpellMgr->GetSpellInfo(p.cast->spell))
+                {
+                    err = Acore::StringFormat("Drill {}: step '{}': no spell {}", def.name, step.line, p.cast->spell);
+                    return false;
+                }
+                p.spec.gm = scopeGuid;
+                p.spec.includeGm = self;
+                p.spec.selected = boss->GetGUID();
+                if (p.blink)
+                    p.spec.pick = p.blink->same ? TestSpec::Pick::Same
+                        : p.blink->pick == Drill::PickRule::Fresh ? TestSpec::Pick::Fresh
+                        : p.blink->pick == Drill::PickRule::NonTank ? TestSpec::Pick::NonTank : TestSpec::Pick::Any;
                 planned.push_back(std::move(p));
                 continue;
             }
@@ -2942,15 +3418,20 @@ namespace
             PlaceTestOwner(owner, boss->GetPosition());
         // In time order, so the test owner's idle clock (ScheduleTest) ends at the last step.
         StepScheduler const schedule(owner);
+        auto const blinkHome = std::make_shared<std::optional<Position>>();     // `blink ... home=1`
         for (Drill::ScheduledStep const& at : Drill::StepSchedule(def, cycles))
         {
             Planned const& p = planned[at.step];
             Milliseconds const delay(static_cast<int64>(at.delayMs));
             if (p.marker)
-                schedule(delay, [spec = p.spec, stacks = p.stacks, rng](Creature* testOwner)
+                schedule(delay, [spec = p.spec, stacks = p.stacks, one = p.one, rng](Creature* testOwner)
                 {
-                    DrillMarker(testOwner, spec, stacks, *rng);
+                    DrillMarker(testOwner, spec, stacks, one, *rng);
                 });
+            else if (p.blink)
+                ScheduleBlink(schedule, delay, p.spec, *p.blink, rng, blinkHome);
+            else if (p.cast)
+                ScheduleCast(schedule, delay, p.spec, *p.cast);
             else if (p.walk)
                 ScheduleWalk(schedule, delay, p.spec, *p.walk);
             else if (p.leash)

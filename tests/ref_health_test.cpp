@@ -479,6 +479,93 @@ namespace
             CHECK(Lookup(t, k).health.tank == 4110);
         }
     }
+
+    // Ragefire Chasm (the Ragefire Chasm build, WP-H, handoff 7 #3 A): the level 16 row, and the proof that it moves no
+    // other map. The lookup clamps below the first row, so without it a level 16 boss read the level 20 row.
+    void TestRagefireChasmNormalRows()
+    {
+        char const* const oldRows = "20:1300:1290 35:2038:2072 40:2278:2307 52:3032:3126 53:3182:3266 55:3362:3629 "
+                                    "56:3456:3727 60:3670:3710 60h:4120:4110";
+        char const* const newRows = "16:1100:1080 20:1300:1290 35:2038:2072 40:2278:2307 52:3032:3126 53:3182:3266 "
+                                    "55:3362:3629 56:3456:3727 60:3670:3710 60h:4120:4110";
+        char const* const pinText = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 "
+                                    "189h:60 389h:60";
+        std::string err;
+        Table before;
+        Table after;
+        MapLevels pins;
+        CHECK(ParseTable(oldRows, before, err));
+        CHECK(ParseTable(newRows, after, err));
+        CHECK(ParseMapLevels(pinText, pins, err));
+        CHECK(after.normal.size() == before.normal.size() + 1);
+        CHECK(after.heroic.size() == 1 && after.heroic[0].health.nonTank == 4120);
+
+        auto resolve = [&pins](std::uint32_t mapId, std::uint8_t owner, bool heroic)
+        {
+            ContentInputs in;
+            in.hasMap = true;
+            in.mapId = mapId;
+            in.ownerLevel = owner;
+            in.heroic = heroic;
+            return ResolveContentKey(in, pins);
+        };
+
+        // Ragefire Chasm normal: the level 16 bosses read the new row; 17 to 19 rise to the level 20 row; the lower
+        // adds (levels 13 to 15) clamp to the first row.
+        ReferenceHealth const rfc = Lookup(after, resolve(389, 16, false)).health;
+        CHECK(rfc.nonTank == 1100 && rfc.tank == 1080);
+        CHECK(Lookup(before, resolve(389, 16, false)).health.nonTank == 1300);  // the clamp this row replaces
+        ReferenceHealth const l17 = Lookup(after, Key(17)).health;
+        ReferenceHealth const l19 = Lookup(after, Key(19)).health;
+        CHECK(l17.nonTank > 1100 && l17.nonTank < l19.nonTank && l19.nonTank < 1300);
+        CHECK(Lookup(after, Key(20)).health.nonTank == 1300 && Lookup(after, Key(20)).health.tank == 1290);
+        CHECK(Lookup(after, Key(13)).health.nonTank == 1100 && Lookup(after, Key(1)).health.tank == 1080);
+        // 16 -> 20 is 200 over 4 levels: 17 = 1150, 18 = 1200, 19 = 1250 (non-tank)
+        CHECK(l17.nonTank == 1150 && Lookup(after, Key(18)).health.nonTank == 1200 && l19.nonTank == 1250);
+        // Ragefire Chasm heroic: the pin reads the 60h row at any owner level (a level 16 add included)
+        for (std::uint8_t owner : { std::uint8_t(16), std::uint8_t(60) })
+        {
+            ContentKey const k = resolve(389, owner, true);
+            CHECK(k.level == 60 && k.heroic);
+            CHECK(Lookup(after, k).health.nonTank == 4120 && Lookup(after, k).health.tank == 4110);
+        }
+
+        // No other map moves. Every dungeon that runs boss mechanics resolves to a level the new row cannot touch:
+        // Deadmines (bosses and kit units at levels 17 to 21) and Shadowfang Keep (20 to 21) are pinned to row 20 on
+        // normal and to row 60h on heroic; every other map's mechanics owners are level 20 or above. So the same
+        // content key reads the same numbers before and after for each of them.
+        for (std::uint32_t mapId : { 36u, 33u })
+            for (std::uint8_t owner = 1; owner <= 25; ++owner)
+                for (bool heroic : { false, true })
+                {
+                    ReferenceHealth const a = Lookup(before, resolve(mapId, owner, heroic)).health;
+                    ReferenceHealth const b = Lookup(after, resolve(mapId, owner, heroic)).health;
+                    CHECK(a.nonTank == b.nonTank && a.tank == b.tank);
+                }
+        for (std::uint32_t mapId : { 189u, 229u, 230u, 289u, 329u })
+            for (std::uint8_t owner = 20; owner <= 62; ++owner)
+                for (bool heroic : { false, true })
+                {
+                    ReferenceHealth const a = Lookup(before, resolve(mapId, owner, heroic)).health;
+                    ReferenceHealth const b = Lookup(after, resolve(mapId, owner, heroic)).health;
+                    CHECK(a.nonTank == b.nonTank && a.tank == b.tank);
+                }
+        // Heroic never reads a normal row below 60h (the h rows are untouched), whatever the owner's level.
+        for (std::uint8_t owner = 1; owner <= 62; ++owner)
+        {
+            ReferenceHealth const a = Lookup(before, Key(owner, true)).health;
+            ReferenceHealth const b = Lookup(after, Key(owner, true)).health;
+            CHECK(a.nonTank == b.nonTank && a.tank == b.tank);
+        }
+        // The only owner levels that differ are 1 to 19 on a normal key with no pin (the open world, a `.mech test`
+        // owner at a GM level of 1 to 19, a level 1 to 19 sim): 20 and up read the same numbers.
+        for (std::uint8_t owner = 20; owner <= 62; ++owner)
+        {
+            ReferenceHealth const a = Lookup(before, Key(owner)).health;
+            ReferenceHealth const b = Lookup(after, Key(owner)).health;
+            CHECK(a.nonTank == b.nonTank && a.tank == b.tank);
+        }
+    }
 }
 
 int main()
@@ -494,5 +581,6 @@ int main()
     TestRefFlat();
     TestBrdNormalRows();
     TestScarletMonasteryNormalRows();
+    TestRagefireChasmNormalRows();
     return Report("ref_health_test");
 }

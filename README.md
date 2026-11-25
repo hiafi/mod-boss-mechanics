@@ -446,8 +446,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech minefield layout=u [gap=8] [depth=12] [radius=3] [arm=3000] [grace=500] [dmg=1]
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
             |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
-            |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes|scarlet-monastery-shapes-2>
-            [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes|scarlet-monastery-shapes-2
+            |ragefire-chasm-shapes> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -640,6 +640,24 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   the selected unit, ms)`; and a drill step's `repeat=` / `every=` now repeat it (the runner used to parse and drop
   them, so `pass-eggs` laid one egg a cycle instead of 40), each repeat keeping the step's `tag=` (unlike `.mech test`,
   whose repeats count up: a drill's tag names its mechanic).
+- Ragefire Chasm build (WP-G1 §3.9, drill `ragefire-chasm-shapes`):
+  - `mound <r> <arm ms> persist=<ms> [speed=5] [erupt=4] [boom=2000] [pick=]` (Oggleflint's Borer): a chaser at the
+    selected unit runs at a member at `speed=` yd/s for the arm time plus `persist=`, re-aimed every 250 ms; a circle of
+    `r` on it that only that member sees (no damage, no marker, one pass at the arm time); where it stops, a circle of
+    `erupt=` with a `boom=` warning and the line's damage keys, for everyone, under `tag=` + 1.
+  - `crawl <r> <life ms> yd=<yd> [bearing=0] [off=4] [speed=3] [need=1] [last=<role>] [pick=]` (Jergosh's wisp, as the
+    kit's `CrawlPickups` registers it): a Soak on a unit that starts `off=` yd from a member and crawls to the point
+    `yd=` from the selected unit at `bearing=` from your facing; a member within `r` takes it, reaching the point is a
+    group failure (MissedSoak under `tag=`).
+  - `pick=fresh` picks a member, the tank included, the chain has not picked (everyone picked: a new round that never
+    starts with the last one); `inside=<yd>:<ahead>` fixes the bots' bounds on the selected unit's place at the parse,
+    moved `ahead` yd along your facing (negative: toward you); `hide of=<n> scale=<s>` stands the blockers on random
+    points of n on the ring and scales each game object (`.mech test hide ... go=<entry> display=0` uses a boss's own
+    template); `marker 0 one=1` (drills) takes Marked off one random holder.
+  - Two drill-only steps: `blink <yd> 0 [pick=]` (the selected creature appears that far behind a member, facing it;
+    `blink 0 0 at=prev`: on the last point circle's centre; `blink 0 0 home=1`: back) and `cast <spell> <ms> [kick=1]
+    [every=<ms>] tag=<n>` (it casts the spell at its victim; `kick=1`: listed for the bots' kicks and a group failure
+    when nobody stopped it, else a must-play bar and a group failure when it does not run to its end).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -872,6 +890,25 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     bar 2), 32 reported (`kSm2BarTags`, `kSm2GroupTags`, `kSm2ReferenceTags`). The sweep runs
     `scarlet-monastery-shapes-2:3`, one sweep for this drill alone, 180 s: `mechanics_sweep.py run --programs
     scarlet-monastery-shapes-2:3 --duration 180 --iterations 5 --step 100 --jobs 6 --sweep scarlet-monastery-shapes-2`.
+  - `ragefire-chasm-shapes` (Ragefire Chasm build §3.9, WP-G1; 60 s, three cycles = 180 s, heroic numbers in `pct=`):
+    cycle 0 Oggleflint (OG1 + OG2: two, three, then four mounds on distinct members, tank included, 3 yd and 5 yd/s for
+    4 s, then 4 yd eruptions, 12 s apart, the creature chasing a hunted tank, everything inside the den's 13 yd; OG4:
+    three chained 3 yd blows on a member none of one, then two, mounds hunts, the creature landing on each; then
+    five mounds, every member hunted, reported; a 2 s and a 3 s kickable cast in the gaps); cycle 1
+    Jergosh and Bazzalan (JR2: a 6 yd Spread on 2, 3 and 5 Marked carriers, the second losing one in the middle of its
+    2.5 s; JR5: two wisps crawling 50 yd at 3 yd/s across them; three 5 s kickable channels 15 s apart, each followed by
+    a must-play bar of another school and then one of the kicked school; BZ5: an 8 yd fan, then BZ7: a 6 yd one after
+    each of three Shadowsteps behind different members, 2 s apart); cycle 2 Taragaman (TG3 + TG5: the 10 yd ring, 2 s +
+    five ticks, and ten 4 yd spots every 0.5 s, 0-4 yd off a shuffled rotation, 1.5 s each, three times; TG6: a Hide
+    behind three spikes of size 2 on random points of four at 10 yd, then behind an opposite pair, 4 s; a 2 s and a 3 s
+    kickable cast between them; TG9's 6 yd bursts, reported). Tags 2, 3, 5, 6, 8-13 gated (2, 3, 5, 9, 10, 11 on the
+    reference members too), 7 the wisps eaten, 14, 20 and 21 the 5 s, 3 s and 2 s windows nobody kicked and 16 the other
+    school's bars lost (group bars), 1, 4, 15 (the kicked school's bar: a creature's lockout ignores PreventionType, so
+    it is lost by design), 17, 18 and 19 (the five mounds' circles and eruptions) reported (`kRfcBarTags`,
+    `kRfcGroupTags`, `kRfcReferenceTags`). The live numbers are mirrored by hand from the bosses' Logic headers (`*Logic.h` in
+    mod-dungeon-bosses `RagefireChasm/`): change both together. The sweep runs `ragefire-chasm-shapes:3`, one sweep for
+    this drill alone, 180 s: `mechanics_sweep.py run --programs ragefire-chasm-shapes:3 --duration 180 --iterations 5
+    --step 100 --jobs 6 --sweep ragefire-chasm-shapes`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
