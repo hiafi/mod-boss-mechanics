@@ -46,6 +46,24 @@ namespace BossMechanics
         constexpr float kProbeSnapYd = 1.f;
         constexpr float kProbeUpYd = 5.f;
         constexpr float kProbeMovedYd = 0.05f;
+        // NavOracle::MeshReaches: the polygons one ray may cross. Straight: how far from the probed height its end may
+        // lie, and how far short of the point (on a polygon's edge) the ray may stop.
+        // A path's last hop: its points carry the floor's height (a game object's too, above the mesh), its end may
+        // overhang the mesh a little, its start is found as PathGenerator does.
+        constexpr int kLinePolys = 64;
+        constexpr float kLineEndZYd = 1.f;
+        constexpr float kLineShortYd = 0.1f;
+        constexpr float kHopEndZYd = 5.f;
+        constexpr float kEndBelowYd = 1.5f;     // an end this far under the mesh is a drop off a rim
+        constexpr float kHopShortYd = 0.5f;
+        constexpr float kHopStartYd = 3.f;
+        // MeshUnder: the samples of a hop no longer than about one PathGenerator step (4 yd).
+        constexpr float kHopSampledYd = 5.f;
+        constexpr float kHopSampleYd = 0.5f;
+        constexpr float kHopSampleUpYd = 2.f;
+        // The steepest hop of a path: a slope (1.75 per yard, the mesh's 60 degrees) and a step.
+        constexpr float kHopDropYd = 3.f;
+        constexpr float kHopDropPerYd = 1.75f;
         // A path whose first point is this close to `from` already starts there.
         constexpr float kPathStartToleranceYd = 0.1f;
         // Drift: the anchor is assumed to move for at most this long before the hazard's first window.
@@ -1734,6 +1752,22 @@ namespace BossMechanics
                     out.push_back(from);
                 for (G3D::Vector3 const& p : points)
                     out.push_back({ p.x, p.y, p.z });
+                // Every hop no steeper than a slope, the last one along the mesh (MechanicBotView.h). Not the step
+                // from `from` to the path's first point (a bot in the air).
+                bool carried = true;
+                for (std::size_t i = 1; i < points.size(); ++i)
+                    carried = carried && std::fabs(points[i].z - points[i - 1].z) <= kHopDropYd
+                        + kHopDropPerYd * Geo::Dist2d(points[i - 1].x, points[i - 1].y, points[i].x, points[i].y);
+                Geo::Vec3 const before = out.size() > 1 ? out[out.size() - 2] : from;
+                carried = carried && (MeshReaches(before, kHopStartYd, out.back(), kHopShortYd, kHopEndZYd)
+                    || MeshUnder(before, out.back()));
+                if (!carried)
+                {
+                    out.clear();
+                    if (_stats)
+                        ++_stats->badHop;
+                    return false;
+                }
                 if (_stats)
                 {
                     ++_stats->ok;
@@ -1750,6 +1784,75 @@ namespace BossMechanics
         if (reject)
             ++*reject;
         return false;
+    }
+
+    bool NavOracle::MeshReaches(Geo::Vec3 const& from, float startYd, Geo::Vec3 const& to, float shortYd,
+        float endZYd) const
+    {
+        dtNavMeshQuery const* query = _bot->GetMap()->GetMapCollisionData().GetMMapData().GetNavMeshQuery();
+        if (!query)
+            return false;
+        dtQueryFilter filter;
+        filter.setIncludeFlags(_includeFlags);
+        filter.setExcludeFlags(_excludeFlags);
+        // Detour works in (y, z, x).
+        float const center[3] = { from.y, from.z, from.x };
+        float const extents[3] = { startYd, kProbeUpYd, startYd };
+        float const end[3] = { to.y, to.z, to.x };
+        float start[3] = { 0.f, 0.f, 0.f };
+        dtPolyRef ref = 0;
+        if (dtStatusFailed(query->findNearestPoly(center, extents, &filter, &ref, start)) || !ref
+            || std::fabs(start[1] - from.z) > kHopEndZYd)
+            return false;
+        float t = 0.f;
+        float normal[3] = { 0.f, 0.f, 0.f };
+        dtPolyRef polys[kLinePolys];
+        int count = 0;
+        dtStatus const status = query->raycast(ref, start, end, &filter, &t, normal, polys, &count, kLinePolys);
+        // A ray cut off by the buffer proves nothing. t is FLT_MAX when the ray meets no border.
+        if (dtStatusFailed(status) || dtStatusDetail(status, DT_BUFFER_TOO_SMALL) || count <= 0
+            || (t < 1.f && (1.f - t) * Geo::Dist2d(start[2], start[0], to.x, to.y) > shortYd))
+            return false;
+        // The ray is flat: it may end on the layer under a bridge that `to` lies on.
+        float closest[3] = { 0.f, 0.f, 0.f };
+        return dtStatusSucceed(query->closestPointOnPoly(polys[count - 1], end, closest, nullptr))
+            && to.z - closest[1] <= endZYd && closest[1] - to.z <= std::min(endZYd, kEndBelowYd);
+    }
+
+    bool NavOracle::MeshUnder(Geo::Vec3 const& from, Geo::Vec3 const& to) const
+    {
+        dtNavMeshQuery const* query = _bot->GetMap()->GetMapCollisionData().GetMMapData().GetNavMeshQuery();
+        float const length = Geo::Dist2d(from.x, from.y, to.x, to.y);
+        if (!query || length > kHopSampledYd)
+            return false;
+        dtQueryFilter filter;
+        filter.setIncludeFlags(_includeFlags);
+        filter.setExcludeFlags(_excludeFlags);
+        float const extents[3] = { kHopSampleYd, kHopSampleUpYd, kHopSampleYd };
+        int const steps = std::max(1, static_cast<int>(std::ceil(length / kHopSampleYd)));
+        for (int k = 0; k <= steps; ++k)
+        {
+            float const u = static_cast<float>(k) / static_cast<float>(steps);
+            float const center[3] = { from.y + (to.y - from.y) * u, from.z + (to.z - from.z) * u,
+                from.x + (to.x - from.x) * u };
+            float nearest[3] = { 0.f, 0.f, 0.f };
+            dtPolyRef ref = 0;
+            if (dtStatusFailed(query->findNearestPoly(center, extents, &filter, &ref, nearest)) || !ref
+                || Geo::Dist2d(nearest[2], nearest[0], center[2], center[0]) > kHopSampleYd)
+                return false;
+        }
+        return true;
+    }
+
+    bool NavOracle::Straight(Geo::Vec3 const& from, Geo::Vec3& to)
+    {
+        if (_stats)
+            ++_stats->lines;
+        bool const clear = _bot && _bot->IsInWorld() && Walkable(to)
+            && MeshReaches(from, kProbeSnapYd, to, kLineShortYd, kLineEndZYd);
+        if (!clear && _stats)
+            ++_stats->lineBlocked;
+        return clear;
     }
 
     bool NavOracle::InSight(Geo::Vec3 const& from, Geo::Vec3 const& to)
@@ -1791,7 +1894,10 @@ namespace BossMechanics
         otherType += o.otherType;
         empty += o.empty;
         endFar += o.endFar;
+        badHop += o.badHop;
         farEnd += o.farEnd;
+        lines += o.lines;
+        lineBlocked += o.lineBlocked;
         sightRays += o.sightRays;
         sightBlocked += o.sightBlocked;
         sightCapped += o.sightCapped;
@@ -1801,17 +1907,19 @@ namespace BossMechanics
     {
         return Acore::StringFormat("probes {} (no mesh {}, off {}, snapped {}), paths {} (ok {}, incomplete {}, "
             "end moved {}, far end {}; no path {}, not using path {}, too long {}, shortcut {}, far start {}, "
-            "other {}, empty {}, end > {} yd {}), sight rays {} (blocked {}, capped {})", s.probes, s.probeNoMesh,
+            "other {}, empty {}, end > {} yd {}, off the mesh {}), lines {} (blocked {}), sight rays {} "
+            "(blocked {}, capped {})", s.probes, s.probeNoMesh,
             s.probeOff, s.probeSnapped, s.calls, s.ok, s.okIncomplete, s.okShifted, s.farEnd, s.noPath,
             s.notUsingPath, s.tooLong, s.shortcut, s.farStart, s.otherType, s.empty, kMaxEndShiftYd, s.endFar,
-            s.sightRays, s.sightBlocked, s.sightCapped);
+            s.badHop, s.lines, s.lineBlocked, s.sightRays, s.sightBlocked, s.sightCapped);
     }
 
     std::string FormatSolveStats(Solver::SolveStats const& s)
     {
         return Acore::StringFormat("kept {}, probes {} (off {}, snapped {}), no path {}, end unsafe {}, crosses start "
-            "{} / other {}, budget stops {}, out of bounds {}, pocket {} point(s) {} path check(s)", s.kept, s.probes,
+            "{} / other {}, budget stops {}, out of bounds {}, pocket {} point(s) {} path check(s), exits {} (refused "
+            "{})", s.kept, s.probes,
             s.offMesh, s.snapped, s.noPath, s.endUnsafe, s.crossStart, s.crossOther, s.budgetStops, s.outOfBounds,
-            s.pocketCandidates, s.pocketPathChecks);
+            s.pocketCandidates, s.pocketPathChecks, s.exitLines, s.exitRefused);
     }
 }

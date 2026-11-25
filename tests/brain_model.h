@@ -445,6 +445,20 @@ namespace BrainModel
             b.outOfRoleSince = Ms(0);
         }
 
+        // As the brain's: a NoPath to the bot's own spot is held, not walked to.
+        bool TakeNoWayOut(Bot& b, Solver::Plan& plan)
+        {
+            if (!Solver::IsNoWayOut(plan, b.pos))
+                return false;
+            b.plan = std::move(plan);
+            b.mode = Mode::Hold;
+            b.wp = 0;
+            b.routePending = false;
+            b.regionRoute = false;
+            b.outOfRoleSince = Ms(0);
+            return true;
+        }
+
         void SolveAndApply(Bot& b, Solver::Input const& in, Ms now)
         {
             Solver::Plan plan = RunSolve(b, in, now);
@@ -453,7 +467,8 @@ namespace BrainModel
                 b.mode = Mode::Watch;
                 return;
             }
-            BeginEscape(b, std::move(plan), now);
+            if (!TakeNoWayOut(b, plan))
+                BeginEscape(b, std::move(plan), now);
         }
 
         void HoldHere(Bot& b, Ms now, std::uint32_t hazardId, bool shortOnly)
@@ -772,7 +787,8 @@ namespace BrainModel
                 b.mode = Mode::Hold;
                 return;
             }
-            BeginEscape(b, std::move(plan), now);
+            if (!TakeNoWayOut(b, plan))
+                BeginEscape(b, std::move(plan), now);
         }
 
         void Brain(std::size_t i, Ms now, std::uint32_t& budget)

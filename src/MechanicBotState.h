@@ -87,6 +87,7 @@ namespace BossMechanics
         Milliseconds escapeChainSince{ 0 };                 // start of an unbroken run of escapes (hard ceiling)
         Milliseconds releaseUntil{ 0 };                     // released: an unsafe spot is not solved until then
         bool releaseForRoot = false;                        // ...and the release ends as soon as the bot can move
+        Milliseconds noWayOutSince{ 0 };                    // start of an unbroken run of NoPath holds (0 = none)
         bool pendingEscape = false;                         // Watch, spot unsafe, solve deferred: lock as in Escape
         Milliseconds noCastUntil{ 0 };                      // after a cast break: cast-time spells, item uses blocked
         Milliseconds lastCastBreakAt{ 0 };
