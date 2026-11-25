@@ -270,6 +270,9 @@ namespace BossMechanics::Solver
         virtual ~PathOracle() = default;
         virtual bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) = 0;
         virtual bool Walkable(Geo::Vec3& /*p*/) { return true; }
+        // The straight walk from `from` to `to` stays on the walkable ground (no gap, no drop); moves `to` onto it.
+        // Only the NoPath escape asks (it has no real path to walk). The navmesh ray is far cheaper than Find.
+        virtual bool Straight(Geo::Vec3 const& /*from*/, Geo::Vec3& to) { return Walkable(to); }
         // Line of sight between two points (the glue lifts both ends by their collision height). Only Sight asks.
         virtual bool InSight(Geo::Vec3 const& /*from*/, Geo::Vec3 const& /*to*/) { return true; }
     };
@@ -280,7 +283,7 @@ namespace BossMechanics::Solver
         Move,           // a clean path to a safe target
         GraceMove,      // as Move, but crossing armed mines under their grace
         Fallback,       // nothing clean: the least bad target, by the oracle's path
-        NoPath          // nothing clean and no oracle path: straight to the nearest exit
+        NoPath          // nothing clean and no oracle path: straight to the nearest exit the ground reaches, else stay
     };
 
     // Why the validation passes rejected what they tried (counts per attempt; a later pass re-tries the paths an
@@ -297,6 +300,8 @@ namespace BossMechanics::Solver
         std::uint32_t crossOther = 0;       // ...inside another hazard
         std::uint32_t budgetStops = 0;      // validation passes cut short by maxPathChecks
         std::uint32_t outOfBounds = 0;      // F-1b: a target or its path outside the hard bounds (Input::bounds)
+        std::uint32_t exitLines = 0;        // NoPath: straight lines to an exit (or the candidate) asked of the oracle
+        std::uint32_t exitRefused = 0;      // ...refused: they leave the walkable ground or the hard bounds
         std::uint32_t lethalSkipped = 0;    // X4: Fallback/NoPath candidates or paths dropped for crossing a lethal
         // M4 cost (D9): lane-frame candidates in the candidate list, and the oracle path calls spent on them.
         std::uint32_t laneCandidates = 0;
@@ -320,6 +325,8 @@ namespace BossMechanics::Solver
             crossOther += o.crossOther;
             budgetStops += o.budgetStops;
             outOfBounds += o.outOfBounds;
+            exitLines += o.exitLines;
+            exitRefused += o.exitRefused;
             lethalSkipped += o.lethalSkipped;
             laneCandidates += o.laneCandidates;
             lanePathChecks += o.lanePathChecks;
@@ -2742,6 +2749,8 @@ namespace BossMechanics::Solver
         constexpr std::uint32_t kFallbackProbes = 8;    // fallback: walkability probes down its ranking
         // ...so at most this many of its top entries are read (the probes, then one with a known path)
         constexpr std::uint32_t kFallbackRanked = kFallbackProbes + 1;
+        constexpr float kFallbackEndYd = 3.f;           // a later candidate's path ends this near it (3D: not below it)
+        constexpr std::uint32_t kExitLines = 12;        // NoPath: straight lines asked of the oracle per solve
         constexpr std::uint32_t kStraightChecks = 64;   // straight-line checks per validation pass (cost cap)
 
         // The bounded Fallback ranking (M4 WP-Q G7, exact since STAGE-M4-R-REPORT m-3): with the top
@@ -3842,6 +3851,18 @@ namespace BossMechanics::Solver
                 if (!havePath)
                     target = in.bot;
             }
+            // The first candidate with a known path or on walkable ground is taken as it always was. When the oracle
+            // has no path to it, the next ones down the ranking are asked too (a bot beside a pit has ground
+            // elsewhere), within kFallbackProbes and the old worst case of path calls (three passes and one), and only
+            // a path that keeps the hard bounds and ends at its candidate (a partial path may end below a rim).
+            std::uint32_t const findCap = 3 * in.params.maxPathChecks + 1;
+            std::uint32_t finds = 0;
+            auto laterOk = [&](Geo::Vec3 const& q, std::vector<Geo::Vec3> const& p)
+            {
+                return Detail::Dist3(p.back(), q) <= Detail::kFallbackEndYd
+                    && BossMechanics::DropSpot::InBounds(in.bounds, p.back())
+                    && BossMechanics::DropSpot::PathInBounds(in.bounds, p);
+            };
             for (Ranked const& r : ranked)
             {
                 if (lethalOn)
@@ -3849,11 +3870,18 @@ namespace BossMechanics::Solver
                 std::uint32_t const i = r.index;
                 if (auto it = paths.find(i); it != paths.end())
                 {
+                    if (finds != 0 && !laterOk(point[i], it->second))
+                    {
+                        if (tries >= Detail::kFallbackProbes)
+                            break;      // only the top kFallbackRanked entries are exact
+                        ++tries;
+                        continue;
+                    }
                     path = it->second;
                     havePath = true;
                     break;
                 }
-                if (tries >= Detail::kFallbackProbes)
+                if (tries >= Detail::kFallbackProbes || (finds != 0 && work.pathChecks >= findCap))
                     break;
                 ++tries;
                 Geo::Vec3 q = point[i];
@@ -3868,11 +3896,32 @@ namespace BossMechanics::Solver
                     if (Detail::Dist3(q, point[i]) > Detail::kMovedYd)
                         ++work.stats.snapped;
                 }
-                target = q;
-                targetIdx = i;
+                bool const later = finds != 0;
+                if (later && !BossMechanics::DropSpot::InBounds(in.bounds, q))
+                    continue;
+                if (!later)
+                {
+                    target = q;
+                    targetIdx = i;
+                }
+                ++finds;
+                ++work.pathChecks;
+                if (fromLane(i))
+                    ++work.stats.lanePathChecks;
+                std::vector<Geo::Vec3> p;
+                if (!oracle.Find(in.bot, q, p) || p.empty())
+                {
+                    ++work.stats.noPath;
+                    continue;
+                }
+                Detail::AnchorPath(in.bot, p);
+                if (later && !laterOk(q, p))
+                    continue;
+                path = std::move(p);
+                havePath = true;
                 break;
             }
-            if (!havePath && !lethalOn)
+            if (!havePath && !lethalOn && finds == 0)
             {
                 ++work.pathChecks;
                 if (fromLane(targetIdx))
@@ -3888,7 +3937,9 @@ namespace BossMechanics::Solver
             }
             else
             {
-                // NoPath: straight to the nearest exit point (else the chosen candidate).
+                // NoPath: straight to the nearest exit point (else the chosen candidate), only along ground and inside
+                // the hard bounds. Walked blind, the way led over ledges (Ragefire Chasm: two bots beside a notch in
+                // the plateau went over its rim into the lava). None: the bot stays where it is.
                 std::vector<Geo::Vec3> exits;
                 for (Hazard const& h : in.hazards)
                     for (Geo::Pose const& pose : h.poses)
@@ -3900,26 +3951,38 @@ namespace BossMechanics::Solver
                 {
                     return !lethalOn || !Detail::CrossesLethal(lethalIn, { in.bot, to }, in.now, horizonEnd);
                 };
-                Geo::Vec3 to = target;
-                if (!lethalFree(to))
+                std::erase_if(exits, [&](Geo::Vec3 const& e)
                 {
-                    ++work.stats.lethalSkipped;
-                    to = in.bot;
-                }
-                float best = Detail::kInf;
-                for (Geo::Vec3 const& e : exits)
+                    bool const crosses = !lethalFree(e);
+                    work.stats.lethalSkipped += crosses ? 1 : 0;
+                    return crosses;
+                });
+                std::stable_sort(exits.begin(), exits.end(), [&in](Geo::Vec3 const& a, Geo::Vec3 const& b)
                 {
-                    if (!lethalFree(e))
+                    float const da = Detail::Dist2(in.bot, a);
+                    float const db = Detail::Dist2(in.bot, b);
+                    if (da != db)
+                        return da < db;
+                    return a.x != b.x ? a.x < b.x : a.y < b.y;
+                });
+                // The nearest ones, and last the chosen candidate.
+                if (exits.size() > Detail::kExitLines - 1)
+                    exits.resize(Detail::kExitLines - 1);
+                if (!lethalOn)
+                    exits.push_back(target);
+                Geo::Vec3 to = in.bot;
+                for (Geo::Vec3 q : exits)
+                {
+                    Geo::Vec3 const asked = q;
+                    ++work.stats.exitLines;
+                    if (oracle.Straight(in.bot, q) && BossMechanics::DropSpot::InBounds(in.bounds, q)
+                        && BossMechanics::DropSpot::PathInBounds(in.bounds, { in.bot, q })
+                        && (Detail::Dist3(asked, q) <= Detail::kMovedYd || lethalFree(q)))
                     {
-                        ++work.stats.lethalSkipped;
-                        continue;
+                        to = q;
+                        break;
                     }
-                    float const d = Detail::Dist2(in.bot, e);
-                    if (d < best || (d == best && (e.x < to.x || (e.x == to.x && e.y < to.y))))
-                    {
-                        best = d;
-                        to = e;
-                    }
+                    ++work.stats.exitRefused;
                 }
                 path = { in.bot, to };
                 work.outcome = Outcome::NoPath;
@@ -3963,6 +4026,12 @@ namespace BossMechanics::Solver
         work.answers = Detail::Answers(in, work.path);
         work.holdUntil = Detail::HoldUntil(in, work.answers, work.arriveAt, work.target);
         return work;
+    }
+
+    // A NoPath that stays: no ground leads out, the target is the bot's own spot. Held, not walked to.
+    inline bool IsNoWayOut(Plan const& plan, Geo::Vec3 const& bot)
+    {
+        return plan.outcome == Outcome::NoPath && Detail::Dist3(plan.target, bot) <= Detail::kMovedYd;
     }
 
     // M4 §3.7 (the barrage's Fallback share): may a Fallback or NoPath escape walk on although the rest of its way

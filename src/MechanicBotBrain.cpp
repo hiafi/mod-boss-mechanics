@@ -69,6 +69,10 @@ namespace BossMechanics
         constexpr Milliseconds kEscapeSlack{ 1500 };
         constexpr Milliseconds kEscapeChainCap{ 10000 };
         constexpr Milliseconds kReleaseFor{ 1500 };
+        // A bot held with no way out (NoPath to its own spot) casts again after this long (NowhereToGo).
+        constexpr Milliseconds kNowhereCastAfter{ 2000 };
+        // ...but nothing longer than this: no solve runs while it casts, and a way out may open.
+        constexpr Milliseconds kNowhereCastMax{ 2500 };
         // A hold that stops foreign motion lasts at least this (then stock movement may try again).
         constexpr Milliseconds kMinMotionHold{ 250 };
         // Re-route of an unsafe foreign motion: role band [0, this] around the motion's end; the target must bring
@@ -137,6 +141,15 @@ namespace BossMechanics
                 bool const walkable = _inner.Walkable(p);
                 _cost.probeUs.Add(UsSince(t0));
                 return walkable;
+            }
+
+            // A probe and a navmesh ray: timed as a probe.
+            bool Straight(Geo::Vec3 const& from, Geo::Vec3& to) override
+            {
+                CostClock::time_point const t0 = CostClock::now();
+                bool const clear = _inner.Straight(from, to);
+                _cost.probeUs.Add(UsSince(t0));
+                return clear;
             }
 
             bool InSight(Geo::Vec3 const& from, Geo::Vec3 const& to) override
@@ -1040,7 +1053,39 @@ namespace BossMechanics
             st.ownWalk = false;
         }
 
-        // Solve and take the plan: Move/GraceMove/Fallback/NoPath -> Escape; Safe -> Watch.
+        // A NoPath to the bot's own spot (no ground leads out): hold it, with no move to send and no escape to time.
+        // The hold action stops whatever motion is under way; StepHold solves again at the solve rate limit.
+        bool TakeNoWayOut(MechanicBotState& st, Solver::Plan& plan, Milliseconds now)
+        {
+            if (!Solver::IsNoWayOut(plan, st.input.bot))
+                return false;
+            st.plan = std::move(plan);
+            st.planFor = st.plan.answers;
+            st.mode = MechanicBotMode::Hold;
+            st.waypointIdx = 0;
+            st.outOfRoleSince = Milliseconds(0);
+            st.pendingEscape = false;
+            st.routePending = false;
+            st.refacing = false;
+            st.regionRoute = false;
+            st.reachWalk = false;
+            st.ownWalk = false;
+            if (st.noWayOutSince == Milliseconds(0))
+                st.noWayOutSince = now;
+            return true;
+        }
+
+        // A bot that has had no way out for a while casts where it stands: it has nothing to leave for, and the lock's
+        // leaveBy (past, its spot is unsafe) would keep a healer silent until a lasting zone ends.
+        bool NowhereToGo(MechanicBotState const& st, Milliseconds now)
+        {
+            return st.mode == MechanicBotMode::Hold && st.noWayOutSince != Milliseconds(0)
+                && now - st.noWayOutSince >= kNowhereCastAfter
+                && !Solver::TargetOk(st.input, st.input.bot, now, now + st.input.params.horizon);
+        }
+
+        // Solve and take the plan: Move/GraceMove/Fallback/NoPath -> Escape (a NoPath that stays -> Hold); Safe ->
+        // Watch.
         void SolveAndApply(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
             ViewCtx& ctx)
         {
@@ -1053,7 +1098,8 @@ namespace BossMechanics
             }
             if (st.parking && (plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove))
                 ++st.counters.parks;
-            BeginEscape(st, std::move(plan), now);
+            if (!TakeNoWayOut(st, plan, now))
+                BeginEscape(st, std::move(plan), now);
         }
 
         // The bot's foreign motion crosses a hazard (STAGE-M2-REVIEW m2): walk around it towards the motion's end,
@@ -1785,6 +1831,8 @@ namespace BossMechanics
                 st.pendingEscape = false;
                 return;
             }
+            if (TakeNoWayOut(st, plan, now))
+                return;
             if (stuck && Dist2d(plan.target, oldTarget) <= kSameTargetYd)
             {
                 // The same target again (off the navmesh, a partial path): nothing new to try. Give the bot back.
@@ -2502,6 +2550,10 @@ namespace BossMechanics
         }
         // A hop moves the bot, which stops a cast: a cast must end before the next one starts (X3).
         st.leaveBy = std::min(LeaveByAll(in), st.nextHopAt);
+        if (st.mode != MechanicBotMode::Hold || st.plan.outcome != Solver::Outcome::NoPath)
+            st.noWayOutSince = Milliseconds(0);
+        else if (NowhereToGo(st, now))
+            st.leaveBy = std::min(now + kNowhereCastMax, st.nextHopAt);
 
         // Scarlet Monastery F6: a facing hold that starts while the tank walks round its source stops the walk too.
         if (st.refacing && st.mode == MechanicBotMode::Escape && !st.tankWarning && RefacingHeld(*reg, st, now))
@@ -2720,7 +2772,8 @@ namespace BossMechanics
         bool const frozen = st.mode == MechanicBotMode::Freeze
             || (in.freeze.present && now >= in.freeze.from - in.freeze.settle && now <= in.freeze.to);
         // X3: a cast must end before the next hop starts (the hop would stop it; a frozen bot does not hop).
-        st.leaveBy = frozen ? Solver::kForever : std::min(LeaveByAll(st.input), NextHopAt(reg, bot, st, now, cfg));
+        st.leaveBy = frozen ? Solver::kForever : std::min(NowhereToGo(st, now) ? Solver::kForever
+            : LeaveByAll(st.input), NextHopAt(reg, bot, st, now, cfg));
         // Something matters now: keep the waker's fast tick going once the cast ends.
         if (st.mode == MechanicBotMode::Idle)
             st.mode = MechanicBotMode::Watch;

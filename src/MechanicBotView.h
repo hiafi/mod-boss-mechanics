@@ -181,7 +181,10 @@ namespace BossMechanics
         uint32 otherType = 0;       // rejected: neither NORMAL nor INCOMPLETE
         uint32 empty = 0;           // rejected: no points
         uint32 endFar = 0;          // rejected: the end lands more than kMaxEndShiftYd from the asked point
+        uint32 badHop = 0;          // rejected: the path leaves the navmesh (its last hop) or drops off it
         uint32 farEnd = 0;          // accepted with PATHFIND_FARFROMPOLY_END (the asked point was > 7 yd off)
+        uint32 lines = 0;           // Straight() calls (NoPath exits)
+        uint32 lineBlocked = 0;     // ...whose straight walk leaves the navmesh, or that have no walkable end
         uint32 sightRays = 0;       // InSight() rays cast (M3: healer line of sight)
         uint32 sightBlocked = 0;    // ...that found the line blocked
         uint32 sightCapped = 0;     // InSight() calls past the oracle's own cap (answered "in sight", no ray)
@@ -197,8 +200,21 @@ namespace BossMechanics
     //
     // Find: PathGenerator from `from` to `to` (the same generator and start MoveTo uses). Accepted: PATHFIND_NORMAL or
     // PATHFIND_INCOMPLETE without NOPATH, NOT_USING_PATH, SHORT, SHORTCUT or FARFROMPOLY_START, whose end lands within
-    // kMaxEndShiftYd of `to`. The result starts at `from` and ends at the path's real end (the solver validates that
+    // kMaxEndShiftYd of `to`. Also refused: a path whose last hop the mesh does not carry (PathGenerator appends the
+    // asked point, or keeps it unclamped, when the path never leaves the start's polygon: a blind line over a pit to an
+    // island, or off a rim), or with a hop that drops more than a slope does (NormalizePath puts a point over a rim
+    // onto the floor far below). A path over an off-mesh connection that drops more is refused too (no vanilla dungeon
+    // mesh has one). The result starts at `from` and ends at the path's real end (the solver validates that
     // point, not `to`). Lives for one solve: it keeps the unit pointer only for that call.
+    //
+    // Straight: the Walkable probe of `to`, then MeshReaches. No navmesh, or not in world: false.
+    //
+    // MeshReaches: one Detour raycast along the mesh, from the polygon nearest to `from` (within startYd) to `to`: true
+    // when it meets no mesh border (a ledge, a pit, a wall, lava; neighboring polygons are at most a climb step apart,
+    // so no drop either) more than shortYd before `to`, and ends on `to`'s own layer (within endZYd).
+    // MeshUnder: a short hop (one PathGenerator step) with mesh within 0.5 yd of every 0.5 yd of it: a ray along a path
+    // that turns on a mesh corner often hits that corner at once. Wider gaps than that are pits (the mesh keeps an
+    // agent's radius off every edge).
     //
     // InSight (M3): Map::isInLineOfSight (vmaps and game objects) between the two points, both lifted by the bot's
     // collision height (as WorldObject::IsWithinLOS lifts a player). The solver spends at most Sight::maxChecks rays
@@ -211,12 +227,16 @@ namespace BossMechanics
 
         bool Find(Geo::Vec3 const& from, Geo::Vec3 const& to, std::vector<Geo::Vec3>& out) override;
         bool Walkable(Geo::Vec3& p) override;
+        bool Straight(Geo::Vec3 const& from, Geo::Vec3& to) override;
         bool InSight(Geo::Vec3 const& from, Geo::Vec3 const& to) override;
 
         uint32 Calls() const { return _calls; }
         uint32 SightRays() const { return _sightRays; }
 
     private:
+        bool MeshReaches(Geo::Vec3 const& from, float startYd, Geo::Vec3 const& to, float shortYd, float endZYd) const;
+        bool MeshUnder(Geo::Vec3 const& from, Geo::Vec3 const& to) const;
+
         Unit const* _bot;
         NavOracleStats* _stats;
         uint32 _calls = 0;

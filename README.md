@@ -1013,7 +1013,9 @@ while Idle on a map with mechanics) and runs the mode machine:
   broken and an unsafe spot is not solved, so a stuck or rooted bot heals, casts and follows; then it tries again.
 - **Hold**: at the safe spot until `holdUntil` (latest window end it answers, capped at `HoldCapMs`) -> Watch. Spot
   unsafe -> re-solve; out of the role band for `RoleSlackMs` -> Watch (stock movement takes it back, policed), never
-  while a task holds it (below).
+  while a task holds it (below). A NoPath to the bot's own spot goes straight here (no move, no escape clocks, no late
+  arrival counted): the hold action stops the motion under way, the spot is solved again at the solve rate limit, and
+  after 2 s without a way out (`NowhereToGo`) casts run again.
 - **Freeze** (M3, HoldStill, decision §7.4): from the window start - `SafetyMarginMs` - `Freeze.SettleMs` to its end
   + `SafetyMarginMs` the bot does not move at all, not even for a new Zone: no solve, every movement action blocked
   (ours too), foreign motion stopped; casts (any length) and facing allowed. Before the window the solver only offers
@@ -1134,7 +1136,12 @@ navmesh path calls (paths found earlier are reused):
 3. only when an armed or arming mine allows grace: a grace crossing at the full margin -> GraceMove;
 4. Fallback: the candidate with the fewest hazards hot from its arrival, then the least time inside the exact hitboxes
    (no margin) on its straight line, then the nearest; candidates known to have no path are skipped and the first
-   walkable one down that ranking is taken. No path to it -> NoPath, straight to the nearest exit. Only the top nine
+   walkable one down that ranking is taken. No path to it: the next ones are asked (at most eight probes, and the
+   solve's path calls stay within three passes and one), a path of theirs taken when it keeps the hard bounds and ends
+   within 3 yd (3D) of its candidate. None -> NoPath: straight to the nearest exit (else the first candidate) that lies
+   in the hard bounds and whose straight line stays on the navmesh (`PathOracle::Straight`, one probe and one Detour
+   ray, at most 12 per solve); none -> the bot stays where it is (Ragefire Chasm: bots walked blind over a ledge into
+   lava; `tests/nopath_test.cpp`). Only the top nine
    of the ranking are ever read (eight probes, then one with a known path), so a straight-line walk stops once it
    cannot enter them any more (M4: the same answer, a third less time on a lane-set Fallback). A lethal hazard
    ([Lethal](#lethal-stratholme-x4)) takes no part in passes 2 and 3 (full margin, no grace) and is never crossed by
@@ -1153,8 +1160,10 @@ crosses a hazard while it is hot, the common case under a barrage) only when non
 candidate costs a path call, a navmesh probe (one Detour `findNearestPoly` within 1 yd around it and 5 yd up and down,
 with the bot's polygon filter) drops it when no walkable polygon lies within 1 yd (inside a wall or a pillar), or
 snaps it onto the navmesh and checks it again where it landed (up to 64 probes per solve). The path call accepts
-`PATHFIND_NORMAL` and `PATHFIND_INCOMPLETE` paths that end within 3 yd of the asked point; the solver validates and
-scores the real end, never the asked point.
+`PATHFIND_NORMAL` and `PATHFIND_INCOMPLETE` paths that end within 3 yd of the asked point, whose last hop the navmesh
+carries (a Detour ray, or mesh under every half yard of a short hop: `PathGenerator` appends the asked point unclamped
+to a path that never leaves the bot's polygon, a blind line off a rim) and none of whose hops drops more than a slope
+does; the solver validates and scores the real end, never the asked point.
 
 ### Route search
 
@@ -1399,8 +1408,9 @@ Mechanic::Zone(me, ZoneSpec{ Anchor(from), Shape::Line(length, 3.f), Anchor(to) 
   alone at drift + `tightMarginYd`; screened lazily, only the candidates the ranking reaches). The floor of the
   ranking (fewest hot hazards) is taken among the lethal-free candidates. Down the ranking the first candidate whose
   real path (known, else the oracle's, at most 8 new ones) keeps out is taken; none -> NoPath.
-- **NoPath**: the nearest exit whose straight line keeps out; none -> the bot stays where it is (a NoPath to its own
-  spot; its next solve tries again). `SolveStats::lethalSkipped` counts the candidates, paths and exits refused.
+- **NoPath**: the nearest exit whose straight line keeps out and stays on the navmesh; none -> the bot stays where it
+  is (a NoPath to its own spot; its next solve tries again). `SolveStats::lethalSkipped` counts the candidates, paths
+  and exits refused.
 - **Escape**: `FallbackHolds` refuses a rest of the way that enters a lethal hazard (the wall armed or moved since
   the plan), so the escape is solved again.
 - **Route search**: blocks its cells like any hot hazard, and every leg passes `CheckPath` at the full margin or at
@@ -2160,7 +2170,7 @@ named rework movers (`heroic leap`, `cmbt grappling hook`, `cmbt blade rush`, `s
 | `GraceMarginMs` | 250 | armed-mine crossing budget = grace - this |
 | `HorizonMs` | 10000 | windows starting later are ignored |
 | `HoldCapMs` | 3000 | longest hold for persistent and endless hazards |
-| `MaxCandidates` / `MaxPathChecks` | 400 / 8 | per solve / path calls per pass (up to 3 passes, +1 fallback) |
+| `MaxCandidates` / `MaxPathChecks` | 400 / 8 | per solve / path calls per pass (3 passes + 1 fallback at most) |
 | `GridStepYd` | 2.0 | lane-frame grid |
 | `MinSolveIntervalMs` | 150 | per bot, except the first solve after a registry change |
 | `MovingAnchorRecheckMs` | 250 | re-view cadence while a hazard is unit-anchored |
@@ -2251,7 +2261,8 @@ stuck re-solve).
 ### Limits
 
 - No navmesh on a map: every path check fails, so the solver falls back to `Fallback` / `NoPath` (logged once per bot
-  and mechanic). The probe cannot tell walls apart there and lets every candidate through to the path call.
+  and mechanic; NoPath then stays put, no line can be proven). The probe cannot tell walls apart there and lets every
+  candidate through to the path call.
 - A reduced-margin path passes 0.25 yd from a hazard's edge (plus the anchor's drift). Grace crossings are still
   measured at the full margin, so a gap the reduced pass rejects (narrower than about 0.5 yd) stays closed: a bot
   boxed in by overlapping mines holds, or crosses under grace when the mines allow it.

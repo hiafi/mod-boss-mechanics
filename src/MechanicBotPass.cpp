@@ -411,6 +411,10 @@ namespace
                 continue;
             if (e.sight && !oracle.InSight(holderEye, p))
                 continue;
+            // A spot across a pit or on a ledge of its own is no spot: MoveTo would run a partial path to the rim.
+            std::vector<Geo::Vec3> path;
+            if (!oracle.Find(here, p, path) || path.empty())
+                continue;
             s.spots.erase(std::remove_if(s.spots.begin(), s.spots.end(), [self](Pass::Reserved const& x)
             {
                 return x.bot == self;
