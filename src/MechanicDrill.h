@@ -1338,6 +1338,11 @@ namespace BossMechanics::Drill
     constexpr float kStepFanYd = 6.f;
     constexpr std::uint32_t kFanMs = 2000;
     constexpr std::uint32_t kShadowsteps = 3;
+    constexpr std::uint32_t kStepEveryMs = 2500;        // landing to landing (kShadowstepEveryMs), never on a resolve
+    constexpr std::uint32_t kStepHomeMs = 250;          // the last spin's resolve to the way home
+    // No `blink` this soon after the resolve of a ring anchored on the unit: steps run before the resolves of their
+    // tick, so one on the instant takes the ring along and hits whoever the unit appears behind.
+    constexpr std::uint32_t kBlinkAfterResolveMs = 250;
     constexpr float kStepBehindYd = 2.f;
     constexpr float kRidgeYd = 15.f;
     constexpr float kRidgeAheadYd = -6.f;
@@ -2313,15 +2318,15 @@ namespace BossMechanics::Drill
                     { 39000, "cast 36224 5000 kick=1 cycle=1/3 tag=14" },
                     { 44500, "cast 50097 2000 cycle=1/3 tag=16" },
                     { 47000, "cast 18088 2000 cycle=1/3 tag=15" },
-                    // shadowstep-fans: Bazzalan BZ5, then BZ7 heroic, 2 s a step
+                    // shadowstep-fans: Bazzalan BZ5, then BZ7 heroic, a landing every 2.5 s (0.5 s after a resolve)
                     { 50000, "circle 8 2000 anchor=target inside=15:-6 pct=35 tankpct=35 weak=1 cycle=1/3 tag=8" },
                     { 52500, "blink 2 0 pick=any cycle=1/3" },
                     { 52500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
-                    { 54500, "blink 2 0 pick=fresh cycle=1/3" },
-                    { 54500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
-                    { 56500, "blink 2 0 pick=fresh cycle=1/3" },
-                    { 56500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
-                    { 58700, "blink 0 0 home=1 cycle=1/3" },
+                    { 55000, "blink 2 0 pick=fresh cycle=1/3" },
+                    { 55000, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
+                    { 57500, "blink 2 0 pick=fresh cycle=1/3" },
+                    { 57500, "circle 6 2000 anchor=target inside=15:-6 pct=45 tankpct=45 weak=1 cycle=1/3 tag=9" },
+                    { 59750, "blink 0 0 home=1 cycle=1/3" },
                     // felstorm-spots: Taragaman TG3 + TG5 heroic
                     { 0, "circle 10 2000 anchor=target persist=5000 tick=1000 inside=18:0 pct=20 tankpct=20 cycle=2/3 "
                         "tag=10" },

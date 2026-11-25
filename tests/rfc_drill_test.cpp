@@ -542,20 +542,53 @@ namespace
             CHECK(Size(spins[i].line) == Drill::kStepFanYd && Drill::WarnMs(spins[i].line) == Drill::kFanMs);
             CHECK(Is(spins[i].line, "anchor", "target") && Is(spins[i].line, "weak", "1"));
             CHECK(Key(spins[i].line, "pct", 0.f) == 45.f && !Drill::Value(spins[i].line, "role"));
-            // The ring registers on the landing, at the unit's new place, every 2 s.
+            // The ring registers on the landing, at the unit's new place; the next landing is well past its resolve.
             CHECK(steps[i].startMs == spins[i].startMs && steps[i].index + 1 == spins[i].index);
             CHECK(Size(steps[i].line) == Drill::kStepBehindYd);
             CHECK(Is(steps[i].line, "pick", i ? "fresh" : "any"));
             if (i)
-                CHECK(spins[i].startMs == spins[i - 1].resolveMs);
+            {
+                CHECK(spins[i].startMs == spins[i - 1].startMs + Drill::kStepEveryMs);
+                CHECK(spins[i].startMs >= spins[i - 1].resolveMs + 500);
+            }
         }
-        CHECK(Is(steps[3].line, "home", "1") && steps[3].startMs >= spins[2].resolveMs);
-        CHECK(spins[0].startMs >= fan[0].resolveMs);
+        CHECK(Is(steps[3].line, "home", "1") && steps[3].startMs == spins[2].resolveMs + Drill::kStepHomeMs);
+        CHECK(spins[0].startMs >= fan[0].resolveMs + 500);
         // The bar casts are over before he moves.
         for (At const& c : WithShape(1, "cast"))
             CHECK(c.resolveMs <= fan[0].startMs);
         CHECK(std::fabs(Drill::kRidgeAheadYd) + 3.f <= Drill::kRidgeYd);
         CHECK(18.f + Drill::kRidgeAheadYd <= Drill::kRidgeYd);
+    }
+
+    // Every drill, over its default cycles: no `blink` from the moment a ring on the unit is registered (a blink listed
+    // before it at the same time is its landing) until kBlinkAfterResolveMs past its last pass.
+    void TestNoBlinkOnResolve()
+    {
+        std::uint32_t pairs = 0;
+        for (Drill::Def const& d : Drill::All())
+        {
+            std::vector<Drill::ScheduledStep> const all = Drill::StepSchedule(d, d.defaultCycles);
+            for (Drill::ScheduledStep const& b : all)
+            {
+                if (ShapeOf(d.steps[b.step].line) != "blink")
+                    continue;
+                for (Drill::ScheduledStep const& z : all)
+                {
+                    std::string_view const line = d.steps[z.step].line;
+                    if (!Is(line, "anchor", "target") && ShapeOf(line) != "frontal")
+                        continue;
+                    bool const before = b.delayMs < z.delayMs || (b.delayMs == z.delayMs && b.step < z.step);
+                    std::uint32_t const end = z.delayMs + Drill::WarnMs(line)
+                        + static_cast<std::uint32_t>(Key(line, "persist", 0.f)) + Drill::StepRepeatOffsets(line).back();
+                    CHECK(before || b.delayMs >= end + Drill::kBlinkAfterResolveMs);
+                    ++pairs;
+                }
+            }
+        }
+        CHECK(pairs > 0);
+        CHECK(Drill::kStepEveryMs >= Drill::kFanMs + Drill::kBlinkAfterResolveMs);
+        CHECK(Drill::kStepHomeMs >= Drill::kBlinkAfterResolveMs);
     }
 
     // TG3 + TG5: the 10 yd ring (2 s cast, five ticks) and ten 4 yd spots from the spin's start, a spot every 0.5 s.
@@ -1153,8 +1186,10 @@ namespace
         return s;
     }
 
-    // The 8 yd fan, then three Shadowsteps 2 s apart behind three different members, a 6 yd ring on each landing.
-    Score RunFans(bool rangedGroup, std::uint32_t seeds, Score& fan)
+    // The 8 yd fan, then three Shadowsteps `every` ms apart behind three different members, a 6 yd ring on each
+    // landing. A ring is judged at the boss's place (the registry's live anchor) after the tick's blink, as
+    // Registry::Tick runs the two.
+    Score RunFans(bool rangedGroup, std::uint32_t seeds, Score& fan, std::uint32_t every = Drill::kStepEveryMs)
     {
         Score s;
         for (std::uint32_t seed = 1; seed <= seeds; ++seed)
@@ -1173,7 +1208,7 @@ namespace
                     f.w.AddHazard(Fight::Circle(50, f.boss, Drill::kFanYd, kStart + Ms(Drill::kFanMs)));
                 for (std::uint32_t k = 0; k < Drill::kShadowsteps; ++k)
                 {
-                    Ms const land = chain + Ms(k * Drill::kFanMs);
+                    Ms const land = chain + Ms(k * every);
                     if (now == land)
                     {
                         Vec3 const p = f.w.bots[order[k]].pos;
@@ -1183,7 +1218,19 @@ namespace
                     if (now == land + f.w.cfg.sightLag)
                         f.w.AddHazard(Fight::Circle(60 + k, f.boss, Drill::kStepFanYd, land + Ms(Drill::kFanMs)));
                 }
-                if (now == chain + Ms(3 * Drill::kFanMs))
+                for (std::uint32_t k = 0; k < Drill::kShadowsteps; ++k)
+                    if (now == chain + Ms(k * every + Drill::kFanMs))
+                        for (std::size_t i = 0; i < 5; ++i)
+                        {
+                            Vec3 const p = f.w.bots[i].pos;
+                            bool const hit = Geo::Dist2d(p.x, p.y, f.boss.x, f.boss.y) <= Drill::kStepFanYd;
+                            ++s.tries;
+                            s.hits += hit ? 1u : 0u;
+                            s.hunted += hit && i == order[k] ? 1u : 0u;
+                        }
+                // Home, on the first model step at or past it.
+                Ms const home = chain + Ms((Drill::kShadowsteps - 1) * every + Drill::kFanMs + Drill::kStepHomeMs);
+                if (now >= home && now - f.w.cfg.step < home)
                     f.boss = { 0.f, 0.f, 0.f };
                 f.w.chaseTarget = f.boss;
                 f.w.Step(now);
@@ -1192,15 +1239,6 @@ namespace
             {
                 fan.hits += f.HitBy(i, 50) ? 1u : 0u;
                 ++fan.tries;
-                for (std::uint32_t k = 0; k < Drill::kShadowsteps; ++k)
-                {
-                    ++s.tries;
-                    if (f.HitBy(i, 60 + k))
-                    {
-                        ++s.hits;
-                        s.hunted += i == order[k] ? 1u : 0u;
-                    }
-                }
             }
             s.c.Add(f.w.Total());
             ++s.runs;
@@ -1338,6 +1376,11 @@ namespace
         g_speed = kRunYdS;
         for (Score const& s : { den, beating, erupt, burn, fans, fan, spots, ring })
             CHECK(s.hits * 10 > s.tries);
+        // A cadence equal to the warning (a landing on each resolve) hits bots that do everything right.
+        Score eightYd;
+        Score const coincident = RunFans(false, 60, eightYd, Drill::kFanMs);
+        coincident.Print("shadowstep-fans, a landing on each resolve");
+        CHECK(coincident.hits * 10 > coincident.tries);
     }
 }
 
@@ -1351,6 +1394,7 @@ int main()
     TestBurnSpread();
     TestWispSoak();
     TestShadowstepFans();
+    TestNoBlinkOnResolve();
     TestFelstormSpots();
     TestSpikeHide();
     TestKickLockout();

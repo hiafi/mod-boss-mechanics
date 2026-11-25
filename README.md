@@ -898,7 +898,7 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     Jergosh and Bazzalan (JR2: a 6 yd Spread on 2, 3 and 5 Marked carriers, the second losing one in the middle of its
     2.5 s; JR5: two wisps crawling 50 yd at 3 yd/s across them; three 5 s kickable channels 15 s apart, each followed by
     a must-play bar of another school and then one of the kicked school; BZ5: an 8 yd fan, then BZ7: a 6 yd one after
-    each of three Shadowsteps behind different members, 2 s apart); cycle 2 Taragaman (TG3 + TG5: the 10 yd ring, 2 s +
+    each of three Shadowsteps behind different members, 2.5 s apart); cycle 2 Taragaman (TG3 + TG5: the 10 yd ring, 2 s,
     five ticks, and ten 4 yd spots every 0.5 s, 0-4 yd off a shuffled rotation, 1.5 s each, three times; TG6: a Hide
     behind three spikes of size 2 on random points of four at 10 yd, then behind an opposite pair, 4 s; a 2 s and a 3 s
     kickable cast between them; TG9's 6 yd bursts, reported). Tags 2, 3, 5, 6, 8-13 gated (2, 3, 5, 9, 10, 11 on the
