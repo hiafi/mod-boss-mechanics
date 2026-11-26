@@ -470,6 +470,14 @@ namespace BossMechanics
         return *this;
     }
 
+    MechanicRef& MechanicRef::HealerWithinTankReach()
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("HealerWithinTankReach", cur && cur->kind == Kind::Soak))
+            m->healerTankReach = true;
+        return *this;
+    }
+
     MechanicRef& MechanicRef::MissedSoak(MissedSoakMode mode)
     {
         ActiveMechanic const* cur = Get();
@@ -614,6 +622,15 @@ namespace BossMechanics
         ActiveMechanic const* cur = Get();
         if (ActiveMechanic* m = Edit("NoTelegraph", cur && !cur->committed))
             m->telegraph = false;
+        return *this;
+    }
+
+    MechanicRef& MechanicRef::SeenOnlyWith(uint8 invisibilityType)
+    {
+        ActiveMechanic const* cur = Get();
+        if (ActiveMechanic* m = Edit("SeenOnlyWith", cur
+            && Judge::SeenOnlyWithFits(cur->telegraph, cur->committed, invisibilityType)))
+            m->markerInvisibility = static_cast<int8>(invisibilityType);
         return *this;
     }
 

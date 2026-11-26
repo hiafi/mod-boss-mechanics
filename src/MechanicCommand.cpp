@@ -12,7 +12,8 @@
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
  *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
  *               |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes
- *               |scarlet-monastery-shapes-2|ragefire-chasm-shapes> [cycles=3] [seed=] [dmg=1] [self=0]
+ *               |scarlet-monastery-shapes-2|ragefire-chasm-shapes|zul-farrak-shapes> [cycles=3] [seed=] [dmg=1]
+ *               [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -141,6 +142,20 @@
  * (the selected creature appears behind a member, on the last circle's centre or back home: ScheduleBlink) and `cast`
  * (it casts a spell, kickable or a must-play bar, judged near its end: ScheduleCast). MechanicDrill.h "Ragefire Chasm
  * shapes".
+ *
+ * Zul'Farrak build (WP-G1 §3.9, drill `zul-farrak-shapes`): `inbox=<w>x<l>[:<ahead>]` gives the bots hard bounds of a
+ * box fixed on the selected unit's place at the parse, `crawl from=<yd>:<bearing>` starts the crawl at a fixed point,
+ * `mark=<n>` on a soak or crawl hands whoever fills it n Marked stacks, `pick=marked|unmarked|healer`, `circle
+ * around=<yd>:<n>` lays n circles on a ring, `circle drop=prefer judge=prefer` fails a carrier off every lasting point
+ * circle, `cast twin=1` adds a second caster, and four drill-only steps: `afflict` (a dispellable debuff held on a
+ * crowded carrier, a dispel near others a Hit: ScheduleAfflict), `partner` (a twin and a kill order flipping between
+ * the two: SchedulePartner), `stalk` (the selected unit walks at members, a trail behind: ScheduleStalk) and `floes`
+ * (strict bounds of safe circles: ScheduleFloes). MechanicDrill.h "Zul'Farrak shapes".
+ *
+ * Zul'Farrak build (BM-1, for drill `zul-farrak-shapes` rows 3 and 4): `seen=<type>` on any shape that draws is
+ * SeenOnlyWith(type) (its markers carry invisibility of that type: only a player with a detect aura of it sees them;
+ * the GM needs one to see the shape), and `healreach=1` on a soak or crawl is HealerWithinTankReach (no bot healer
+ * claims it while it lies past healer reach of the healer's nearest live tank).
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -522,7 +537,10 @@ namespace
             Same,               // the member the previous pick of this command landed on (else a random one)
             Other,              // a non-tank the chain has not picked (Drill::PickPool)
             Tank,               // the selected unit's victim, else a random member (Scarlet Monastery WP-G1)
-            Fresh               // a member, the tank included, the chain has not picked (Ragefire Chasm WP-G1)
+            Fresh,              // a member, the tank included, the chain has not picked (Ragefire Chasm WP-G1)
+            Marked,             // a member holding Marked (drill), else anyone (Zul'Farrak WP-G1: the walker)
+            Unmarked,           // a member without it, else anyone (the living)
+            Healer              // a healer by the role provider, else anyone (the healer walker)
         };
         enum class To : uint8
         {
@@ -642,6 +660,20 @@ namespace
         uint32 hideOf = 0;              // hide of=: the blockers stand on random points of this many (0: all of them)
         std::vector<uint32> hideSlots;  // ... which, drawn when the repeat registers
         float hideScale = 1.f;          // hide scale=: the game objects' scale
+        // Zul'Farrak build WP-G1 (drill `zul-farrak-shapes`)
+        bool inBox = false;             // inbox=: Within a box fixed at the parse (SpotBounds::Box)
+        Position boxCorner;
+        float boxFacing = 0.f;
+        float boxWidth = 0.f;
+        float boxLength = 0.f;
+        std::optional<Drill::PolarSpec> crawlFrom;  // crawl from=<yd>:<bearing>: the start, off the selected unit
+        uint32 markStacks = 0;          // soak / crawl mark=<n>: Marked stacks for whoever fills it
+        uint32 around = 0;              // circle around=<yd>:<n>: n circles on a ring of aroundYd
+        float aroundYd = 0.f;
+        bool dropJudge = false;         // circle drop= judge=prefer: the carrier off every lasting point circle fails
+        // Zul'Farrak BM-1
+        int seen = -1;                  // seen=<type>: SeenOnlyWith(type) (markers seen with that detect aura only)
+        bool healReach = false;         // soak / crawl healreach=1: HealerWithinTankReach
     };
 
     bool IsShapeName(std::string const& s)
@@ -684,13 +716,65 @@ namespace
             ref.Lethal();
         if (spec.insideYd > 0.f)
             ref.Within(SpotBounds().Circle(spec.insideCentre, spec.insideYd));
+        // Zul'Farrak WP-G1: inbox= (X along the run's facing for the length, Y to its left for the width).
+        if (spec.inBox)
+            ref.Within(SpotBounds().Box(spec.boxCorner, spec.boxFacing, spec.boxLength, spec.boxWidth));
         if (spec.ordering)
             ref.Order(*spec.ordering);
         if (spec.color)
             ref.Color(*spec.color);
         if (!spec.tele)
             ref.NoTelegraph();
+        // Zul'Farrak F11: seen=<type> (in the registering statement: the markers spawn at the commit).
+        if (spec.seen >= 0)
+            ref.SeenOnlyWith(static_cast<uint8>(spec.seen));
         ref.Tag(spec.tag);
+    }
+
+    // mark=<n> (Zul'Farrak WP-G1): n more Marked (drill) stacks on `p` (a Gathered Soul, the Block's Grievous Wound),
+    // never past the spell's cap, recorded on the owner's encounter so its end (and `.mech clear`) takes them off.
+    void AddMarked(Creature* owner, Player* p, uint32 n)
+    {
+        if (!n || !p || !p->IsInWorld() || !p->IsAlive())
+            return;
+        Aura* aura = p->GetAura(Ids::SPELL_MARKED_DRILL, p->GetGUID());
+        uint32 const have = aura ? aura->GetStackAmount() : 0;
+        if (!aura)
+            aura = p->AddAura(Ids::SPELL_MARKED_DRILL, p);
+        if (!aura)
+            return;
+        aura->SetStackAmount(static_cast<uint8>(Drill::MarkedAfter(have, n)));
+        aura->RefreshDuration();
+        Registry::GetOrCreate(owner->GetMap()).BeginEncounter(owner->GetGUID()).markedPlayers.insert(p->GetGUID());
+    }
+
+    // A drill failure the registry did not judge (leash, the floes, the kill order, a shatter): the ledger's
+    // `<Kind>/<tag>` on the owner's encounter.
+    void PostDrillFailure(Creature* owner, uint32 tag, ObjectGuid player, FailureEvent::Type type)
+    {
+        FailureEvent e;
+        e.encounter = owner->GetGUID();
+        e.tag = tag;
+        e.kind = Kind::Zone;
+        e.player = player;
+        e.type = type;
+        e.at = GameTime::GetGameTimeMS();
+        Registry::GetOrCreate(owner->GetMap()).PostFailure(e);
+    }
+
+    // Is `pos` inside a live lasting point circle of `owner` (the drop rule's `prefer` spots: the pool's puddles)?
+    bool InOwnerPuddle(Creature* owner, Position const& pos)
+    {
+        bool inside = false;
+        if (Registry const* reg = Registry::Get(owner->GetMap()))
+            reg->ForEachActive(GameTime::GetGameTimeMS(), [&inside, &pos, owner](ActiveMechanic const& m)
+            {
+                if (inside || m.owner != owner->GetGUID() || !m.persist || m.decoy || m.anchor.IsUnit()
+                    || !m.IsShapeKind() || m.shape.type != ShapeType::Circle)
+                    return;
+                inside = m.anchor.point.GetExactDist2d(&pos) <= m.shape.radius;
+            });
+        return inside;
     }
 
     // Registers one test mechanic for `owner`. Returns the ids made (empty: refused, reason in `err`).
@@ -776,6 +860,21 @@ namespace
             park(ref);
             decoy(ref);
             dropSpot(ref);
+            // judge=prefer (Zul'Farrak WP-G1, GZ6): the carrier (the anchor member) off every lasting point circle of
+            // the owner as it resolves is an OffSpot failure under DropJudgeTag(tag): the Icicle not in a puddle.
+            if (spec.dropJudge && anchorUnit)
+            {
+                Map* map = owner->GetMap();
+                ref.OnResolve([map, ownerGuid = owner->GetGUID(), carrier = anchorUnit->GetGUID(), tag = spec.tag](
+                    ResolveResult const&)
+                {
+                    Creature* o = map->GetCreature(ownerGuid);
+                    Unit* unit = o ? ObjectAccessor::GetUnit(*o, carrier) : nullptr;
+                    if (!o || !unit || !unit->IsAlive() || InOwnerPuddle(o, unit->GetPosition()))
+                        return;
+                    PostDrillFailure(o, Drill::DropJudgeTag(tag), carrier, FailureEvent::Type::OffSpot);
+                });
+            }
             keep(ref);
         }
         else if (s == "donut")
@@ -982,7 +1081,23 @@ namespace
                 ref.EndBacksOff(spec.backOff);
             if (spec.tankNear > 0.f)
                 ref.TankNearSource(spec.tankNear);
+            if (spec.healReach)
+                ref.HealerWithinTankReach();    // Zul'Farrak F14
             ApplyCommon(ref, spec, false, true);
+            // mark=<n> (Zul'Farrak WP-G1): a filled soak hands the players in it n Marked stacks (the Block's wound).
+            if (spec.markStacks)
+            {
+                Map* map = owner->GetMap();
+                ref.OnResolve([map, ownerGuid = owner->GetGUID(), n = spec.markStacks, need = spec.need](
+                    ResolveResult const& r)
+                {
+                    Creature* o = map->GetCreature(ownerGuid);
+                    if (!o || r.fizzled || r.count < need)
+                        return;
+                    for (ObjectGuid const& g : r.hits)
+                        AddMarked(o, ObjectAccessor::GetPlayer(*o, g), n);
+                });
+            }
             keep(ref);
         }
         else if (s == "bait")
@@ -1198,12 +1313,20 @@ namespace
             c.chained = std::find(dice.chain.begin(), dice.chain.end(), p->GetGUID()) != dice.chain.end();
             c.last = p->GetGUID() == dice.lastMember;
             c.dist = source ? p->GetExactDist2d(source) : 0.f;
+            // Zul'Farrak WP-G1: pick=marked|unmarked (the walker, the living) and pick=healer.
+            c.marked = p->HasAura(Ids::SPELL_MARKED_DRILL);
+            if (spec.pick == TestSpec::Pick::Healer)
+                if (Unit* selected = spec.selected.IsEmpty() ? nullptr : ObjectAccessor::GetUnit(*owner, spec.selected))
+                    c.healer = HasRole(GetRoleProvider().Get(selected, p), Role::Healer);
             candidates.push_back(c);
         }
         Drill::PickRule const rule = spec.pick == TestSpec::Pick::Any ? Drill::PickRule::Any
             : spec.pick == TestSpec::Pick::Other ? Drill::PickRule::Other
             : spec.pick == TestSpec::Pick::Tank ? Drill::PickRule::Tank
-            : spec.pick == TestSpec::Pick::Fresh ? Drill::PickRule::Fresh : Drill::PickRule::NonTank;
+            : spec.pick == TestSpec::Pick::Fresh ? Drill::PickRule::Fresh
+            : spec.pick == TestSpec::Pick::Marked ? Drill::PickRule::Marked
+            : spec.pick == TestSpec::Pick::Unmarked ? Drill::PickRule::Unmarked
+            : spec.pick == TestSpec::Pick::Healer ? Drill::PickRule::Healer : Drill::PickRule::NonTank;
         std::vector<std::size_t> const pool = Drill::PickPool(candidates, rule, source ? spec.minDist : 0.f);
         if (pool.empty())
             return nullptr;
@@ -1568,17 +1691,27 @@ namespace
 
     std::vector<uint32> RegisterCrawl(Creature* owner, TestSpec spec, Dice& dice, std::string& err)
     {
-        Player* from = PickMember(owner, spec, dice);
-        if (!from)
-        {
-            err = kNoMemberMessage;
-            return {};
-        }
         Geo::Vec3 const g = Drill::Shifted({ spec.point.GetPositionX(), spec.point.GetPositionY(),
             spec.point.GetPositionZ() }, spec.facing + Geo::DegToRad(spec.crawlBearing), spec.crawlYd, 0.f);
         Position const goal(g.x, g.y, GroundZ(owner, g.x, g.y, g.z), 0.f);
-        Geo::Vec3 const s = Drill::CrawlStart({ from->GetPositionX(), from->GetPositionY(), from->GetPositionZ() },
-            { goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ() }, spec.crawlOff);
+        Geo::Vec3 s;
+        if (spec.crawlFrom)
+        {
+            // from=<yd>:<bearing> (Zul'Farrak WP-G1): a soul rising at a grave, off the selected unit's start.
+            s = Drill::FromPoint({ spec.point.GetPositionX(), spec.point.GetPositionY(), spec.point.GetPositionZ() },
+                spec.facing, spec.crawlFrom->yd, spec.crawlFrom->second);
+        }
+        else
+        {
+            Player* from = PickMember(owner, spec, dice);
+            if (!from)
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            s = Drill::CrawlStart({ from->GetPositionX(), from->GetPositionY(), from->GetPositionZ() },
+                { goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ() }, spec.crawlOff);
+        }
         Position const start(s.x, s.y, GroundZ(owner, s.x, s.y, s.z), 0.f);
         Creature* unit = SummonMover(owner, start, spec.warn + kChaserLinger);
         if (!unit)
@@ -1600,6 +1733,10 @@ namespace
                 return {};
             }
             ref.MissedSoak(MissedSoakMode::Never).NoFillTimer().OneClaimPerBot();
+            if (spec.healReach)
+                ref.HealerWithinTankReach();    // Zul'Farrak F14
+            if (spec.seen >= 0)
+                ref.SeenOnlyWith(static_cast<uint8>(spec.seen));    // Zul'Farrak F11
             ref.Eligible(spec.eligibility.value_or(Eligibility()));
             if (spec.ordering)
                 ref.Order(*spec.ordering);
@@ -1631,12 +1768,13 @@ namespace
                     return;
                 }
                 ActiveMechanic const* soak = reg.Find(state->soak);
-                for (Player const* p : GroupMembers(o, spec.gm, spec.includeGm))
+                for (Player* p : GroupMembers(o, spec.gm, spec.includeGm))
                     if (p->GetExactDist2d(unit) <= spec.size
                         && std::fabs(p->GetPositionZ() - unit->GetPositionZ()) <= Drill::kCrawlZBandYd
                         && (!soak || reg.IsEligible(*soak, p)))
                     {
                         end();
+                        AddMarked(o, p, spec.markStacks);   // mark=<n> (Zul'Farrak WP-G1): a Gathered Soul
                         return;
                     }
                 if (last || unit->GetExactDist2d(&goal) <= Drill::kWispReachYd)
@@ -1692,6 +1830,25 @@ namespace
             one.point = Position(points[i].x, points[i].y, GroundZ(owner, points[i].x, points[i].y, points[i].z),
                 spec.facing);
             one.decoy = std::find(decoys.begin(), decoys.end(), static_cast<uint32>(i)) != decoys.end();
+            std::vector<uint32> const made = RegisterTest(owner, one, err);
+            ids.insert(ids.end(), made.begin(), made.end());
+        }
+        dice.lastCircle = spec.point;
+        return ids;
+    }
+
+    // `around=<yd>:<n>` (Zul'Farrak WP-G1, the pool's puddles): n circles on a ring of `aroundYd` round the landing,
+    // the first along the run's facing (Drill::RingSpots). The landing is the next `at=prev`.
+    std::vector<uint32> RegisterAround(Creature* owner, TestSpec const& spec, Dice& dice, std::string& err)
+    {
+        std::vector<Geo::Vec3> const points = Drill::RingSpots({ spec.point.GetPositionX(), spec.point.GetPositionY(),
+            spec.point.GetPositionZ() }, spec.aroundYd, spec.around, spec.facing);
+        std::vector<uint32> ids;
+        for (Geo::Vec3 const& p : points)
+        {
+            TestSpec one = spec;
+            one.around = 0;
+            one.point = Position(p.x, p.y, GroundZ(owner, p.x, p.y, p.z), spec.facing);
             std::vector<uint32> const made = RegisterTest(owner, one, err);
             ids.insert(ids.end(), made.begin(), made.end());
         }
@@ -1977,6 +2134,8 @@ namespace
         }
         if (spec.grid)
             return RegisterGrid(owner, spec, dice, err);
+        if (spec.around)
+            return RegisterAround(owner, spec, dice, err);
         if (spec.shape == "conefront")
         {
             // WP-RF: turn= from the previous conefront's slice (clockwise), else bearing= from the GM's facing, else
@@ -2309,6 +2468,23 @@ namespace
         // Scarlet Monastery F6: holdfacing=1 on any shape.
         if (opt.Has("holdfacing"))
             spec.holdFacing = opt.Bool("holdfacing", false);
+        // Zul'Farrak F11: seen=<type> on any shape that draws (markers only for players detecting that type).
+        if (opt.Has("seen"))
+        {
+            spec.seen = opt.Int("seen", -1);
+            if (spec.seen < 0 || !Judge::SeenOnlyWithFits(true, false, static_cast<unsigned>(spec.seen)))
+            {
+                opt.MarkBad("seen");
+                spec.seen = -1;
+            }
+        }
+        // Zul'Farrak F14: healreach=1 on a soak or crawl (no bot healer claims it past its tank's reach).
+        if (opt.Has("healreach"))
+        {
+            spec.healReach = opt.Bool("healreach", false);
+            if (s != "soak" && s != "crawl")
+                opt.MarkBad("healreach");
+        }
         if (s == "hunt")
         {
             spec.huntRate = opt.Float("speed", Drill::kHuntRateNormal);
@@ -2590,6 +2766,54 @@ namespace
             else
                 opt.MarkBad("inside");
         }
+        // Zul'Farrak WP-G1: inbox=<w>x<l>[:<ahead>], a box of hard bounds fixed on the selected unit's place now.
+        if (opt.Has("inbox"))
+        {
+            if (std::optional<Drill::BoxSpec> const box = Drill::ParseInBox(opt.Str("inbox", "")))
+            {
+                Geo::Vec3 const c = Drill::Shifted({ selected->GetPositionX(), selected->GetPositionY(),
+                    selected->GetPositionZ() }, ctx.facing, box->ahead, 0.f);
+                Geo::Vec3 const corner = Drill::BoxCorner(c, ctx.facing, box->width, box->length);
+                spec.inBox = true;
+                spec.boxCorner = Position(corner.x, corner.y, corner.z, ctx.facing);
+                spec.boxFacing = ctx.facing;
+                spec.boxWidth = box->width;
+                spec.boxLength = box->length;
+            }
+            else
+                opt.MarkBad("inbox");
+        }
+        // crawl from=<yd>:<bearing>; soak / crawl mark=<n>; circle around=<yd>:<n>; circle drop= judge=prefer.
+        if (s == "crawl" && opt.Has("from"))
+        {
+            spec.crawlFrom = Drill::ParseFrom(opt.Str("from", ""));
+            if (!spec.crawlFrom)
+                opt.MarkBad("from");
+        }
+        if ((s == "soak" || s == "crawl") && opt.Has("mark"))
+        {
+            int32 const n = opt.Int("mark", 0);
+            if (n < 1 || n > static_cast<int32>(Drill::kMaxMark))
+                opt.MarkBad("mark");
+            else
+                spec.markStacks = static_cast<uint32>(n);
+        }
+        if (s == "circle" && opt.Has("around"))
+        {
+            if (std::optional<Drill::PolarSpec> const a = Drill::ParseAround(opt.Str("around", "")))
+            {
+                spec.aroundYd = a->yd;
+                spec.around = static_cast<uint32>(a->second);
+            }
+            else
+                opt.MarkBad("around");
+        }
+        if (s == "circle" && opt.Has("judge"))
+        {
+            spec.dropJudge = opt.Str("judge", "") == "prefer";
+            if (!spec.dropJudge || !spec.drop)
+                opt.MarkBad("judge");
+        }
         if (opt.Has("lethal"))
         {
             spec.lethal = opt.Bool("lethal", false);
@@ -2714,6 +2938,12 @@ namespace
             spec.pick = TestSpec::Pick::Tank;
         else if (pick == "fresh")
             spec.pick = TestSpec::Pick::Fresh;
+        else if (pick == "marked")
+            spec.pick = TestSpec::Pick::Marked;
+        else if (pick == "unmarked")
+            spec.pick = TestSpec::Pick::Unmarked;
+        else if (pick == "healer")
+            spec.pick = TestSpec::Pick::Healer;
         else if (pick != "any")
             opt.MarkBad("pick");
         if (opt.Has("shift"))
@@ -2834,8 +3064,11 @@ namespace
             return "away= moves a point anchor; leave anchor= out";
         if (spec.decoy && s == "lanes" && !spec.safe)
             return "decoy=1 on lanes draws the safe=1 lane as a decoy: add safe=1";
-        if (spec.decoy && (spec.lethal || spec.insideYd > 0.f))
-            return "a decoy is never seen by the bots: no lethal=1 or inside=";
+        if (spec.decoy && (spec.lethal || spec.insideYd > 0.f || spec.inBox))
+            return "a decoy is never seen by the bots: no lethal=1, inside= or inbox=";
+        // Zul'Farrak WP-G1
+        if (spec.around && (spec.grid || spec.unitAnchor || spec.anchorMember || spec.atEach))
+            return "around= lays its circles round a point: not with grid=, anchor= or at=each";
         if (spec.onlyMember && spec.atEach)
             return "only=member makes one member eligible: not with at=each";
         if (spec.drop && !spec.anchorMember && spec.to != TestSpec::To::Member)
@@ -2933,6 +3166,16 @@ namespace
         }), members.end());
         if (members.empty())
             return;
+        // pick=healer (Zul'Farrak WP-G1, the healer walker): a healer by the role provider when there is one.
+        if (spec.pick == TestSpec::Pick::Healer && selected)
+        {
+            std::vector<Player*> healers;
+            for (Player* p : members)
+                if (HasRole(GetRoleProvider().Get(selected, p), Role::Healer))
+                    healers.push_back(p);
+            if (!healers.empty())
+                members = std::move(healers);
+        }
         Player* p = members[dice.rng.Index(static_cast<uint32>(members.size()))];
         Aura* aura = p->GetAura(Ids::SPELL_MARKED_DRILL, p->GetGUID());
         if (!aura)
@@ -3174,20 +3417,50 @@ namespace
         });
     }
 
+    void MatchOwnerLevel(Creature const* owner, Creature* unit);
+
     // Drill step `cast` (Ragefire Chasm WP-G1, MechanicDrill.h): the selected creature casts `c.spell` at its victim
     // (itself with none), not triggered, so a kick, the school lockout after one and the cast rules apply. kick=1 puts
     // it on the encounter's interrupt list first (an entry of the descriptor; NoteNextCast with every=). Judged
     // kCastJudgeLeadMs before the end (Drill::CastFails): a failure is the group's (MissedSoak under the step's tag).
+    // twin=1 (Zul'Farrak WP-G1, Twin Call): a Drill Caster (300404) appears kTwinApartYd to the selected unit's left,
+    // the owner's level, sent at the same victim, gone 1.5 s after the cast; it casts the same spell at the same time
+    // and its cast is judged on its own (both must be kicked: two failures when neither is).
     void ScheduleCast(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec, Drill::CastStep const& c)
     {
-        auto const started = std::make_shared<bool>(false);
-        schedule(delay, [selected = spec.selected, c, started](Creature* testOwner)
+        struct Caster
+        {
+            ObjectGuid guid;
+            bool started = false;
+        };
+        auto const casters = std::make_shared<std::vector<Caster>>();
+        schedule(delay, [selected = spec.selected, c, casters](Creature* testOwner)
         {
             Creature* unit = ObjectAccessor::GetCreature(*testOwner, selected);
             if (!unit || !unit->IsInWorld() || !unit->IsAlive())
                 return;
             Registry& reg = Registry::GetOrCreate(testOwner->GetMap());
             Milliseconds const now = GameTime::GetGameTimeMS();
+            std::vector<Creature*> heads{ unit };
+            if (c.twin)
+            {
+                float const o = unit->GetOrientation() + Geo::kPi / 2.f;
+                float const x = unit->GetPositionX() + Drill::kTwinApartYd * std::cos(o);
+                float const y = unit->GetPositionY() + Drill::kTwinApartYd * std::sin(o);
+                if (TempSummon* twin = testOwner->SummonCreature(Ids::NPC_DRILL_CASTER, x, y,
+                    GroundZ(testOwner, x, y, unit->GetPositionZ()), unit->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN,
+                    c.ms + 1500))
+                {
+                    reg.TrackUnit(testOwner->GetGUID(), twin->GetGUID(), Ids::NPC_DRILL_CASTER, true);
+                    MatchOwnerLevel(testOwner, twin);
+                    if (Unit* victim = unit->GetVictim())
+                        if (twin->IsAIEnabled && twin->AI())
+                            twin->AI()->AttackStart(victim);
+                    heads.push_back(twin);
+                }
+                else
+                    LOG_DEBUG("module.bossmechanics", "Drill cast twin: could not summon {}", Ids::NPC_DRILL_CASTER);
+            }
             if (c.kick)
             {
                 if (unit != testOwner)
@@ -3200,37 +3473,355 @@ namespace
                     d.interrupts.emplace_back(0, c.spell, 1, std::chrono::milliseconds(c.everyMs));
                 });
                 if (c.everyMs)
-                    reg.NoteNextCast(unit->GetGUID(), unit->GetEntry(), c.spell, now + Milliseconds(c.everyMs));
+                    for (Creature* head : heads)
+                        reg.NoteNextCast(head->GetGUID(), head->GetEntry(), c.spell, now + Milliseconds(c.everyMs));
             }
-            Unit* target = unit->GetVictim() ? unit->GetVictim() : unit;
-            SpellCastResult const result = unit->CastSpell(target, c.spell, false);
-            *started = result == SPELL_CAST_OK;
-            if (*started)
-                reg.NoteCastStarted(unit->GetGUID(), unit->GetEntry(), c.spell, now);
-            else
-                LOG_DEBUG("module.bossmechanics", "Drill cast {} by {} failed ({})", c.spell,
-                    unit->GetGUID().ToString(), static_cast<uint32>(result));
+            for (Creature* head : heads)
+            {
+                Unit* target = unit->GetVictim() ? unit->GetVictim() : unit;
+                SpellCastResult const result = head->CastSpell(target, c.spell, false);
+                casters->push_back({ head->GetGUID(), result == SPELL_CAST_OK });
+                if (result == SPELL_CAST_OK)
+                    reg.NoteCastStarted(head->GetGUID(), head->GetEntry(), c.spell, now);
+                else
+                    LOG_DEBUG("module.bossmechanics", "Drill cast {} by {} failed ({})", c.spell,
+                        head->GetGUID().ToString(), static_cast<uint32>(result));
+            }
+            // The twin that could not be summoned is a cast nobody had to kick: judged as never started.
+            if (c.twin && heads.size() < 2)
+                casters->push_back({ ObjectGuid::Empty, false });
         });
-        schedule(delay + Milliseconds(c.ms - Drill::kCastJudgeLeadMs), [selected = spec.selected, c, started](
+        schedule(delay + Milliseconds(c.ms - Drill::kCastJudgeLeadMs), [selected = spec.selected, c, casters](
             Creature* testOwner)
         {
             Creature* unit = ObjectAccessor::GetCreature(*testOwner, selected);
             if (!unit || !unit->IsInWorld() || !unit->IsAlive())
                 return;
-            bool running = false;
-            for (CurrentSpellTypes slot : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
-                if (Spell const* spell = unit->GetCurrentSpell(slot))
-                    running = running || spell->GetSpellInfo()->Id == c.spell;
-            if (!Drill::CastFails(c.kick, *started, running))
-                return;
-            FailureEvent e;
-            e.encounter = testOwner->GetGUID();
-            e.tag = c.ledgerTag;
-            e.kind = Kind::Soak;
-            e.type = FailureEvent::Type::MissedSoak;
-            e.at = GameTime::GetGameTimeMS();
-            Registry::GetOrCreate(testOwner->GetMap()).PostFailure(e);
+            for (Caster const& caster : *casters)
+            {
+                Creature* head = caster.guid.IsEmpty() ? nullptr : ObjectAccessor::GetCreature(*testOwner, caster.guid);
+                bool running = false;
+                if (head && head->IsInWorld() && head->IsAlive())
+                    for (CurrentSpellTypes slot : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+                        if (Spell const* spell = head->GetCurrentSpell(slot))
+                            running = running || spell->GetSpellInfo()->Id == c.spell;
+                if (!Drill::CastFails(c.kick, caster.started, running))
+                    continue;
+                FailureEvent e;
+                e.encounter = testOwner->GetGUID();
+                e.tag = c.ledgerTag;
+                e.kind = Kind::Soak;
+                e.type = FailureEvent::Type::MissedSoak;
+                e.at = GameTime::GetGameTimeMS();
+                Registry::GetOrCreate(testOwner->GetMap()).PostFailure(e);
+            }
         });
+    }
+
+    // Drill step `afflict` (Zul'Farrak WP-G1, MechanicDrill.h; Antu'sul AS3 / AS7): the spell on `a.count` members
+    // (pick=same: the last pick first, a `marker` before it), cast by the owner as the descriptor drills' `debuff`,
+    // and on the encounter's dispel list held while another player stands within `a.lone` of the carrier (Calcify's
+    // spacing rule, §7 #9 A). Every kAfflictPollMs until `a.ms` a carrier that lost it (a dispel: it outlasts the step)
+    // makes every other alive member within `a.burst` a Hit failure (Shatter). At the end it comes off the rest.
+    void ScheduleAfflict(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::AfflictStep const& a, RngPtr const& rng)
+    {
+        auto const carriers = std::make_shared<std::vector<ObjectGuid>>();
+        schedule(delay, [spec, a, rng, carriers](Creature* testOwner)
+        {
+            Registry& reg = Registry::GetOrCreate(testOwner->GetMap());
+            reg.AddScopePlayer(testOwner->GetGUID(), spec.gm);
+            reg.EditDescriptor(testOwner->GetGUID(), [&a](Descriptor& d)
+            {
+                for (DispelEntry const& e : d.dispels)
+                    if (e.auraId == a.spell)
+                        return;
+                d.dispels.emplace_back(a.spell, 1, false, std::chrono::milliseconds(0),
+                    BossMechanics::Condition::Not(BossMechanics::Condition::NearPlayer(a.lone)));
+            });
+            TestSpec pick = spec;
+            pick.pick = a.same ? TestSpec::Pick::Same : TestSpec::Pick::Any;
+            for (uint32 k = 0; k < a.count; ++k)
+            {
+                Player* p = PickMember(testOwner, pick, *rng);
+                pick.pick = TestSpec::Pick::Fresh;
+                if (!p || std::find(carriers->begin(), carriers->end(), p->GetGUID()) != carriers->end())
+                    continue;
+                if (testOwner->AddAura(a.spell, p))
+                    carriers->push_back(p->GetGUID());
+            }
+        });
+        uint32 const polls = a.ms / Drill::kAfflictPollMs;
+        for (uint32 k = 1; k <= polls; ++k)
+        {
+            bool const last = k == polls;
+            schedule(delay + Milliseconds(static_cast<int64>(k) * Drill::kAfflictPollMs), [spec, a, carriers, last](
+                Creature* testOwner)
+            {
+                std::vector<Player*> const members = GroupMembers(testOwner, spec.gm, spec.includeGm);
+                for (auto it = carriers->begin(); it != carriers->end();)
+                {
+                    Player* carrier = ObjectAccessor::GetPlayer(*testOwner, *it);
+                    if (!carrier || !carrier->IsAlive())
+                    {
+                        it = carriers->erase(it);
+                        continue;
+                    }
+                    if (carrier->HasAura(a.spell))
+                    {
+                        if (last)
+                            carrier->RemoveAurasDueToSpell(a.spell);
+                        ++it;
+                        continue;
+                    }
+                    Geo::Vec3 const at{ carrier->GetPositionX(), carrier->GetPositionY(), carrier->GetPositionZ() };
+                    for (Player const* other : members)
+                        if (other != carrier && other->IsAlive() && Drill::ShatterHits(at, { other->GetPositionX(),
+                            other->GetPositionY(), other->GetPositionZ() }, a.burst))
+                            PostDrillFailure(testOwner, a.ledgerTag, other->GetGUID(), FailureEvent::Type::Hit);
+                    it = carriers->erase(it);
+                }
+            });
+        }
+    }
+
+    // Drill step `partner` (Zul'Farrak WP-G1; Ukorz UK1, Fury of the Sands' meter): a twin of `p.entry` (tracked, the
+    // owner's level, the selected unit's health) `p.apart` yd to the selected unit's left, sent at its victim, for
+    // `p.ms`. The kill order starts on the selected unit and flips every `p.everyMs`: the favored one is a
+    // TargetEntry by guid at priority 2, the other at 1 and ignored by the DPS bots (IgnoreEntry.For(Who::Dps), BM-1:
+    // out of their attacker counts, so no AoE on it). Every `p.tickMs` outside `p.graceMs` of a flip, each DPS member
+    // (by the role provider) whose victim (else selection) is the disfavored unit is an OffSpot failure. At the end the
+    // entries come off and the twin goes.
+    void SchedulePartner(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::PartnerStep const& p)
+    {
+        auto const partner = std::make_shared<ObjectGuid>();
+        auto const order = [](Creature* testOwner, ObjectGuid selected, ObjectGuid twin, bool selectedFavored,
+            bool clear)
+        {
+            uint64 const a = selected.GetRawValue();
+            uint64 const b = twin.GetRawValue();
+            Registry::GetOrCreate(testOwner->GetMap()).EditDescriptor(testOwner->GetGUID(),
+                [a, b, selectedFavored, clear](Descriptor& d)
+            {
+                auto const ours = [a, b](uint64 g) { return g == a || g == b; };
+                d.targets.erase(std::remove_if(d.targets.begin(), d.targets.end(), [&ours](TargetEntry const& e)
+                {
+                    return e.guid && ours(e.guid);
+                }), d.targets.end());
+                d.ignores.erase(std::remove_if(d.ignores.begin(), d.ignores.end(), [&ours](IgnoreEntry const& e)
+                {
+                    return e.guid && ours(e.guid);
+                }), d.ignores.end());
+                if (clear)
+                    return;
+                uint64 const favored = selectedFavored ? a : b;
+                uint64 const other = selectedFavored ? b : a;
+                d.targets.push_back(TargetEntry::ForUnit(favored, 2));
+                d.targets.push_back(TargetEntry::ForUnit(other, 1));
+                d.ignores.push_back(IgnoreEntry::ForUnit(other).For(Who::Dps));
+            });
+        };
+        schedule(delay, [spec, p, partner, order](Creature* testOwner)
+        {
+            Creature* unit = ObjectAccessor::GetCreature(*testOwner, spec.selected);
+            if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                return;
+            float const o = unit->GetOrientation() + Geo::kPi / 2.f;
+            float const x = unit->GetPositionX() + p.apart * std::cos(o);
+            float const y = unit->GetPositionY() + p.apart * std::sin(o);
+            TempSummon* twin = testOwner->SummonCreature(p.entry, x, y, GroundZ(testOwner, x, y, unit->GetPositionZ()),
+                unit->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN, p.ms + 500);
+            if (!twin)
+            {
+                LOG_ERROR("module.bossmechanics", "Drill partner: could not summon creature {}", p.entry);
+                return;
+            }
+            Registry& reg = Registry::GetOrCreate(testOwner->GetMap());
+            reg.AddScopePlayer(testOwner->GetGUID(), spec.gm);
+            reg.TrackUnit(testOwner->GetGUID(), twin->GetGUID(), p.entry, true);
+            if (unit != testOwner)
+                Mechanic::TrackUnit(testOwner, unit);
+            MatchOwnerLevel(testOwner, twin);
+            // A twin boss: the selected unit's health, so it outlives the flips.
+            uint32 const health = std::max<uint32>(1, unit->GetMaxHealth());
+            twin->SetCreateHealth(health);
+            twin->SetStatFlatModifier(UNIT_MOD_HEALTH, BASE_VALUE, float(health));
+            twin->UpdateMaxHealth();
+            twin->SetHealth(std::max<uint32>(1, unit->GetHealth()));
+            if (Unit* victim = unit->GetVictim())
+                if (twin->IsAIEnabled && twin->AI())
+                    twin->AI()->AttackStart(victim);
+            *partner = twin->GetGUID();
+            order(testOwner, spec.selected, *partner, true, false);
+        });
+        for (uint32 at = p.everyMs; at < p.ms; at += p.everyMs)
+            schedule(delay + Milliseconds(at), [spec, partner, order, favored = Drill::PartnerSelectedFavored(at,
+                p.everyMs)](Creature* testOwner)
+            {
+                if (!partner->IsEmpty())
+                    order(testOwner, spec.selected, *partner, favored, false);
+            });
+        for (uint32 at = p.tickMs; at < p.ms; at += p.tickMs)
+        {
+            if (!Drill::PartnerJudged(at, p.everyMs, p.graceMs))
+                continue;
+            schedule(delay + Milliseconds(at), [spec, p, partner, at](Creature* testOwner)
+            {
+                Creature* twin = partner->IsEmpty() ? nullptr : ObjectAccessor::GetCreature(*testOwner, *partner);
+                Unit* unit = ObjectAccessor::GetUnit(*testOwner, spec.selected);
+                if (!twin || !twin->IsAlive() || !unit || !unit->IsAlive())
+                    return;
+                ObjectGuid const disfavored = Drill::PartnerSelectedFavored(at, p.everyMs) ? *partner : spec.selected;
+                for (Player const* m : GroupMembers(testOwner, spec.gm, spec.includeGm))
+                {
+                    Role const role = GetRoleProvider().Get(unit, m);
+                    if (!m->IsAlive() || HasRole(role, Role::Tank) || HasRole(role, Role::Healer))
+                        continue;
+                    ObjectGuid const on = m->GetVictim() ? m->GetVictim()->GetGUID() : m->GetTarget();
+                    if (on == disfavored)
+                        PostDrillFailure(testOwner, p.ledgerTag, m->GetGUID(), FailureEvent::Type::OffSpot);
+                }
+            });
+        }
+        schedule(delay + Milliseconds(p.ms), [spec, partner, order](Creature* testOwner)
+        {
+            if (partner->IsEmpty())
+                return;
+            order(testOwner, spec.selected, *partner, true, true);
+            if (Creature* twin = ObjectAccessor::GetCreature(*testOwner, *partner))
+                twin->DespawnOrUnsummon();
+        });
+    }
+
+    // Drill step `stalk` (Zul'Farrak WP-G1; Ukorz UK3 + UK4, Bladestorm): for `s.ms` the selected creature walks at
+    // `s.speed` yd/s toward a member picked anew every `s.everyMs` (relocated every kZfStalkStepMs, facing it; the
+    // sim's rooted stand-in moves too), never past it. With trail=<r>: a lasting circle of r (no damage, its 0.5 s
+    // warning, `s.trailMs`, tag `s.trailTag`) where it stands each kZfTrailEveryYd walked (Bladestorm's sand). home=1:
+    // back where it started at the end. A creature only: never a player.
+    void ScheduleStalk(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::StalkStep const& st, RngPtr const& rng)
+    {
+        struct State
+        {
+            std::optional<Position> home;
+            ObjectGuid target;
+            Drill::TrailMeter meter;
+        };
+        auto const state = std::make_shared<State>();
+        uint32 const steps = st.ms / Drill::kZfStalkStepMs;
+        float const step = st.speed * static_cast<float>(Drill::kZfStalkStepMs) / 1000.f;
+        for (uint32 k = 0; k <= steps; ++k)
+        {
+            uint32 const elapsed = k * Drill::kZfStalkStepMs;
+            schedule(delay + Milliseconds(elapsed), [spec, st, rng, state, k, steps, elapsed, step](
+                Creature* testOwner)
+            {
+                Creature* unit = ObjectAccessor::GetCreature(*testOwner, spec.selected);
+                if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                    return;
+                if (!state->home)
+                    state->home = unit->GetPosition();
+                if (k == steps)
+                {
+                    if (st.home)
+                        unit->NearTeleportTo(state->home->GetPositionX(), state->home->GetPositionY(),
+                            state->home->GetPositionZ(), state->home->GetOrientation());
+                    return;
+                }
+                if (elapsed % st.everyMs == 0)
+                {
+                    TestSpec pick = spec;
+                    pick.pick = TestSpec::Pick::Any;
+                    if (Player* p = PickMember(testOwner, pick, *rng))
+                        state->target = p->GetGUID();
+                }
+                Player* target = state->target.IsEmpty() ? nullptr : ObjectAccessor::GetPlayer(*unit, state->target);
+                if (!target || !target->IsAlive() || target->GetMap() != unit->GetMap())
+                    return;
+                Geo::Vec3 const from{ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() };
+                Geo::Vec3 const next = Drill::ChaseStep(from, { target->GetPositionX(), target->GetPositionY(),
+                    target->GetPositionZ() }, step / 0.25f, 0.25f);
+                float const walked = std::hypot(next.x - from.x, next.y - from.y);
+                float const z = GroundZ(testOwner, next.x, next.y, unit->GetPositionZ());
+                unit->NearTeleportTo(next.x, next.y, z, unit->GetAngle(target));
+                if (st.trail <= 0.f || !state->meter.Walk(walked))
+                    return;
+                TestSpec trail;
+                trail.shape = "circle";
+                trail.size = st.trail;
+                trail.warn = Milliseconds(500);
+                trail.persist = Milliseconds(st.trailMs);
+                trail.tick = Milliseconds(1000);
+                trail.dmg = -1;
+                trail.pct = 0.f;
+                trail.tag = st.trailTag;
+                trail.gm = spec.gm;
+                trail.includeGm = spec.includeGm;
+                trail.selected = spec.selected;
+                trail.facing = spec.facing;
+                trail.point = Position(next.x, next.y, z, spec.facing);
+                std::string ignored;
+                RegisterTest(testOwner, trail, ignored);
+            });
+        }
+    }
+
+    // Drill step `floes` (Zul'Farrak WP-G1; the Deluge GZ22 / GZ23): the floes' circles round the selected unit's spot
+    // now (FloeCenters, a random rotation) are the strict bounds of every member for `f.ms` (a Spot with no spots
+    // carries them, as Incendius's causeway; Within ... Strict: a bot off them walks on), drawn as lasting decoys.
+    // From `f.graceMs` every `f.tickMs`, each alive member on none of them is an OffSpot failure (in the water). With
+    // `f.inset` the bounds are each floe shrunk by it (the live bots' bounds, D7Hb); the look and the judge keep r.
+    void ScheduleFloes(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::FloesStep const& f, RngPtr const& rng)
+    {
+        auto const centers = std::make_shared<std::vector<Geo::Vec3>>();
+        schedule(delay, [spec, f, rng, centers](Creature* testOwner)
+        {
+            Unit* unit = ObjectAccessor::GetUnit(*testOwner, spec.selected);
+            if (!unit || !unit->IsInWorld())
+                return;
+            *centers = Drill::FloeCenters({ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() }, f,
+                rng->rng.Float(0.f, Geo::kTwoPi));
+            SpotBounds bounds;
+            for (Geo::Vec3& c : *centers)
+            {
+                c.z = GroundZ(testOwner, c.x, c.y, c.z);
+                bounds.Circle(Position(c.x, c.y, c.z, 0.f), f.r - f.inset);     // inset=: the bots' bounds only
+            }
+            bounds.Strict();
+            Registry::GetOrCreate(testOwner->GetMap()).AddScopePlayer(testOwner->GetGUID(), spec.gm);
+            MechanicRef ref = Mechanic::Spot(testOwner, {}, Milliseconds(f.ms));
+            ref.NoTelegraph().Within(bounds).Tag(f.ledgerTag);
+            for (Geo::Vec3 const& c : *centers)
+            {
+                TestSpec look;
+                look.shape = "circle";
+                look.size = f.r;
+                look.warn = Milliseconds(500);
+                look.persist = Milliseconds(f.ms > 500 ? f.ms - 500 : 0);
+                look.decoy = true;
+                look.color = Color::Teal;
+                look.tag = f.ledgerTag;
+                look.gm = spec.gm;
+                look.includeGm = spec.includeGm;
+                look.selected = spec.selected;
+                look.facing = spec.facing;
+                look.point = Position(c.x, c.y, c.z, spec.facing);
+                std::string ignored;
+                RegisterTest(testOwner, look, ignored);
+            }
+        });
+        for (uint32 at = f.graceMs; at < f.ms; at += f.tickMs)
+            schedule(delay + Milliseconds(at), [spec, f, centers](Creature* testOwner)
+            {
+                if (centers->empty())
+                    return;
+                for (Player const* m : GroupMembers(testOwner, spec.gm, spec.includeGm))
+                    if (m->IsAlive() && !Drill::OnAnyFloe(*centers, f.r, { m->GetPositionX(), m->GetPositionY(),
+                        m->GetPositionZ() }))
+                        PostDrillFailure(testOwner, f.ledgerTag, m->GetGUID(), FailureEvent::Type::OffSpot);
+            });
     }
 
     // RunDrill with the run's dice (a program shares one across its entries).
@@ -3269,6 +3860,10 @@ namespace
             std::optional<Drill::LeashStep> leash;      // `leash`
             std::optional<Drill::ChaseSpec> chase;      // `chase` (Scarlet Monastery WP-G1)
             std::optional<uint32> holdFacingMs;         // `holdfacing <ms>` (Scarlet Monastery WP-G2)
+            std::optional<Drill::AfflictStep> afflict;  // `afflict` (Zul'Farrak WP-G1)
+            std::optional<Drill::PartnerStep> partner;  // `partner`
+            std::optional<Drill::StalkStep> stalk;      // `stalk`
+            std::optional<Drill::FloesStep> floes;      // `floes`
             std::vector<uint32> repeats{ 0 };           // repeat= / every=: each repeat's offset (Drill::RepeatOffsets)
             TestSpec spec;
         };
@@ -3306,12 +3901,13 @@ namespace
                 p.spec.includeGm = self;
                 p.spec.selected = boss->GetGUID();
                 std::optional<std::string_view> const pick = Drill::Value(line, "pick");
-                if (pick && *pick != "nontank" && *pick != "any")
+                if (pick && *pick != "nontank" && *pick != "any" && *pick != "healer")
                 {
                     err = Acore::StringFormat("Drill {}: bad step '{}'", def.name, step.line);
                     return false;
                 }
-                p.spec.pick = pick && *pick == "nontank" ? TestSpec::Pick::NonTank : TestSpec::Pick::Any;
+                p.spec.pick = pick && *pick == "nontank" ? TestSpec::Pick::NonTank
+                    : pick && *pick == "healer" ? TestSpec::Pick::Healer : TestSpec::Pick::Any;
                 std::optional<std::string_view> const one = Drill::Value(line, "one");
                 if (one && (*one != "1" || *n))
                 {
@@ -3348,6 +3944,47 @@ namespace
                     p.spec.pick = p.blink->same ? TestSpec::Pick::Same
                         : p.blink->pick == Drill::PickRule::Fresh ? TestSpec::Pick::Fresh
                         : p.blink->pick == Drill::PickRule::NonTank ? TestSpec::Pick::NonTank : TestSpec::Pick::Any;
+                planned.push_back(std::move(p));
+                continue;
+            }
+            if (!head.empty() && (head[0] == "afflict" || head[0] == "partner" || head[0] == "stalk"
+                || head[0] == "floes"))
+            {
+                // Drill-only (MechanicDrill.h "Zul'Farrak shapes"): a dispellable debuff with a spacing rule, a twin
+                // and a flipping kill order, the selected unit walking at members, strict floes; their judges post
+                // to the ledger themselves.
+                if (head[0] == "afflict")
+                    p.afflict = Drill::ParseAfflict(line);
+                else if (head[0] == "partner")
+                    p.partner = Drill::ParsePartner(line);
+                else if (head[0] == "stalk")
+                    p.stalk = Drill::ParseStalk(line);
+                else
+                    p.floes = Drill::ParseFloes(line);
+                if (!p.afflict && !p.partner && !p.stalk && !p.floes)
+                {
+                    err = Acore::StringFormat("Drill {}: bad step '{}' (afflict <spell> <ms> [n=] [pick=any|same] "
+                        "[lone=] [burst=] tag=<n>, partner <entry> <ms> [every=] [grace=] [tick=] [apart=] tag=<n>, "
+                        "stalk <speed> <ms> [every=] [trail=] [trailms=] [trailtag=] [home=1], floes <r> <ms> n=<n> "
+                        "ring=<yd> [center=1] [inset=] [grace=] [tick=] tag=<n>)", def.name, step.line);
+                    return false;
+                }
+                if (p.afflict && !sSpellMgr->GetSpellInfo(p.afflict->spell))
+                {
+                    err = Acore::StringFormat("Drill {}: step '{}': no spell {}", def.name, step.line,
+                        p.afflict->spell);
+                    return false;
+                }
+                if (p.partner && !sObjectMgr->GetCreatureTemplate(p.partner->entry))
+                {
+                    err = Acore::StringFormat("Drill {}: step '{}': no creature {}", def.name, step.line,
+                        p.partner->entry);
+                    return false;
+                }
+                p.spec.gm = scopeGuid;
+                p.spec.includeGm = self;
+                p.spec.selected = boss->GetGUID();
+                p.spec.facing = ctx.facing;
                 planned.push_back(std::move(p));
                 continue;
             }
@@ -3438,6 +4075,14 @@ namespace
                 ScheduleLeash(schedule, delay, p.spec, *p.leash);
             else if (p.chase)
                 ScheduleChase(schedule, delay, p.spec, *p.chase);
+            else if (p.afflict)
+                ScheduleAfflict(schedule, delay, p.spec, *p.afflict, rng);
+            else if (p.partner)
+                SchedulePartner(schedule, delay, p.spec, *p.partner);
+            else if (p.stalk)
+                ScheduleStalk(schedule, delay, p.spec, *p.stalk, rng);
+            else if (p.floes)
+                ScheduleFloes(schedule, delay, p.spec, *p.floes, rng);
             else if (p.holdFacingMs)
                 schedule(delay, [selected = p.spec.selected, ms = *p.holdFacingMs](Creature* testOwner)
                 {

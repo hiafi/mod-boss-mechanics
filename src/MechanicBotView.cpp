@@ -1041,6 +1041,13 @@ namespace BossMechanics
                     Assign::Claimant c;
                     c.guid = g.GetRawValue();
                     c.bot = IsBot(g);
+                    for (Reservation const& r : m.reservations)
+                        if (r.bot == g && r.claim && r.until > _now)
+                            c.claimedSince = r.since.count();
+                    // Zul'Farrak F14: a bot healer is not offered a soak past its tank's reach (the leash would pull
+                    // it back off the claim).
+                    if (c.bot && HealerHeldBack(m, g, shape, live, c.claimedSince != 0))
+                        continue;
                     c.insideNow = _reg.ContainsPoint(m, p->GetPosition(), g);
                     c.stacks = m.ordering.auraSpell ? p->GetAuraCount(m.ordering.auraSpell) : 0;
                     // Scarlet Monastery F7: a player of the rule's last role claims only what the others leave.
@@ -1048,12 +1055,27 @@ namespace BossMechanics
                     float const sd = Solver::SignedDistance(shape, live, ToVec(p->GetPosition()));
                     float const way = std::isfinite(sd) ? std::max(0.f, sd + margin) : 0.f;
                     c.etaMs = ViewRules::SoakEtaMs(_now, way, p->GetSpeed(MOVE_RUN), _opt.params.startDelay);
-                    for (Reservation const& r : m.reservations)
-                        if (r.bot == g && r.claim && r.until > _now)
-                            c.claimedSince = r.since.count();
                     players.push_back(c);
                 }
                 return players;
+            }
+
+            // Zul'Farrak F14 (HealerWithinTankReach): is `g` a healer bot to leave out of this soak's claimants, its
+            // nearest live tank standing farther than healer reach from the soak's shape (Assign::HealerSoakOutOfReach;
+            // `claimed`: it holds a claim on it now)? Every bot gets the same answer: the hook reads `g`'s own role and
+            // tank.
+            bool HealerHeldBack(ActiveMechanic const& m, ObjectGuid const& g, Shape const& shape, Geo::Pose const& live,
+                bool claimed) const
+            {
+                if (!m.healerTankReach || !_hooks || !_hooks->healerTank)
+                    return false;
+                std::optional<Geo::Vec3> const tank = _hooks->healerTank(g);
+                if (!tank)
+                    return false;
+                float const sd = Solver::SignedDistance(shape, live, *tank);
+                if (!std::isfinite(sd))
+                    return false;
+                return Assign::HealerSoakOutOfReach(std::max(0.f, sd), _hooks->healerReachYd, claimed);
             }
 
             Assign::SoakRule SoakRuleOf(ActiveMechanic const& m, Milliseconds from) const

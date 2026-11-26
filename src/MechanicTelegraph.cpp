@@ -466,7 +466,8 @@ namespace BossMechanics::Telegraph
             Geo::Pose const& anchor, VisualPiece const& piece, bool facingMatters, ObjectGuid follow)
         {
             Geo::Pose const at = PiecePose(anchor, piece);
-            Creature* marker = SummonMarker(map, PositionOf(at), owner, piece.display, piece.scale);
+            Creature* marker = SummonMarker(map, PositionOf(at), owner, piece.display, piece.scale,
+                m.markerInvisibility);
             if (!marker)
             {
                 LOG_ERROR(kLog, "Mechanic {}: could not summon a marker (creature {}) at {:.1f} {:.1f} {:.1f}", m.id,
@@ -1053,7 +1054,8 @@ namespace BossMechanics::Telegraph
         }
     }
 
-    Creature* SummonMarker(Map* map, Position const& pos, Unit const* owner, uint32 display, float scale)
+    Creature* SummonMarker(Map* map, Position const& pos, Unit const* owner, uint32 display, float scale,
+        int8 invisibility)
     {
         if (!map)
             return nullptr;
@@ -1086,6 +1088,16 @@ namespace BossMechanics::Telegraph
         {
             marker->SetDisplayId(display, scale);
             marker->SetNativeDisplayId(display);
+        }
+        // Zul'Farrak F11: what an aura 18 (SPELL_AURA_MOD_INVISIBILITY) of this type would set
+        // (AuraEffect::HandleModInvisibility), without an aura: the marker has none to lose, and nothing else touches
+        // a marker's invisibility. Before AddToMap, so the first visibility pass already leaves it out for players
+        // without the detect aura.
+        if (invisibility >= 0 && invisibility < TOTAL_INVISIBILITY_TYPES)
+        {
+            InvisibilityType const type = InvisibilityType(invisibility);
+            marker->m_invisibility.AddFlag(type);
+            marker->m_invisibility.AddValue(type, Rules::kMarkerInvisibilityValue);
         }
         if (!map->AddToMap(marker->ToCreature()))
         {

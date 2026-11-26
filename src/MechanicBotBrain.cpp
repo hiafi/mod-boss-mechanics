@@ -377,6 +377,19 @@ namespace BossMechanics
                 // A bot the others may plan for: one that runs this brain now (the strategy in its current engine) and
                 // is not released. Anything else stands where it stands, like a human (STAGE-M3-R-REPORT m-7).
                 Milliseconds const now = _now;
+                // Zul'Farrak F14: a healer member's leash anchor (its nearest live group tank), as
+                // BotRole::HealerTankYd reads it for that member.
+                _hooks.healerTank = [bot](ObjectGuid guid) -> std::optional<Geo::Vec3>
+                {
+                    Player* member = guid == bot->GetGUID() ? bot : ObjectAccessor::GetPlayer(*bot, guid);
+                    if (!member || !member->IsInCombat() || !PlayerbotAI::IsHeal(member))
+                        return std::nullopt;
+                    Player const* tank = BotRole::NearestGroupTank(member);
+                    if (!tank)
+                        return std::nullopt;
+                    return Geo::Vec3{ tank->GetPositionX(), tank->GetPositionY(), tank->GetPositionZ() };
+                };
+                _hooks.healerReachYd = BotRole::HealerReachYd();
                 _hooks.isBot = [bot, now](ObjectGuid guid)
                 {
                     if (guid == bot->GetGUID())

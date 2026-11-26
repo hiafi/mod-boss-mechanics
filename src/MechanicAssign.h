@@ -132,6 +132,20 @@ namespace BossMechanics::Assign
         return out;
     }
 
+    // Zul'Farrak F14 (MechanicRef::HealerWithinTankReach): a bot healer is offered a Soak only while the soak's shape
+    // lies within healer reach of its nearest live group tank, so the healer leash (LockRules::HealerOutOfReach) never
+    // pulls it back off a claim. `shapeToTankYd`: the tank's distance to the shape (0 when it stands inside it; < 0:
+    // no live tank, nothing to keep in reach). A healer holding a claim (`claimed`) keeps it until the distance
+    // passes reach + kHealerSoakReachKeepYd, so a tank stepping about at the edge does not flip the claim.
+    inline constexpr float kHealerSoakReachKeepYd = 3.f;
+
+    inline bool HealerSoakOutOfReach(float shapeToTankYd, float reachYd, bool claimed)
+    {
+        if (shapeToTankYd < 0.f || reachYd <= 0.f)
+            return false;
+        return shapeToTankYd > reachYd + (claimed ? kHealerSoakReachKeepYd : 0.f);
+    }
+
     // One live Soak of an exclusive group (MechanicRef::OneClaimPerBot, the same tag): its eligible players and rule.
     struct SoakInput { std::vector<Claimant> players; SoakRule rule; };
 

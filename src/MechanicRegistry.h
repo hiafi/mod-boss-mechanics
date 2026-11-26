@@ -601,6 +601,9 @@ namespace BossMechanics
         uint8 soakCount = 0;            // Soak: bodies needed (at least; extra bodies never fail)
         // Soak, OneClaimPerBot: a player claims at most one live Soak of this tag (the flagged ones only).
         bool oneClaimPerBot = false;
+        // Soak, HealerWithinTankReach (Zul'Farrak F14): a bot healer is no claimant while the shape lies past healer
+        // reach of its nearest live group tank (Assign::HealerSoakOutOfReach).
+        bool healerTankReach = false;
         // Soak, MissedSoak(mode) (Stratholme F-2b): when a short pass posts the group MissedSoak; soakWasShort is the
         // previous pass (Judge::PostMissedSoak).
         MissedSoakMode missedSoak = MissedSoakMode::EveryPass;
@@ -646,6 +649,10 @@ namespace BossMechanics
         float drawWidth = 0.f;
         // Decoy() (shape kinds, no mine; Judge::DecoyFits): drawn like a real one, hits nobody, never in the bot view.
         bool decoy = false;
+        // SeenOnlyWith(type) (Zul'Farrak F11): every marker carries invisibility of this type
+        // (Rules::kMarkerInvisibilityValue), so only players with a detect aura of the type see it; the resolve casts
+        // from a hidden caster. -1: seen by everyone.
+        int8 markerInvisibility = -1;
         // Lethal() (Stratholme X4; Judge::LethalFits): bots never plan a way across it (Solver::Hazard::lethal). Bots
         // only.
         bool lethal = false;

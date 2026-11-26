@@ -58,6 +58,9 @@ namespace BossMechanics
         constexpr std::uint32_t kFillMinStepMs = 50;
         // ShrinkProjectileLines: the drawn start moves in steps of the line width, but never smaller than this (yd).
         constexpr float kShrinkMinStepYd = 1.f;
+        // Zul'Farrak F11 (MechanicRef::SeenOnlyWith): a marker's invisibility value of its type. A player sees it
+        // with a detect aura of that type of at least this amount (WorldObject::CanDetectInvisibilityOf).
+        constexpr std::int32_t kMarkerInvisibilityValue = 1;
     }
 
     // ------------------------------------------------------------------------------------------------------------

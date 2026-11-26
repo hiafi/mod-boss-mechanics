@@ -790,6 +790,29 @@ namespace BossMechanics::BotDispel
         new BossMechanicsDispelPlayerScript();
         new BossMechanicsDispelUnitScript();
     }
+
+    bool SelfCureHeld(Player* bot, uint32 auraId)
+    {
+        if (!bot || !auraId)
+            return false;
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        MechanicBotState* st = botAI ? BotBrain::StateOf(botAI) : nullptr;
+        if (!st || !st->descriptor.Active())
+            return false;
+        std::optional<std::size_t> const k = Desc::FindDispel(st->descriptor.descriptor, auraId);
+        return k && HeldJudge(bot, *st)(bot, *k);
+    }
+
+    void InstallSelfDispelHold()
+    {
+#if defined(PLAYERBOTS_HAS_SELF_DISPEL_HOLD_HOOK)
+        PlayerbotAI::SetSelfDispelHoldHook(&SelfCureHeld);
+        LOG_INFO(kLog, "mod-boss-mechanics: installed the self-dispel hold hook (PlayerbotAI::SetSelfDispelHoldHook)");
+#else
+        LOG_INFO(kLog, "mod-boss-mechanics: this mod-playerbots has no PlayerbotAI::SetSelfDispelHoldHook; a bot "
+            "cures its own listed auras whatever the boss descriptor's dispel conditions say");
+#endif
+    }
 }
 
 MechanicBotDispelTargetValue::MechanicBotDispelTargetValue(PlayerbotAI* botAI) : PartyMemberToDispel(botAI)

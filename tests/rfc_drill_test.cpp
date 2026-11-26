@@ -273,14 +273,16 @@ namespace
         CHECK(in && in->yd == 29.f && !in->ahead);
         for (char const* bad : { "", "0", "-3", "13:", "13:x", "13:60", ":4" })
             CHECK(!Drill::ParseInside(bad));
-        // No other drill uses the fixed form, and the plain form reads as before.
+        // Only Ragefire Chasm and Zul'Farrak (the stair's landing, `inside=10:0`) use the fixed form, and the plain
+        // form reads as before.
         for (Drill::Def const& d : Drill::All())
             for (Drill::Step const& s : d.steps)
                 if (std::optional<std::string_view> const v = Drill::Value(s.line, "inside"))
                 {
                     std::optional<Drill::InsideSpec> const p = Drill::ParseInside(*v);
                     CHECK(p.has_value());
-                    CHECK(p && p->ahead.has_value() == (std::string_view(d.name) == "ragefire-chasm-shapes"));
+                    CHECK(p && (p->ahead.has_value() == (std::string_view(d.name) == "ragefire-chasm-shapes")
+                        || std::string_view(d.name) == "zul-farrak-shapes"));
                 }
 
         for (char const* s : { "blink", "cast", "crawl" })

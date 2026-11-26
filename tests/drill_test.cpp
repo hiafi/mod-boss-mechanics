@@ -203,16 +203,22 @@ namespace
                     continue;
                 }
                 if (p.shape == "walk" || p.shape == "leash" || p.shape == "chase" || p.shape == "holdfacing"
-                    || p.shape == "blink" || p.shape == "cast")
+                    || p.shape == "blink" || p.shape == "cast" || p.shape == "afflict" || p.shape == "partner"
+                    || p.shape == "stalk" || p.shape == "floes")
                 {
                     // The drill-only steps of Blackrock Depths WP-G1 (and Scarlet Monastery WP-G1's chase, WP-G2's
-                    // holdfacing, Ragefire Chasm WP-G1's blink and cast): readable by the runner, never a damage step.
+                    // holdfacing, Ragefire Chasm WP-G1's blink and cast, Zul'Farrak WP-G1's afflict, partner, stalk
+                    // and floes): readable by the runner, never a damage step.
                     std::string const line = Drill::StripPlanKeys(step.line);
                     CHECK(p.shape == "walk" ? Drill::ParseWalk(line).has_value()
                         : p.shape == "leash" ? Drill::ParseLeash(line).has_value()
                         : p.shape == "chase" ? Drill::ParseChase(line).has_value()
                         : p.shape == "blink" ? Drill::ParseBlink(line).has_value()
                         : p.shape == "cast" ? Drill::ParseCast(line).has_value()
+                        : p.shape == "afflict" ? Drill::ParseAfflict(line).has_value()
+                        : p.shape == "partner" ? Drill::ParsePartner(line).has_value()
+                        : p.shape == "stalk" ? Drill::ParseStalk(line).has_value()
+                        : p.shape == "floes" ? Drill::ParseFloes(line).has_value()
                         : Drill::ParseHoldFacing(line).has_value());
                     CHECK(!Drill::DamageStep(step.line) && !Drill::Value(step.line, "dmg"));
                     continue;
@@ -240,7 +246,7 @@ namespace
         for (char const* name : { "smite", "cookie", "fenrus", "alexei", "soaks", "ras", "deadmines-followups",
             "sfk-hunt", "scholomance-shapes", "stratholme-followups", "stratholme-drops", "stratholme-jump",
             "blackrock-spire-followups", "rolling-fronts", "blackrock-depths-shapes", "blackrock-depths-shapes-2",
-            "scarlet-monastery-shapes", "scarlet-monastery-shapes-2", "ragefire-chasm-shapes" })
+            "scarlet-monastery-shapes", "scarlet-monastery-shapes-2", "ragefire-chasm-shapes", "zul-farrak-shapes" })
             CHECK(Drill::Find(name) != nullptr);
         CHECK(Drill::Find("nope") == nullptr);
         CHECK(Drill::DamageShape("frontal") && Drill::DamageShape("bait") && !Drill::DamageShape("spot"));
@@ -515,7 +521,8 @@ namespace
     // follow-up once each), stratholme-drops four (30 s cycles, 120 s), stratholme-jump six (20 s cycles, 120 s),
     // the others three (blackrock-spire-followups: 40 s cycles, 120 s, one wave 2 row a cycle); blackrock-depths-shapes
     // and blackrock-depths-shapes-2 two (60 s cycles: the walk or the beam, then the other rows),
-    // and scarlet-monastery-shapes, scarlet-monastery-shapes-2 and ragefire-chasm-shapes three (60 s cycles, 180 s).
+    // and scarlet-monastery-shapes, scarlet-monastery-shapes-2 and ragefire-chasm-shapes three (60 s cycles, 180 s);
+    // zul-farrak-shapes five (60 s cycles, 300 s: thirteen rows, one boss or two a cycle).
     void TestDefaultCycles()
     {
         for (Drill::Def const& d : Drill::All())
@@ -524,8 +531,9 @@ namespace
             CHECK(d.defaultCycles == (name == "alexei" ? 1u
                 : name == "deadmines-followups" || name == "sfk-hunt" || name == "blackrock-depths-shapes"
                     || name == "blackrock-depths-shapes-2" ? 2u
-                : name == "stratholme-drops" ? 4u : name == "stratholme-jump" ? 6u : 3u));
-            CHECK(d.defaultCycles * d.cycleMs <= 180000u);
+                : name == "stratholme-drops" ? 4u : name == "stratholme-jump" ? 6u
+                : name == "zul-farrak-shapes" ? 5u : 3u));
+            CHECK(d.defaultCycles * d.cycleMs <= (name == "zul-farrak-shapes" ? 300000u : 180000u));
         }
     }
 

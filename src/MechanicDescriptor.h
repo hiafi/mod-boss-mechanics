@@ -21,7 +21,9 @@
  * - taunt swaps (Blackrock Spire WP-TS): TauntSwapEntry here, the rules in MechanicTauntSwap.h;
  * - passes (Blackrock Spire WP-PS): PassEntry here, the rules in MechanicPass.h;
  * - holds (Blackrock Depths WP-DS, shared doc BD3): HoldEntry, HoldOn, HeldDamageMask, DamageHeld, KicksHeld (an
- *   Attacks hold is read by IsIgnored); the dispel rank key DispelEntry::MostStacksFirst (OrderDispels).
+ *   Attacks hold is read by IsIgnored); the dispel rank key DispelEntry::MostStacksFirst (OrderDispels);
+ * - Zul'Farrak BM-1: IgnoreEntry::who (an ignore entry for one role, IgnoreConcerns), HealUntilEntry and HealReadPct
+ *   (the Grievous Wound healer rule, read by the playerbots fork's heal read hook).
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DESCRIPTOR_H
@@ -300,7 +302,10 @@ namespace BossMechanics
         bool anyCaster = false;
     };
 
-    // Ignored while `when` holds: no damage from bots or pets, no AoE count.
+    // Ignored while `when` holds: no damage from bots or pets, no AoE count. Zul'Farrak F33 (gap 14): `who` names
+    // the bots that ignore it (default Any: every bot); Ukorz's DPS bots leave the disfavored boss out of their
+    // attacker counts (so most of their area spells stop) while the tank still holds it.
+    //     d.ignores.push_back(IgnoreEntry(NPC_RUUZLU, Condition::Custom(...)).For(Who::Dps));
     struct IgnoreEntry
     {
         IgnoreEntry(std::uint32_t entry_ = 0, Condition when_ = {}) : entry(entry_), when(std::move(when_)) { }
@@ -312,9 +317,35 @@ namespace BossMechanics
             return e;
         }
 
+        IgnoreEntry& For(Who who_)
+        {
+            who = who_;
+            return *this;
+        }
+
         std::uint32_t entry = 0;
         std::uint64_t guid = 0;             // raw ObjectGuid; set: that unit only
         Condition when;
+        Who who = Who::Any;                 // the bots it concerns (Desc::Fits); Any: every bot
+    };
+
+    // Zul'Farrak F17 (the Grievous Wound healer rule, §7 #7): heal a carrier of `auraId` on to `pct`. While a unit
+    // carries the aura (any caster) and its health is below `pct`, bots read it as at most `readAsPct` for their heal
+    // decisions (Desc::HealReadPct, through the playerbots fork's heal read hook), so their healers keep healing it
+    // past the shared 85% trigger line. 80 stays above the emergency lines (Lay on Hands, Sacrifice).
+    //     d.healUntil.emplace_back(SPELL_GRIEVOUS_WOUND, 95.f);
+    constexpr float kHealUntilReadAsPct = 80.f;
+
+    struct HealUntilEntry
+    {
+        HealUntilEntry(std::uint32_t auraId_ = 0, float pct_ = 95.f, float readAsPct_ = kHealUntilReadAsPct)
+            : auraId(auraId_), pct(pct_), readAsPct(readAsPct_)
+        {
+        }
+
+        std::uint32_t auraId = 0;           // the carrier has this aura (0: the entry does nothing)
+        float pct = 95.f;                   // bots heal the carrier on to this percent
+        float readAsPct = kHealUntilReadAsPct;  // ...reading it as at most this while it is below pct
     };
 
     // Blackrock Depths WP-DS (shared doc BD3, aura-conditioned boss data): "hold action A on unit U while U has aura
@@ -624,6 +655,7 @@ namespace BossMechanics
         std::vector<TauntSwapEntry> tauntSwaps;     // Blackrock Spire WP-TS
         std::vector<PassEntry> passes;              // Blackrock Spire WP-PS
         std::vector<HoldEntry> holds;               // Blackrock Depths WP-DS (BD3)
+        std::vector<HealUntilEntry> healUntil;      // Zul'Farrak F17 (Desc::HealReadPct)
         // Auras that mark a charmed player as turned against the group (SFK F1: Arugal's Turned). A charmed player
         // carrying one is a valid attack target for bots, and bots stop healing, buffing and curing it, until the
         // aura or the charm ends. Empty: a charmed teammate stays off limits (the playerbots default).
@@ -633,7 +665,8 @@ namespace BossMechanics
         bool Empty() const
         {
             return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty()
-                && tauntSwaps.empty() && passes.empty() && holds.empty() && hostilePlayerAuras.empty();
+                && tauntSwaps.empty() && passes.empty() && holds.empty() && hostilePlayerAuras.empty()
+                && healUntil.empty();
         }
     };
 }
@@ -1409,20 +1442,42 @@ namespace BossMechanics::Desc
         return std::any_of(d.holds.begin(), d.holds.end(), [action](HoldEntry const& e) { return e.action == action; });
     }
 
-    // Is the unit on the ignore list now? An entry with neither guid nor entry matches nothing. WP-DS: an Attacks hold
-    // that applies counts as an ignore entry (no damage from bots or pets, no AoE count, no kick).
-    inline bool IsIgnored(Descriptor const& d, UnitFacts const& u, Context const& ctx)
+    // Does the ignore entry concern this bot? Zul'Farrak F33: an entry for a role (who not Any) concerns only a bot
+    // that Fits it; with no bot facts (nullptr) only the Any entries do.
+    inline bool IgnoreConcerns(IgnoreEntry const& e, BotFacts const* bot)
+    {
+        return e.who == Who::Any || (bot && Fits(e.who, *bot));
+    }
+
+    // Is the unit on this bot's ignore list now? An entry with neither guid nor entry matches nothing; one for a role
+    // only for a bot of it (IgnoreConcerns). WP-DS: an Attacks hold that applies counts as an ignore entry (no damage
+    // from bots or pets, no AoE count, no kick), for every bot.
+    inline bool IsIgnored(Descriptor const& d, UnitFacts const& u, Context const& ctx,
+        BotFacts const* bot = nullptr)
     {
         for (IgnoreEntry const& e : d.ignores)
         {
             bool const match = e.guid ? e.guid == u.guid : e.entry && e.entry == u.entry;
-            if (match && Holds(e.when, u, ctx))
+            if (match && IgnoreConcerns(e, bot) && Holds(e.when, u, ctx))
                 return true;
         }
         for (HoldEntry const& e : d.holds)
             if (e.action == HoldEntry::Action::Attacks && HoldOn(e, u, ctx))
                 return true;
         return false;
+    }
+
+    // Zul'Farrak F17: the health percent a bot reads for a unit with `pct` health (HealUntilEntry). Below an entry's
+    // pct while the unit carries its aura (`hasAura(auraId)`): at most the entry's readAsPct; several such entries: the
+    // lowest. Otherwise (no aura, at or above pct, an entry with aura 0) `pct` unchanged. Never raises the value.
+    template <class HasAura>
+    float HealReadPct(std::vector<HealUntilEntry> const& entries, float pct, HasAura&& hasAura)
+    {
+        float out = pct;
+        for (HealUntilEntry const& e : entries)
+            if (e.auraId && pct < e.pct && hasAura(e.auraId))
+                out = std::min(out, e.readAsPct);
+        return out;
     }
 
     // Is the unit a player turned against the group now: a charmed player carrying one of the descriptor's
@@ -1516,7 +1571,7 @@ namespace BossMechanics::Desc
         for (std::size_t i = 0; i < candidates.size(); ++i)
         {
             UnitFacts const* u = candidates[i].facts;
-            if (!u || !u->alive || IsIgnored(d, *u, ctx))
+            if (!u || !u->alive || IsIgnored(d, *u, ctx, &bot))
                 continue;
             std::optional<std::size_t> const entry = MatchTarget(d, *u, bot, ctx);
             if (!entry && u->guid != owner)

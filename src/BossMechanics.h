@@ -139,6 +139,11 @@ namespace BossMechanics
         // Soak: among the live Soaks of this tag that set it too, a bot claims at most one (many small pickups at once,
         // Malicia's souls); without it each Soak ranks its claimers alone and one bot can claim them all.
         MechanicRef& OneClaimPerBot();
+        // Soak (Zul'Farrak F14): a bot healer is not offered it (never a claimer, so it keeps out of it) while the
+        // shape lies farther than healer reach (HealDistance - 2, 36.5 yd) from the healer's nearest live group tank;
+        // a claim it holds is kept until that passes reach + Assign::kHealerSoakReachKeepYd. Humans and the other
+        // roles are unaffected; so the healer leash never fights the soak (a soul 60 yd out). Bots only.
+        MechanicRef& HealerWithinTankReach();
         // Soak (Stratholme F-2b): when a pass with fewer bodies inside than the count posts the group MissedSoak.
         // Default EveryPass; a lasting Soak judged every pass wants OnChange (the first short pass, then again only
         // after a full one) or Never (the cost is elsewhere). Judge::PostMissedSoak.
@@ -169,6 +174,11 @@ namespace BossMechanics
         MechanicRef& Tag(uint32 tag);
         MechanicRef& NoTelegraph();
         MechanicRef& NoFillTimer();                     // outline only until the danger is live (no growing fill)
+        // Any kind that draws, in the registering statement (Zul'Farrak F11, §7 #48): its markers carry invisibility
+        // of `type` (InvisibilityType 0-11; Zum'rah's spirit world: 11), so only players with a detect aura
+        // (SPELL_AURA_MOD_INVISIBILITY_DETECT) of that type see them. The hitbox, the resolve (cast from a hidden
+        // caster) and the bots (they read the registry) are unchanged.
+        MechanicRef& SeenOnlyWith(uint8 invisibilityType);
         // Zone/Frontal, not a mine (Judge::DecoyFits), in the registering statement: drawn exactly like a real one,
         // but its resolve hits nobody (no damage, failure, Weakened, rider or onHit; onResolve fires with no hits)
         // and bots never see it, so they treat its ground as safe (Jandice's heroic fake sigil).

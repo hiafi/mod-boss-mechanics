@@ -81,15 +81,18 @@ namespace BossMechanics
                 bool const ownerLive = owner && owner->IsInWorld() && owner->IsAlive();
 
                 // Caster: the carrier's marker (Spread/RunOut), else the first marker, else a hidden marker at the
-                // pose for this cast only (NoTelegraph, Bait, or markers lost).
+                // pose for this cast only (NoTelegraph, Bait, or markers lost). Zul'Farrak F11: never an invisible
+                // marker (SeenOnlyWith): an invisible unit does not detect a player who cannot detect it
+                // (WorldObject::CanDetectInvisibilityOf), so such a mechanic always casts from a hidden marker.
                 Creature* caster = nullptr;
-                if (!m.ctx.carrier.IsEmpty())
+                bool const markersInvisible = !Judge::ResolveFromMarker(m.markerInvisibility);
+                if (!markersInvisible && !m.ctx.carrier.IsEmpty())
                 {
                     auto it = m.carrierMarkers.find(m.ctx.carrier);
                     if (it != m.carrierMarkers.end())
                         caster = map->GetCreature(it->second);
                 }
-                if (!caster && !m.markers.empty())
+                if (!caster && !markersInvisible && !m.markers.empty())
                     caster = map->GetCreature(m.markers.front());
                 bool hidden = false;
                 if (!caster || !caster->IsInWorld() || !caster->IsAlive())

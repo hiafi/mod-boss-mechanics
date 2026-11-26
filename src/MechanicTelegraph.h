@@ -60,8 +60,11 @@ namespace BossMechanics
 
         // A Mechanic Marker at `pos` with the owner's faction, level and phase, gravity off, display and scale set
         // before it enters the map (the first create packet carries them). display 0 keeps the template's invisible
-        // model (a hidden resolve caster). nullptr when the summon fails.
-        Creature* SummonMarker(Map* map, Position const& pos, Unit const* owner, uint32 display, float scale);
+        // model (a hidden resolve caster). invisibility >= 0 (Zul'Farrak F11, MechanicRef::SeenOnlyWith): it carries
+        // invisibility of that type (Rules::kMarkerInvisibilityValue), also set before it enters the map, so a player
+        // without the detect aura never gets it. nullptr when the summon fails.
+        Creature* SummonMarker(Map* map, Position const& pos, Unit const* owner, uint32 display, float scale,
+            int8 invisibility = -1);
 
         // `.mech markers`: one line per live marker within `range` yd of `from` (2D), nearest mechanic first: the
         // mechanic, layer, decoded display, the scale and displays the creature really has, its pose, distance and

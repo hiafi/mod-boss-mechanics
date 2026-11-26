@@ -285,6 +285,8 @@ namespace BossMechanics
     {
         if (!map || !BotGate::IsEnabled())
             return;
+        // Zul'Farrak F-1f: the heal read hook's rows for this map, from this map's thread (BotTargets::HealReadPct).
+        BotTargets::PublishHealReads(map, reg, now);
         BotConfig const& cfg = GetConfig().bots;
         Milliseconds const fastTick(cfg.fastTickMs);
         Milliseconds const margin(cfg.safetyMarginMs);

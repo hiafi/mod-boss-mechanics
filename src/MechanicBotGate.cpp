@@ -119,6 +119,7 @@ namespace
         RegisterAll();
         BotLock::InstallSpecificActionGate();
         BotTargets::InstallTargetFilter();      // M5 WP-T: the ignore list in IsPossibleTarget (fork hook)
+        BotDispel::InstallSelfDispelHold();     // Zul'Farrak F-1f: a held aura on the bot itself (fork hook)
         SetBotAfterTick(&BotAfterTick);
         LOG_INFO(kLog, "mod-boss-mechanics: registered the boss-mechanics strategy, triggers, actions and value "
             "into all ten playerbots class contexts");
