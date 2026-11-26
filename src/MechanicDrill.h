@@ -1450,8 +1450,8 @@ namespace BossMechanics::Drill
     //   stalk <speed> <ms> [every=2000] [trail=0] [trailms=15000] [trailtag=0] [home=1]
     //       the selected unit walks at <speed> yd/s toward a member picked anew every every= ms (Bladestorm); with
     //       trail=<r>, a lasting circle of r (no damage) every kZfTrailEveryYd walked (Bladestorm's trail).
-    //   floes <r> <ms> n=<n> ring=<yd> [centre=1] [grace=2000] [tick=1000] tag=<n>
-    //       n circles of r on a ring round the selected unit (a random rotation; centre=1 adds one on it), the strict
+    //   floes <r> <ms> n=<n> ring=<yd> [center=1] [inset=0] [grace=2000] [tick=1000] tag=<n>
+    //       n circles of r on a ring round the selected unit (a random rotation; center=1 adds one on it), the strict
     //       bounds (Within ... Strict) of every member for <ms>, drawn as decoys; a member on none of them grace= after
     //       the start is an OffSpot failure at each tick (the Deluge's floes).
     // Tags (sweep keys `<Kind>/<tag>`):
@@ -1553,7 +1553,7 @@ namespace BossMechanics::Drill
     constexpr std::uint32_t kZfSoulLifeMs = 16000;      // 55 yd at 4 yd/s take 13 s
     constexpr std::uint32_t kZfDeliveryStacks = 3;      // the walker's own Marked stack plus two Gathered Souls
     constexpr float kZfHealerReachYd = 36.5f;           // MechanicLockRules (HealDistance - 2)
-    constexpr std::uint32_t kZfMinLiveSouls = 6;        // crawling at once at the walk's peak (8 a walk; §3.9 "8 to 10")
+    constexpr std::uint32_t kZfMinLiveSouls = 6;        // crawling at once at the walk's peak (8 a walk; §3.9: 8-10)
     // The Pyramid (D4a, D4b; SP PY1, PY4, PY7; §7 #43: the Block's gap shrinks to the 4 s cast + 1 s).
     constexpr std::uint32_t kZfBlockMs = 4000;
     constexpr std::uint32_t kZfBlockFloorMs = kZfBlockMs + 1000;
@@ -1562,14 +1562,16 @@ namespace BossMechanics::Drill
     constexpr float kZfStairYd = 35.f;
     constexpr float kZfLandingYd = 10.f;                // §3.8: the landing's best disc
     // Ukorz (D6; SP UK1, UK3-UK5, UK12, UK13; §7 #41).
-    constexpr std::uint32_t kZfFlipMs = 15000;
+    // F-1f (D6 / F-1d): the live hysteresis flips about every 10 s on normal and 7 to 8 s on heroic at bot DPS; the
+    // drill is heroic numbers.
+    constexpr std::uint32_t kZfFlipMs = 7500;
     constexpr std::uint32_t kZfFlipGraceMs = 3000;
     constexpr float kZfStormYd = 8.f;
     constexpr float kZfStormSpeedYdS = 5.f;             // D6's walk speed is its own constant (designer question)
     constexpr float kZfTrailYd = 4.f;
     constexpr float kZfTrailEveryYd = 2.f;
     constexpr std::uint32_t kZfStalkStepMs = 250;
-    constexpr float kZfCreepOuterYd = 45.f;
+    constexpr float kZfCreepOuterYd = 60.f;            // D6 Tune::kCreepOuterYd: the mesa corners are 47-49 yd out
     constexpr float kZfCreepStartYd = 30.f;
     constexpr float kZfCreepStepYd = 5.f;               // every 20 s live; every 6 s in the drill
     constexpr float kZfCreepGatedYd = 15.f;             // the last inner radius the bar holds (10: reported)
@@ -1586,6 +1588,8 @@ namespace BossMechanics::Drill
     constexpr float kZfGatherYd = 15.f;
     constexpr float kZfConductiveYd = 6.f;
     constexpr float kZfFloeYd = 8.f;
+    constexpr float kZfFloeInsetYd = 1.f;               // D7Hb s3: the bots' bounds are each floe inset 1 yd
+    constexpr std::uint32_t kZfFloesAlive = 5;          // D7Hb s3: 4.5 to 5.5 alive on average (the center one too)
     constexpr std::uint32_t kZfStrikeEveryMs = 333;     // three a second (ruling 43)
     constexpr float kZfStrikeYd = 3.f;
     constexpr float kZfStrikeScatterYd = 10.f;
@@ -1604,7 +1608,7 @@ namespace BossMechanics::Drill
     // the 36.5 yd leash) and the crew (a Seed RunOut, a Gang Up Stack on a running mark and an Ambush under it inside
     // 4 s, Rain of Fire). Cycle 2 (2/5): the Block (six 1-body Soaks, gaps 12, 10, 8, 6, 5 s, the soaker marked as
     // wounded and never eligible while marked) and the stair (two barrel lanes over the whole stair with the landing
-    // as bounds, two Trampling lanes). Cycle 3 (3/5): Ukorz (the kill order flipping every 15 s on a partner, two
+    // as bounds, two Trampling lanes). Cycle 3 (3/5): Ukorz (the kill order flipping every 7.5 s on a partner, two
     // Bladestorms walking at players with sand trails) and the Creeping Sands (30, 25, 20, 15, then 10 yd, with three
     // Lashes and two pairs of pits). Cycle 4 (4/5): the pool (eleven 14 yd puddles and the pool line, water reported,
     // two 3 s Discharges, two Icicles dropped into the puddles) and the hard mode rows (reported): the loose gather on
@@ -2590,8 +2594,8 @@ namespace BossMechanics::Drill
                     { 57000, "marker 0 cycle=0/5" },
                     // rows 3 and 4, Zum'rah heroic: a walker (Marked 1), a soul every 2 s from graves 30 to 55 yd out
                     // crawling to the cauldron at 4 yd/s (each one taken a Marked stack), the delivery (3 stacks: two
-                    // souls); walker-only wails and graves (seen=11) and living-only echoes. Graves 45 to 58 yd out (§7 #29 A: 60 at
-    // most), so six souls crawl at once at the walk's peak
+                    // souls); walker-only wails and graves (seen=11) and living-only echoes. Graves 45 to 58 yd
+                    // out (§7 #29 A: 60 at most), so six souls crawl at once at the walk's peak
                     { 0, "marker 1 pick=any cycle=1/5" },
                     { 0, "crawl 2 16000 from=50:150 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 tag=9" },
                     { 2000, "crawl 2 16000 from=55:200 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
@@ -2668,9 +2672,9 @@ namespace BossMechanics::Drill
                         "pct=30 tankpct=30 weak=1 cycle=2/5 tag=22" },
                     { 54000, "line 35 3000 width=28 offset=180 shift=11:0 inside=10:0 school=fire pct=50 tankpct=50 "
                         "weak=1 cycle=2/5 tag=21" },
-                    // row 8, Ukorz UK1 + UK3 + UK4 heroic: the kill order flips every 15 s between him and a partner;
+                    // row 8, Ukorz UK1 + UK3 + UK4 heroic: the kill order flips every 7.5 s between him and a partner;
                     // two Bladestorms walking at a new player every 2 s, sand trails behind
-                    { 0, "partner 300405 28000 every=15000 grace=3000 apart=6 cycle=3/5 tag=23" },
+                    { 0, "partner 300405 28000 every=7500 grace=3000 apart=6 cycle=3/5 tag=23" },
                     { 2000, "circle 8 2000 anchor=target persist=8000 tick=1000 pct=15 tankpct=15 cycle=3/5 tag=24" },
                     { 4000, "stalk 5 8000 every=2000 trail=4 trailms=15000 trailtag=25 home=1 cycle=3/5" },
                     { 16000, "circle 8 2000 anchor=target persist=8000 tick=1000 pct=15 tankpct=15 cycle=3/5 "
@@ -2678,26 +2682,26 @@ namespace BossMechanics::Drill
                     { 18000, "stalk 5 8000 every=2000 trail=4 trailms=15000 trailtag=25 home=1 cycle=3/5" },
                     // row 12, the Creeping Sands heroic: 30 to 10 yd, a step every 6 s (live 20 s), three Lashes and
                     // two pairs of pits inside the ring's room
-                    { 30000, "donut 45 2000 inner=30 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                    { 30000, "donut 60 2000 inner=30 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
                         "cycle=3/5 tag=26" },
                     { 34000, "spread 8 2000 inside=30 school=shadow pct=25 tankpct=25 cycle=3/5 tag=28" },
-                    { 36000, "donut 45 2000 inner=25 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                    { 36000, "donut 60 2000 inner=25 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
                         "cycle=3/5 tag=26" },
                     { 38000, "circle 6 1500 at=member pick=fresh inside=25 pct=0 cycle=3/5 tag=29" },
                     { 38000, "circle 6 1500 at=prev persist=15000 tick=1000 pct=0 cycle=3/5 tag=30" },
                     { 38000, "circle 6 1500 at=member pick=fresh inside=25 pct=0 cycle=3/5 tag=29" },
                     { 38000, "circle 6 1500 at=prev persist=15000 tick=1000 pct=0 cycle=3/5 tag=30" },
-                    { 42000, "donut 45 2000 inner=20 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                    { 42000, "donut 60 2000 inner=20 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
                         "cycle=3/5 tag=26" },
                     { 42000, "spread 8 2000 inside=20 school=shadow pct=25 tankpct=25 cycle=3/5 tag=28" },
                     { 47000, "circle 6 1500 at=member pick=fresh inside=20 pct=0 cycle=3/5 tag=29" },
                     { 47000, "circle 6 1500 at=prev persist=10000 tick=1000 pct=0 cycle=3/5 tag=30" },
                     { 47000, "circle 6 1500 at=member pick=fresh inside=20 pct=0 cycle=3/5 tag=29" },
                     { 47000, "circle 6 1500 at=prev persist=10000 tick=1000 pct=0 cycle=3/5 tag=30" },
-                    { 48000, "donut 45 2000 inner=15 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                    { 48000, "donut 60 2000 inner=15 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
                         "cycle=3/5 tag=26" },
                     { 50000, "spread 8 2000 inside=15 school=shadow pct=25 tankpct=25 cycle=3/5 tag=28" },
-                    { 54000, "donut 45 2000 inner=10 at=target persist=4000 tick=1000 school=shadow pct=8 tankpct=8 "
+                    { 54000, "donut 60 2000 inner=10 at=target persist=4000 tick=1000 school=shadow pct=8 tankpct=8 "
                         "cycle=3/5 tag=27" },
                     // row 11, the pool heroic: eleven 14 yd puddles round him and the pool (water, reported), two 3 s
                     // Discharges over all of it, two Icicles (2.5 s, §10) whose target drops into a puddle
@@ -2723,11 +2727,11 @@ namespace BossMechanics::Drill
                     { 30000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
                     { 40000, "walk 10 3000 offset=270 cycle=4/5" },
                     { 42000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
-                    { 44000, "floes 8 7000 n=6 ring=18 centre=1 cycle=4/5 tag=37" },
+                    { 44000, "floes 8 7000 n=4 ring=18 center=1 inset=1 cycle=4/5 tag=37" },
                     { 45000, "circle 3 1500 at=member pick=any scatter=10 repeat=39 every=333 school=nature pct=30 "
                         "weak=1 cycle=4/5 tag=38" },
                     { 46000, "stack 5 4000 anchor=member pick=any cycle=4/5 tag=39" },
-                    { 51000, "floes 8 7000 n=5 ring=17 centre=1 cycle=4/5 tag=37" },
+                    { 51000, "floes 8 7000 n=4 ring=17 center=1 inset=1 cycle=4/5 tag=37" },
                     { 53000, "stack 5 4000 anchor=member pick=any cycle=4/5 tag=39" },
                     { 54000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
                 }, 5 },     // five cycles a run (300 s): the sweep runs zul-farrak-shapes:5
@@ -3475,17 +3479,17 @@ namespace BossMechanics::Drill
     }
 
     // The corner SpotBounds::Box takes (X along `facing` for `length`, Y to its left for `width`) of a box centered on
-    // `centre`.
-    inline Geo::Vec3 BoxCorner(Geo::Vec3 const& centre, float facing, float width, float length)
+    // `center`.
+    inline Geo::Vec3 BoxCorner(Geo::Vec3 const& center, float facing, float width, float length)
     {
-        return Shifted(centre, facing, -length / 2.f, -width / 2.f);
+        return Shifted(center, facing, -length / 2.f, -width / 2.f);
     }
 
     // Is `p` inside that box (the plane)?
-    inline bool InBox(Geo::Vec3 const& centre, float facing, float width, float length, Geo::Vec3 const& p)
+    inline bool InBox(Geo::Vec3 const& center, float facing, float width, float length, Geo::Vec3 const& p)
     {
-        float const dx = p.x - centre.x;
-        float const dy = p.y - centre.y;
+        float const dx = p.x - center.x;
+        float const dy = p.y - center.y;
         float const along = dx * std::cos(facing) + dy * std::sin(facing);
         float const across = -dx * std::sin(facing) + dy * std::cos(facing);
         return std::fabs(along) <= length / 2.f && std::fabs(across) <= width / 2.f;
@@ -3525,10 +3529,10 @@ namespace BossMechanics::Drill
         return PolarSpec{ *yd, static_cast<float>(*n) };
     }
 
-    // Where a `from=` crawl starts: `yd` from `centre` at `bearingDeg` from `facing` (counterclockwise).
-    inline Geo::Vec3 FromPoint(Geo::Vec3 const& centre, float facing, float yd, float bearingDeg)
+    // Where a `from=` crawl starts: `yd` from `center` at `bearingDeg` from `facing` (counterclockwise).
+    inline Geo::Vec3 FromPoint(Geo::Vec3 const& center, float facing, float yd, float bearingDeg)
     {
-        return Shifted(centre, facing + Geo::DegToRad(bearingDeg), yd, 0.f);
+        return Shifted(center, facing + Geo::DegToRad(bearingDeg), yd, 0.f);
     }
 
     // `mark=<n>` (soak, crawl): 1 to kMaxMark Marked (drill) stacks for whoever fills it.
@@ -3732,15 +3736,18 @@ namespace BossMechanics::Drill
         }
     };
 
-    // `floes <r> <ms> n=<n> ring=<yd> [centre=1] [grace=2000] [tick=1000] tag=<n>` (plan keys stripped): r in (0, 20],
-    // ms from 1 s to kMaxWalkMs, n from 1 to 12, ring in (0, 40], grace below ms, tick from 250 ms; nullopt otherwise.
+    // `floes <r> <ms> n=<n> ring=<yd> [center=1] [inset=0] [grace=2000] [tick=1000] tag=<n>` (plan keys stripped): r in
+    // (0, 20], ms from 1 s to kMaxWalkMs, n from 1 to 12, ring in (0, 40], inset in [0, r), grace below ms, tick from
+    // 250 ms; nullopt otherwise. inset= shrinks only the bots' bounds (each floe r - inset, D7Hb's live bounds); the
+    // look and the OffSpot judge keep r.
     struct FloesStep
     {
         float r = 0.f;
         std::uint32_t ms = 0;
         std::uint32_t n = 0;
         float ring = 0.f;
-        bool centre = false;
+        bool center = false;
+        float inset = 0.f;
         std::uint32_t graceMs = 2000;
         std::uint32_t tickMs = 1000;
         std::uint32_t ledgerTag = 0;
@@ -3749,7 +3756,7 @@ namespace BossMechanics::Drill
     inline std::optional<FloesStep> ParseFloes(std::string_view line)
     {
         std::vector<std::string_view> const t = Tokens(line);
-        if (t.size() < 3 || t[0] != "floes" || !OnlyKeys(t, { "n", "ring", "centre", "grace", "tick", "tag" }))
+        if (t.size() < 3 || t[0] != "floes" || !OnlyKeys(t, { "n", "ring", "center", "inset", "grace", "tick", "tag" }))
             return std::nullopt;
         FloesStep f;
         std::optional<float> const r = Number(t[1]);
@@ -3768,11 +3775,18 @@ namespace BossMechanics::Drill
             return std::nullopt;
         f.n = *count;
         f.ring = *ringYd;
-        if (std::optional<std::string_view> const v = Value(line, "centre"))
+        if (std::optional<std::string_view> const v = Value(line, "center"))
         {
             if (*v != "0" && *v != "1")
                 return std::nullopt;
-            f.centre = *v == "1";
+            f.center = *v == "1";
+        }
+        if (std::optional<std::string_view> const v = Value(line, "inset"))
+        {
+            std::optional<float> const k = Number(*v);
+            if (!k || *k < 0.f || *k >= f.r)
+                return std::nullopt;
+            f.inset = *k;
         }
         for (auto [key, field] : { std::pair<std::string_view, std::uint32_t*>{ "grace", &f.graceMs },
             { "tick", &f.tickMs } })
@@ -3788,21 +3802,21 @@ namespace BossMechanics::Drill
         return f;
     }
 
-    // The floes' centres: one on `centre` (with centre=1), then n on the ring from bearing `rotation`.
-    inline std::vector<Geo::Vec3> FloeCentres(Geo::Vec3 const& centre, FloesStep const& f, float rotation)
+    // The floes' centers: one on `center` (with center=1), then n on the ring from bearing `rotation`.
+    inline std::vector<Geo::Vec3> FloeCenters(Geo::Vec3 const& center, FloesStep const& f, float rotation)
     {
         std::vector<Geo::Vec3> out;
-        if (f.centre)
-            out.push_back(centre);
-        for (Geo::Vec3 const& p : RingSpots(centre, f.ring, f.n, rotation))
+        if (f.center)
+            out.push_back(center);
+        for (Geo::Vec3 const& p : RingSpots(center, f.ring, f.n, rotation))
             out.push_back(p);
         return out;
     }
 
     // Is `p` on any floe (the plane)?
-    inline bool OnAnyFloe(std::vector<Geo::Vec3> const& centres, float r, Geo::Vec3 const& p)
+    inline bool OnAnyFloe(std::vector<Geo::Vec3> const& centers, float r, Geo::Vec3 const& p)
     {
-        for (Geo::Vec3 const& c : centres)
+        for (Geo::Vec3 const& c : centers)
         {
             float const dx = p.x - c.x;
             float const dy = p.y - c.y;

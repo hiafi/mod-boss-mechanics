@@ -3768,31 +3768,32 @@ namespace
     }
 
     // Drill step `floes` (Zul'Farrak WP-G1; the Deluge GZ22 / GZ23): the floes' circles round the selected unit's spot
-    // now (FloeCentres, a random rotation) are the strict bounds of every member for `f.ms` (a Spot with no spots
+    // now (FloeCenters, a random rotation) are the strict bounds of every member for `f.ms` (a Spot with no spots
     // carries them, as Incendius's causeway; Within ... Strict: a bot off them walks on), drawn as lasting decoys.
-    // From `f.graceMs` every `f.tickMs`, each alive member on none of them is an OffSpot failure (in the water).
+    // From `f.graceMs` every `f.tickMs`, each alive member on none of them is an OffSpot failure (in the water). With
+    // `f.inset` the bounds are each floe shrunk by it (the live bots' bounds, D7Hb); the look and the judge keep r.
     void ScheduleFloes(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
         Drill::FloesStep const& f, RngPtr const& rng)
     {
-        auto const centres = std::make_shared<std::vector<Geo::Vec3>>();
-        schedule(delay, [spec, f, rng, centres](Creature* testOwner)
+        auto const centers = std::make_shared<std::vector<Geo::Vec3>>();
+        schedule(delay, [spec, f, rng, centers](Creature* testOwner)
         {
             Unit* unit = ObjectAccessor::GetUnit(*testOwner, spec.selected);
             if (!unit || !unit->IsInWorld())
                 return;
-            *centres = Drill::FloeCentres({ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() }, f,
+            *centers = Drill::FloeCenters({ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() }, f,
                 rng->rng.Float(0.f, Geo::kTwoPi));
             SpotBounds bounds;
-            for (Geo::Vec3& c : *centres)
+            for (Geo::Vec3& c : *centers)
             {
                 c.z = GroundZ(testOwner, c.x, c.y, c.z);
-                bounds.Circle(Position(c.x, c.y, c.z, 0.f), f.r);
+                bounds.Circle(Position(c.x, c.y, c.z, 0.f), f.r - f.inset);     // inset=: the bots' bounds only
             }
             bounds.Strict();
             Registry::GetOrCreate(testOwner->GetMap()).AddScopePlayer(testOwner->GetGUID(), spec.gm);
             MechanicRef ref = Mechanic::Spot(testOwner, {}, Milliseconds(f.ms));
             ref.NoTelegraph().Within(bounds).Tag(f.ledgerTag);
-            for (Geo::Vec3 const& c : *centres)
+            for (Geo::Vec3 const& c : *centers)
             {
                 TestSpec look;
                 look.shape = "circle";
@@ -3812,12 +3813,12 @@ namespace
             }
         });
         for (uint32 at = f.graceMs; at < f.ms; at += f.tickMs)
-            schedule(delay + Milliseconds(at), [spec, f, centres](Creature* testOwner)
+            schedule(delay + Milliseconds(at), [spec, f, centers](Creature* testOwner)
             {
-                if (centres->empty())
+                if (centers->empty())
                     return;
                 for (Player const* m : GroupMembers(testOwner, spec.gm, spec.includeGm))
-                    if (m->IsAlive() && !Drill::OnAnyFloe(*centres, f.r, { m->GetPositionX(), m->GetPositionY(),
+                    if (m->IsAlive() && !Drill::OnAnyFloe(*centers, f.r, { m->GetPositionX(), m->GetPositionY(),
                         m->GetPositionZ() }))
                         PostDrillFailure(testOwner, f.ledgerTag, m->GetGUID(), FailureEvent::Type::OffSpot);
             });
@@ -3965,7 +3966,7 @@ namespace
                     err = Acore::StringFormat("Drill {}: bad step '{}' (afflict <spell> <ms> [n=] [pick=any|same] "
                         "[lone=] [burst=] tag=<n>, partner <entry> <ms> [every=] [grace=] [tick=] [apart=] tag=<n>, "
                         "stalk <speed> <ms> [every=] [trail=] [trailms=] [trailtag=] [home=1], floes <r> <ms> n=<n> "
-                        "ring=<yd> [centre=1] [grace=] [tick=] tag=<n>)", def.name, step.line);
+                        "ring=<yd> [center=1] [inset=] [grace=] [tick=] tag=<n>)", def.name, step.line);
                     return false;
                 }
                 if (p.afflict && !sSpellMgr->GetSpellInfo(p.afflict->spell))

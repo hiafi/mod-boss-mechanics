@@ -53,6 +53,7 @@
 #include "Value.h"
 #include <string>
 
+class Map;
 class Player;
 class PlayerbotAI;
 class Unit;
@@ -87,9 +88,13 @@ namespace BossMechanics
 
         // Zul'Farrak F17: the health percent bots read for `unit` (the playerbots fork's heal read hook): `pct`, or
         // less while `unit` carries the aura of a healUntil entry of a live described encounter on its map and is
-        // below that entry's percent (Desc::HealReadPct). Never raises it; `pct` when the map has no registry. Runs
-        // on the unit's map thread.
+        // below that entry's percent (Desc::HealReadPct). Never raises it. F-1f (R-1-FW m4): the hook runs on the
+        // reading bot's map thread and the unit may be on another map, so it reads only the per-map cache
+        // (MechanicHealReadCache.h) PublishHealReads fills, never the unit's registry or auras. Any thread.
         float HealReadPct(Unit const* unit, float pct);
+        // The map's rows of that cache (its players and their pets that carry a healUntil aura now): from the bot
+        // after-tick, on the map's own update thread, every full map update.
+        void PublishHealReads(Map* map, Registry const& reg, Milliseconds now);
 
         // From the glue's latch (world thread): AttackersValue::SetTargetFilter and SetHostileTeammateFilter when the
         // fork has them, and (Zul'Farrak F17) ai::health::SetHealReadHook, else nothing.

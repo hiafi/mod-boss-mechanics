@@ -684,9 +684,9 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
     (`IgnoreEntry.For(Who::Dps)`); a DPS member on the disfavored one outside `grace` of a flip is an OffSpot each
     tick), `stalk <speed> <ms> [every=2000] [trail=<r>] [trailms=15000] [trailtag=<n>] [home=1]` (the selected unit
     walks at a member picked every `every` ms; a lasting no-damage circle of `r` each 2 yd walked) and `floes <r> <ms>
-    n=<n> ring=<yd> [centre=1] [grace=2000] [tick=1000] tag=<n>` (n circles on a ring round the selected unit, plus one
-    on it, the strict bounds of every member for `ms`, drawn as teal decoys; a member on none of them after `grace` is
-    an OffSpot each tick).
+    n=<n> ring=<yd> [center=1] [inset=0] [grace=2000] [tick=1000] tag=<n>` (n circles on a ring round the selected
+    unit, plus one on it, the strict bounds of every member for `ms` (each shrunk by `inset`, the live bots' bounds),
+    drawn as teal decoys; a member on none of them after `grace` is an OffSpot each tick).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -939,28 +939,28 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     this drill alone, 180 s: `mechanics_sweep.py run --programs ragefire-chasm-shapes:3 --duration 180 --iterations 5
     --step 100 --jobs 6 --sweep ragefire-chasm-shapes`.
   - `zul-farrak-shapes` (Zul'Farrak build §3.9, WP-G1; 60 s, five cycles = 300 s, heroic numbers in `pct=`, §10
-    rulings): cycle 0 Theka (TK1 + TK2: two 4 x 30 yd swarm projectiles at 5 yd/s from points 60 degrees either side of your
-    facing, the creature walking 6 yd meanwhile, the turn after it at their end and the 6 yd circle on it as the body
-    lands; normal's single line at 4 yd/s) and Antu'sul (AS6: 6 yd bolts on anyone in a 10 x 42 yd trench, 9 s apart;
-    AS3 / AS7: a 3-stack, then a 5-stack Marked carrier on the dispel list while nobody is within 6 yd, a dispel near
-    others a Hit; AS10: the 5-stack carrier's 6 yd Stack on the creature); cycle 1 Zum'rah (ZR4 / ZR6: a walker, eight
-    souls every 2 s from 45 to 58 yd out crawling at 4 yd/s, each taken a Marked stack, the 3-stack delivery at the
-    cauldron; ZR12-ZR14: walker-only wails and graves `seen=11` next to living-only echoes; §7 #30 A: a healer walker
-    with `healreach=1` souls, leashed 36.5 yd to the tank) and the crew (BC8 Rain of Fire; BC9 the Seed's 10 yd RunOut,
-    BC1 Gang Up on a fresh mark and BC4 the Ambush under it, landing together; an Ambush elsewhere); cycle 2 the
+    rulings): cycle 0 Theka (TK1 + TK2: two 4 x 30 yd swarm projectiles at 5 yd/s from points 60 degrees either side of
+    your facing, the creature walking 6 yd meanwhile, the turn after it at their end and the 6 yd circle on it as the
+    body lands; normal's single line at 4 yd/s) and Antu'sul (AS6: 6 yd bolts on anyone in a 10 x 42 yd trench, 9 s
+    apart; AS3 / AS7: a 3-stack, then a 5-stack Marked carrier on the dispel list while nobody is within 6 yd, a dispel
+    near others a Hit; AS10: the 5-stack carrier's 6 yd Stack on the creature); cycle 1 Zum'rah (ZR4 / ZR6: a walker,
+    eight souls every 2 s from 45 to 58 yd out crawling at 4 yd/s, each taken a Marked stack, the 3-stack delivery at
+    the cauldron; ZR12-ZR14: walker-only wails and graves `seen=11` next to living-only echoes; §7 #30 A: a healer
+    walker with `healreach=1` souls, leashed 36.5 yd to the tank) and the crew (BC8 Rain of Fire; BC9 the Seed's 10 yd
+    RunOut, BC1 Gang Up on a fresh mark and BC4 the Ambush under it, landing together; an Ambush elsewhere); cycle 2 the
     Pyramid (PY1: six 1-body Block soaks 12, 10, 8, 6, 5 s apart, the soaker Marked and kept out until healed; PY4: two
     28 x 35 yd barrel lanes below the landing's 10 yd bounds; PY7: two Trampling lanes); cycle 3 Ukorz (UK1: a twin and
-    the kill order flipping every 15 s; UK3 + UK4: two 8 yd Bladestorms walking at players at 5 yd/s with sand trails;
-    UK13: the donut 30, 25, 20, 15, 10 yd to 45, 6 s a step, with UK12's 8 yd Lashes and UK5's pairs of pits); cycle 4
-    the pool (GZ2 / GZ3: eleven 14 yd puddles on a 30 yd ring and the 57 x 15 yd pool, water reported, two 3 s
-    Discharges; GZ6: two 2.5 s Icicles dropped into a puddle) and the hard mode, reported (GZ19's 15 yd gather on a
-    walking anchor with a 6 yd lasting spread, three Twin Calls, two sets of floes under Storm Strikes three a second,
-    two Storm's Chosen Stacks). Tags 1-8, 12-19, 21-24, 26, 28, 29, 32, 34 gated and barred on the reference members
-    too, 9, 10, 20 group bars, 11, 25, 27, 30, 31, 33, 35-40 reported (`kZfBarTags`, `kZfGroupTags`,
-    `kZfReferenceTags`, `kZfReportedTags`). The live numbers are mirrored by hand from the bosses' Logic headers in
-    mod-dungeon-bosses `ZulFarrak/`: change both together. The sweep runs `zul-farrak-shapes:5`, one sweep for this
-    drill alone, 300 s: `mechanics_sweep.py run --programs zul-farrak-shapes:5 --duration 300 --iterations 5 --step
-    100 --jobs 6 --sweep zul-farrak-shapes`.
+    the kill order flipping every 7.5 s, the heroic pace at bot DPS; UK3 + UK4: two 8 yd Bladestorms walking at players
+    at 5 yd/s with sand trails; UK13: the donut 30, 25, 20, 15, 10 yd to 60 (the whole mesa), 6 s a step, with UK12's 8
+    yd Lashes and UK5's pairs of pits); cycle 4 the pool (GZ2 / GZ3: eleven 14 yd puddles on a 30 yd ring and the 57 x
+    15 yd pool, water reported, two 3 s Discharges; GZ6: two 2.5 s Icicles dropped into a puddle) and the hard mode,
+    reported (GZ19's 15 yd gather on a walking anchor with a 6 yd lasting spread, three Twin Calls, two sets of five
+    floes (bounds inset 1 yd) under Storm Strikes three a second, two Storm's Chosen Stacks). Tags 1-8, 12-19, 21-24,
+    26, 28, 29, 32, 34 gated and barred on the reference members too, 9, 10, 20 group bars, 11, 25, 27, 30, 31, 33,
+    35-40 reported (`kZfBarTags`, `kZfGroupTags`, `kZfReferenceTags`, `kZfReportedTags`). The live numbers are mirrored
+    by hand from the bosses' Logic headers in mod-dungeon-bosses `ZulFarrak/`: change both together. The sweep runs
+    `zul-farrak-shapes:5`, one sweep for this drill alone, 300 s: `mechanics_sweep.py run --programs zul-farrak-shapes:5
+    --duration 300 --iterations 5 --step 100 --jobs 6 --sweep zul-farrak-shapes`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.

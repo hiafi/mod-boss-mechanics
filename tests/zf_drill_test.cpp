@@ -219,7 +219,7 @@ namespace
         for (char const* bad : { "", "10", "10x", "x42", "0x42", "10x0", "10x101", "10x42:", "10x42:60", "10x42:a",
             "-10x42" })
             CHECK(!Drill::ParseInBox(bad));
-        // The box's corner and its inside, facing along +x: 42 long, 10 wide, its centre 19 yd back.
+        // The box's corner and its inside, facing along +x: 42 long, 10 wide, its center 19 yd back.
         Vec3 const boss{ 0.f, 0.f, 0.f };
         Vec3 const c = Drill::Shifted(boss, 0.f, -19.f, 0.f);
         Vec3 const corner = Drill::BoxCorner(c, 0.f, 10.f, 42.f);
@@ -300,16 +300,22 @@ namespace
             drops += meter.Walk(5.f * 0.25f) ? 1 : 0;
         CHECK(drops == 20);         // 40 yd walked in 8 s
 
-        std::optional<Drill::FloesStep> f = Drill::ParseFloes("floes 8 7000 n=6 ring=18 centre=1 tag=37");
-        CHECK(f && f->r == 8.f && f->ms == 7000u && f->n == 6u && f->ring == 18.f && f->centre && f->graceMs == 2000u
+        std::optional<Drill::FloesStep> f = Drill::ParseFloes("floes 8 7000 n=6 ring=18 center=1 tag=37");
+        CHECK(f && f->r == 8.f && f->ms == 7000u && f->n == 6u && f->ring == 18.f && f->center && f->inset == 0.f
+            && f->graceMs == 2000u
             && f->tickMs == 1000u && f->ledgerTag == 37u);
         for (char const* bad : { "floes 8 7000 ring=18 tag=1", "floes 8 7000 n=6 tag=1",
             "floes 0 7000 n=6 ring=18 tag=1",
             "floes 8 500 n=6 ring=18 tag=1", "floes 8 7000 n=13 ring=18 tag=1", "floes 8 7000 n=6 ring=41 tag=1",
-            "floes 8 7000 n=6 ring=18 grace=7000 tag=1", "floes 8 7000 n=6 ring=18 centre=2 tag=1",
+            "floes 8 7000 n=6 ring=18 grace=7000 tag=1", "floes 8 7000 n=6 ring=18 center=2 tag=1",
+            "floes 8 7000 n=6 ring=18 centre=1 tag=1", "floes 8 7000 n=6 ring=18 inset=8 tag=1",
+            "floes 8 7000 n=6 ring=18 inset=-1 tag=1",
             "floes 8 7000 n=6 ring=18" })
             CHECK(!Drill::ParseFloes(bad));
-        std::vector<Vec3> const floes = Drill::FloeCentres(boss, *f, 0.3f);
+        std::optional<Drill::FloesStep> const in =
+            Drill::ParseFloes("floes 8 7000 n=4 ring=18 center=1 inset=1 tag=37");
+        CHECK(in && in->inset == 1.f && in->r == 8.f && in->n == 4u && in->center);
+        std::vector<Vec3> const floes = Drill::FloeCenters(boss, *f, 0.3f);
         CHECK(floes.size() == 7);
         CHECK(Drill::OnAnyFloe(floes, 8.f, boss));
         CHECK(Drill::OnAnyFloe(floes, 8.f, { 18.f * std::cos(0.3f), 18.f * std::sin(0.3f), 0.f }));
@@ -738,9 +744,11 @@ namespace
         for (std::size_t i = 0; i < floes.size(); ++i)
         {
             std::optional<Drill::FloesStep> const f = Drill::ParseFloes(Drill::StripPlanKeys(floes[i].line));
-            CHECK(f && f->r == Drill::kZfFloeYd && f->centre && f->ledgerTag == Drill::kZfTagFloe);
-            CHECK(f->n + 1 >= 6 && f->n + 1 <= 8);     // §3.9: 6 to 8 circles
-            // Separate floes (the ring leaves gaps), the centre one under him: melee reach him from a floe.
+            CHECK(f && f->r == Drill::kZfFloeYd && f->center && f->ledgerTag == Drill::kZfTagFloe);
+            // D7Hb s3: the bots' bounds are each floe inset 1 yd; 4.5 to 5.5 floes alive on average, so 5 a set.
+            CHECK(f->inset == Drill::kZfFloeInsetYd);
+            CHECK(f->n + 1 == Drill::kZfFloesAlive);
+            // Separate floes (the ring leaves gaps), the center one under him: melee reach him from a floe.
             CHECK(Drill::RingSpacing(f->ring, f->n) > 2.f * f->r);
             CHECK(f->ring - f->r > f->r);
             if (i)

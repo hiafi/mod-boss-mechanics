@@ -26,6 +26,7 @@
 #include "MechanicBotState.h"
 #include "MechanicBotTauntSwap.h"
 #include "MechanicDescriptorView.h"
+#include "MechanicHealReadCache.h"
 #include "MechanicRegistry.h"
 #include "ObjectAccessor.h"
 #include "PathGenerator.h"
@@ -585,22 +586,56 @@ void BotTargets::AppendExclusions(PlayerbotAI* botAI, GuidSet& exclusions)
         add(g);
 }
 
+namespace
+{
+    // Zul'Farrak F-1f (R-1-FW m4): what the heal read hook reads. Published per map from its own update thread.
+    HealReadCache<Map const*> sHealReads;
+}
+
+void BotTargets::PublishHealReads(Map* map, Registry const& reg, Milliseconds now)
+{
+    if (!map)
+        return;
+    std::vector<HealUntilEntry> entries;
+    reg.ForEachEncounter([&](Encounter const& e)
+    {
+        if (!e.described || e.ending)
+            return;
+        for (HealUntilEntry const& h : e.descriptor.healUntil)
+            if (h.auraId)
+                entries.push_back(h);
+    });
+    HealReadCache<Map const*>::Rows rows;
+    if (!entries.empty())
+    {
+        auto consider = [&](Unit const* u)
+        {
+            if (!u || !u->IsInWorld() || !u->IsAlive())
+                return;
+            std::vector<HealUntilEntry> hit;
+            for (HealUntilEntry const& h : entries)
+                if (u->HasAura(h.auraId))
+                    hit.push_back(h);
+            if (!hit.empty())
+                rows.emplace_back(u->GetGUID().GetRawValue(), std::move(hit));
+        };
+        for (MapReference const& ref : map->GetPlayers())
+            if (Player* player = ref.GetSource())
+            {
+                consider(player);
+                consider(player->GetPet());
+            }
+    }
+    sHealReads.Publish(map, std::move(rows), static_cast<std::int64_t>(now.count()));
+}
+
 float BotTargets::HealReadPct(Unit const* unit, float pct)
 {
-    if (!unit || !unit->IsInWorld())
+    // Any thread (the reading bot's map thread; the unit may be on another map): the cache only, never the unit's
+    // map registry or auras. The guid is fixed for the unit's life.
+    if (!unit)
         return pct;
-    Registry const* reg = Registry::Get(unit->GetMap());
-    if (!reg)
-        return pct;
-    float out = pct;
-    reg->ForEachEncounter([&](Encounter const& e)
-    {
-        if (!e.described || e.ending || e.descriptor.healUntil.empty())
-            return;
-        out = std::min(out, Desc::HealReadPct(e.descriptor.healUntil, pct,
-            [unit](uint32 aura) { return unit->HasAura(aura); }));
-    });
-    return out;
+    return sHealReads.Read(unit->GetGUID().GetRawValue(), pct, static_cast<std::int64_t>(Now().count()));
 }
 
 void BotTargets::InstallTargetFilter()

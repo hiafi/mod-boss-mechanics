@@ -15,7 +15,9 @@
  *   always without a descriptor, the stock PartyMemberToDispel::Calculate answers unchanged. Stratholme X1: a listed
  *   aura whose entry's `when` does not hold for its member is held: never the listed pick, and while the descriptor
  *   has such an entry the stock answer passes over a member whose every aura of the type is held. A bot's own
- *   self-cure rows (NeedCureTrigger on "self target") read PlayerbotAI::HasAuraToDispel and are not covered.
+ *   self-cure rows (NeedCureTrigger on "self target") read PlayerbotAI::HasAuraToDispel, which skips an aura held
+ *   on the bot itself through the fork's self-dispel hold hook (SelfCureHeld; Zul'Farrak F-1f). Another curable
+ *   aura of the type on the bot still fires the row, and the core then picks the aura it removes at random.
  * - `boss dispel urgent`: an urgent (loss of control) entry, or a deadline entry inside its deadline, on a group
  *   member, cured with the bot's own spell of the right type from the class table (MechanicDispelRules.h), any class.
  *   Its name matches none of the healer cure gates (Priest/Shaman/Druid STOCK_CURE_NAMES, Paladin's "cleanse" /
@@ -58,6 +60,15 @@ namespace BossMechanics
         // its pets) that are urgent now (an `urgent` entry, or a deadline entry inside its deadline) and of a type the
         // bot can cure; 0 = none, or no such entry, or no cure. Bot's map thread.
         uint64 WakeSignature(Player* bot, MechanicBotState const& st);
+
+        // Zul'Farrak F-1f (R-1-A m2, Antu'sul's Calcify): is a listed aura with a `when` held on the bot itself now
+        // (the HeldJudge rule the party value uses, judged on the bot's own view)? The fork's self-dispel hold hook:
+        // PlayerbotAI::HasAuraToDispel(bot, ...) skips it, so the self-cure rows (NeedCureTrigger on "self target")
+        // follow the descriptor too. False without an active descriptor or entry. Bot's map thread.
+        bool SelfCureHeld(Player* bot, uint32 auraId);
+
+        // From the glue's latch (world thread): PlayerbotAI::SetSelfDispelHoldHook when the fork has it.
+        void InstallSelfDispelHold();
     }
 }
 
