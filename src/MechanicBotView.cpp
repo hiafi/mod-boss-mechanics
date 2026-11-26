@@ -1085,6 +1085,7 @@ namespace BossMechanics
                 rule.ordered = m.ordering.auraSpell != 0;
                 rule.ascending = m.ordering.ascending;
                 rule.capStacks = m.ordering.capStacks;
+                rule.minStacks = m.ordering.minStacks;      // Gnomeregan BM-G (F41)
                 rule.deadlineMs = (from - _opt.params.marginMs).count();
                 // A lasting soak whose window is open: a claimer trailing its moving circle keeps the claim
                 // (STAGE-M3-R-REPORT m-5).

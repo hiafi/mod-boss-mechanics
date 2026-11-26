@@ -23,7 +23,9 @@
  * - holds (Blackrock Depths WP-DS, shared doc BD3): HoldEntry, HoldOn, HeldDamageMask, DamageHeld, KicksHeld (an
  *   Attacks hold is read by IsIgnored); the dispel rank key DispelEntry::MostStacksFirst (OrderDispels);
  * - Zul'Farrak BM-1: IgnoreEntry::who (an ignore entry for one role, IgnoreConcerns), HealUntilEntry and HealReadPct
- *   (the Grievous Wound healer rule, read by the playerbots fork's heal read hook).
+ *   (the Grievous Wound healer rule, read by the playerbots fork's heal read hook);
+ * - Gnomeregan BM-G: MoveCostEntry and MoveCostly (Static: a carrier makes no optional move), RangeBandEntry and
+ *   RangeBandFor (a preferred band round the encounter owner for ranged bots), read by the bot brain.
  */
 
 #ifndef MOD_BOSS_MECHANICS_MECHANIC_DESCRIPTOR_H
@@ -348,6 +350,46 @@ namespace BossMechanics
         float readAsPct = kHealUntilReadAsPct;  // ...reading it as at most this while it is below pct
     };
 
+    // Gnomeregan BM-G (HANDOFF §7 #12 A, F19: heroic Electrocutioner's Static). Moving costs a carrier of `auraId`:
+    // while a bot carries more than `aboveStacks` of it (Unit::GetAuraCount, any caster), it makes no optional move.
+    // No repositioning (role solves, the healer's sight and reach walks, the preferred band, a tank's re-facing walk,
+    // a drop rule's walk), no chasing (stock chase and follow, the chase valve and its routes) and no shuffling (the
+    // stock movers are refused in Idle, Watch and Hold). It still answers every mechanic (a danger zone, a Spread, a
+    // region it must stand in), by the shortest way out: its solves drop the role band, spacing, sight and reach
+    // terms, and its escape stops at the first spot that is safe. Several entries: any one that holds.
+    //     d.moveCosts.emplace_back(SPELL_STATIC, 12);     // above 12 Static (13 and more)
+    struct MoveCostEntry
+    {
+        MoveCostEntry(std::uint32_t auraId_ = 0, std::uint32_t aboveStacks_ = 0)
+            : auraId(auraId_), aboveStacks(aboveStacks_)
+        {
+        }
+
+        std::uint32_t auraId = 0;           // the carrier has this aura (0: the entry does nothing)
+        std::uint32_t aboveStacks = 0;      // more stacks than this (0: any stack)
+    };
+
+    // Gnomeregan BM-G (§7 #12 A, F20): ranged bots prefer to stand `minYd` to `maxYd` from the encounter owner (the
+    // boss), 2D. Applies in combat to the bots whose role band is a ranged one (ranged damage dealers and healers) and
+    // that fit `who` (Desc::Fits; Any: both): their role band becomes this band round the owner, and a bot outside it
+    // walks in by a role solve (MechanicBotBrain.cpp StepRangeBand), unless a MoveCostEntry holds for it. The first
+    // entry that fits wins.
+    //     d.rangeBands.emplace_back(11.f, 12.f);      // Electrocutioner: a short step from the donut or the circle
+    struct RangeBandEntry
+    {
+        RangeBandEntry(float minYd_ = 0.f, float maxYd_ = 0.f) : minYd(minYd_), maxYd(maxYd_) { }
+
+        RangeBandEntry& For(Who who_)
+        {
+            who = who_;
+            return *this;
+        }
+
+        float minYd = 0.f;
+        float maxYd = 0.f;                  // <= minYd or not finite: the entry does nothing
+        Who who = Who::Any;                 // which ranged bots (Any: ranged damage dealers and healers)
+    };
+
     // Blackrock Depths WP-DS (shared doc BD3, aura-conditioned boss data): "hold action A on unit U while U has aura
     // X", one rule for Eviscerator's Spell Eater (hold magic damage on him while the shell is up), Angerforge's
     // Commanding Aura (hold interrupts on an add that has it) and any "leave it alone while" case. The bots, not the
@@ -656,6 +698,8 @@ namespace BossMechanics
         std::vector<PassEntry> passes;              // Blackrock Spire WP-PS
         std::vector<HoldEntry> holds;               // Blackrock Depths WP-DS (BD3)
         std::vector<HealUntilEntry> healUntil;      // Zul'Farrak F17 (Desc::HealReadPct)
+        std::vector<MoveCostEntry> moveCosts;       // Gnomeregan BM-G (Desc::MoveCostly)
+        std::vector<RangeBandEntry> rangeBands;     // Gnomeregan BM-G (Desc::RangeBandFor)
         // Auras that mark a charmed player as turned against the group (SFK F1: Arugal's Turned). A charmed player
         // carrying one is a valid attack target for bots, and bots stop healing, buffing and curing it, until the
         // aura or the charm ends. Empty: a charmed teammate stays off limits (the playerbots default).
@@ -666,7 +710,7 @@ namespace BossMechanics
         {
             return interrupts.empty() && dispels.empty() && purges.empty() && targets.empty() && ignores.empty()
                 && tauntSwaps.empty() && passes.empty() && holds.empty() && hostilePlayerAuras.empty()
-                && healUntil.empty();
+                && healUntil.empty() && moveCosts.empty() && rangeBands.empty();
         }
     };
 }
@@ -1478,6 +1522,36 @@ namespace BossMechanics::Desc
             if (e.auraId && pct < e.pct && hasAura(e.auraId))
                 out = std::min(out, e.readAsPct);
         return out;
+    }
+
+    // Gnomeregan BM-G: does a MoveCostEntry hold for a bot? `stacksOf(auraId)` gives the bot's stacks of the aura (0
+    // without it). True when any entry with an aura has more than its aboveStacks.
+    template <class StacksOf>
+    bool MoveCostly(std::vector<MoveCostEntry> const& entries, StacksOf&& stacksOf)
+    {
+        for (MoveCostEntry const& e : entries)
+            if (e.auraId && static_cast<std::uint32_t>(stacksOf(e.auraId)) > e.aboveStacks)
+                return true;
+        return false;
+    }
+
+    // Gnomeregan BM-G: is a RangeBandEntry usable (a finite band with maxYd > minYd >= 0)?
+    inline bool RangeBandValid(RangeBandEntry const& e)
+    {
+        return std::isfinite(e.minYd) && std::isfinite(e.maxYd) && e.minYd >= 0.f && e.maxYd > e.minYd;
+    }
+
+    // Gnomeregan BM-G: the preferred band for a bot (the first valid entry whose `who` fits it), or nullptr. Only a
+    // bot whose role band is a ranged one (`rangedRole`: a healer, or a ranged bot that is not a tank) takes one.
+    inline RangeBandEntry const* RangeBandFor(std::vector<RangeBandEntry> const& entries, BotFacts const& bot,
+        bool rangedRole)
+    {
+        if (!rangedRole)
+            return nullptr;
+        for (RangeBandEntry const& e : entries)
+            if (RangeBandValid(e) && Fits(e.who, bot))
+                return &e;
+        return nullptr;
     }
 
     // Is the unit a player turned against the group now: a charmed player carrying one of the descriptor's

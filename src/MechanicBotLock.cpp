@@ -405,6 +405,8 @@ namespace
         bool landing = false;       // WP-Q2: a gap closer (or the melee chase) refused for its landing
         bool escapeFacing = false;  // M5 CD (C6): a facing-only action refused in Escape (not look-away)
         bool quiet = false;         // M5 WP-F (R m-1): refused without a count (`boss focus` while the bot walks)
+        bool moveCost = false;      // Gnomeregan BM-G: a stock mover refused for a move cost (Static)
+        bool moveCostDodge = false; // ...or a stock dodge let through under it (LockRules::kMoveCostDodges)
     };
 
     Judgement Allow(bool unknownCast = false)
@@ -529,6 +531,36 @@ namespace
             {
                 Judgement j = Blocked(LockVerdict::BlockMove);
                 j.landing = true;
+                return j;
+            }
+        }
+        // Gnomeregan BM-G (§7 #12 A, F19): a bot a MoveCostEntry holds for (Static above 12) makes no optional move.
+        // In Idle, Watch and Hold every stock mover is refused (Escape and Freeze refuse them below anyway), a
+        // movement action, a named mover, a movement spell or a moving item, except a dodge
+        // (LockRules::kMoveCostDodges); target picks and the swing (attack-only, `boss focus`) stay. Our own move and
+        // hold were allowed above.
+        if (st.moveCost && !frozen && mode != MechanicBotMode::Escape && !focus && !IsAttackOnly(action))
+        {
+            bool mover = dynamic_cast<MovementAction*>(action) || IsNamedMover(action);
+            if (!mover && dynamic_cast<UseItemAction*>(action))
+                mover = ItemMoves(botAI, action);
+            if (!mover)
+                if (CastSpellAction* cast = dynamic_cast<CastSpellAction*>(action))
+                    if (uint32 const id = CastSpellIdOf(botAI, cast))
+                        if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
+                            mover = IsMovementSpell(info)
+                                || IsScriptedMover(info, bot, [cast]() -> Unit* { return cast->GetTarget(); });
+            if (LockRules::MoveCostRefusesMover(true, mover, action->getName()))
+            {
+                Judgement j = Blocked(LockVerdict::BlockMove);
+                j.moveCost = true;
+                return j;
+            }
+            // A dodge goes, and the brain does not stop its walk (StepMoveCost) for a while (CountJudgement).
+            if (mover && mode != MechanicBotMode::Hold)
+            {
+                Judgement j = Allow();
+                j.moveCostDodge = true;
                 return j;
             }
         }
@@ -706,6 +738,10 @@ namespace
             ++st.counters.pullBlocks;
         if (j.landing && j.verdict != LockVerdict::Allow)
             ++st.counters.landingBlocks;
+        if (j.moveCost && j.verdict != LockVerdict::Allow)
+            ++st.counters.moveCostLockBlocks;
+        if (j.moveCostDodge && j.verdict == LockVerdict::Allow)
+            st.moveCostDodgeUntil = GameTime::GetGameTimeMS() + Milliseconds(LockRules::kMoveCostDodgeMs);
         switch (j.verdict)
         {
             case LockVerdict::Allow:

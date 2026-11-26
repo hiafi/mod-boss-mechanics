@@ -112,7 +112,7 @@ namespace BossMechanics::Drill
         return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker"
             && shape != "walk" && shape != "leash" && shape != "chase" && shape != "holdfacing" && shape != "crawl"
             && shape != "blink" && shape != "cast" && shape != "afflict" && shape != "partner" && shape != "stalk"
-            && shape != "floes";
+            && shape != "floes" && shape != "lights" && shape != "movecost" && shape != "saturated";
     }
 
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
@@ -1614,6 +1614,205 @@ namespace BossMechanics::Drill
     // two 3 s Discharges, two Icicles dropped into the puddles) and the hard mode rows (reported): the loose gather on
     // a walking anchor, three Twin Calls, two sets of floes under Storm Strikes and two Storm's Chosen Stacks.
 
+    // ---- Gnomeregan shapes (Gnomeregan build §3.9, WP-G1, drill `gnomeregan-shapes`) --------------------------------
+    // The 10 rows of HANDOFF §3.9 on the heroic numbers of their bosses (pct= in the percent mode, tankpct= equal on
+    // every tank-reachable hit, rule 17; SP's Build spec rows, §3.5, §3.6, §7 and §10 rulings). One boss a cycle, six
+    // 60 s cycles (the sweep runs gnomeregan-shapes:6 --duration 360). Each step registers what the boss WP registers
+    // (the SP row is named at each tag); change both together: the boss Logic headers keep the same tag table (LESSONS
+    // A.3 #4), one block per boss: Techbot 1-19, Fallout 20-39, Electrocutioner 40-49, the Alert System 50-59, Crowd
+    // Pummeler 60-69, Thermaplugg 70-79, the Whole Workshop 80-89. Grammar added for it (MechanicCommand.cpp; the
+    // parsers sit before the repeat section of this file):
+    //   pick=marked:<n>
+    //       the member holding exactly n Marked (drill) stacks (else anyone): two Rubber Band owners at 1 and 2 stacks
+    //       keep their own chains. `marker <n> pick=unmarked` marks a member without Marked.
+    //   circle ... exempt=member
+    //       every scope member but the member of the step's pick= (pick=same: the last pick) is eligible: the save
+    //       point that bursts on everyone else (TB6).
+    //   cast ... nokick=1, cast ... twin=1 kill=<n>
+    //       a do-not-kick entry (priority 0) for the spell, so a kick is the failure (Patch with no bug alive);
+    //       the twin (Drill Caster) a kill target of priority n (a duplicating bug first).
+    // And three drill-only steps (they register no damage; their judges post to the ledger):
+    //   lights <angle> <ms> [n=1] [len=30] [speed=12] [dir=1] [start=<deg>|pick=any] [lit=0] [reverse=0] [stop=2000]
+    //          [faster=0] [latch=3000] [ahead=3000] [step=500] tag=<n>
+    //       turning cones on the selected unit (KT-G TurningLights): Spotted is a Hit `Zone/<tag>` once per latch, the
+    //       swept floor a lasting no-damage cone re-registered every step (contacts under tag + 1). See LightsStep.
+    //   movecost <above> <ms> [band=11:12|0]
+    //       BM-G's move cost (more than `above` Marked stacks) and ranged band on the descriptor for `ms`.
+    //   saturated <tick> <ms> tag=<n>
+    //       the selected unit inside an armed lasting pool of the owner: an OffSpot on its victim every tick (VF5).
+    // Tags (sweep keys `<Kind>/<tag>`). The tag is the join between drill and live, never the kind: the drill draws
+    // what the bots see (Spread/44-46 for Chain Bolt and the discharges, Zone/50, 52, 54 for Spotted and the
+    // cameras), while the live fights post those hits as RegistryHit RunOuts (RunOut/44-46, RunOut/50, 52, 54; D3,
+    // D4). mechanics_sweep.py key_tag reads the tag alone, so a bar holds for either kind.
+    constexpr std::uint32_t kGnTagLagSpike = 1;         // TB1 normal: the 5 yd circle where the picked player stood
+    constexpr std::uint32_t kGnTagRubberRunOut = 2;     // TB6 heroic: the RunOut before the save point is set, reported
+    constexpr std::uint32_t kGnTagSavePoint = 3;        // TB6: the 6 yd save point burst on everyone but its owner
+    constexpr std::uint32_t kGnTagRubberSpike = 4;      // TB6: the chained spikes under each owner, 1.5 s apart
+    constexpr std::uint32_t kGnTagBugEcho = 5;          // TB7 heroic: 4 yd at each of up to 12 bugs, on each spike
+    constexpr std::uint32_t kGnTagBattleNet = 6;        // TB8 heroic: the 8 yd net
+    constexpr std::uint32_t kGnTagDuplication = 10;     // TB3: a duplicating head (the stand-in or its bug) not stopped
+    constexpr std::uint32_t kGnTagPatchKick = 11;       // TB4 while a bug lives: Patch not kicked (group)
+    constexpr std::uint32_t kGnTagPatchNoKick = 12;     // TB4 with no bug: the never-kick Patch stopped (group)
+    constexpr std::uint32_t kGnTagSlough = 20;          // VF4 / VF6: the lasting pools (Slough 7-9 yd, the glob's 5 yd)
+    constexpr std::uint32_t kGnTagSaturated = 21;       // VF5: the boss in an armed pool, on its tank (OffSpot, 1 s)
+    constexpr std::uint32_t kGnTagVolleyPool = 22;      // VF3: the 4 yd pool under every player
+    constexpr std::uint32_t kGnTagOoze = 23;            // VF6 heroic: the 5 yd glob, two at once
+    constexpr std::uint32_t kGnTagLeaking = 24;         // VF7 heroic: the Leaking trails (30 pools)
+    constexpr std::uint32_t kGnTagMeltdown = 25;        // VF8 heroic: the 6 yd lasting spread of the 20+ carriers
+    constexpr std::uint32_t kGnTagHalfLife = 26;        // VF9 heroic: the 10 yd Stack for 8+ dose (Stack/26)
+    constexpr std::uint32_t kGnTagHalfLifeOut = 27;     // VF9: the keep-out for the rest (under 8)
+    constexpr std::uint32_t kGnTagJusticeDonut = 40;    // EL2: the platform outside 8 yd
+    constexpr std::uint32_t kGnTagJusticeCircle = 41;   // EL2 heroic: the 15 yd circle, in turn with the donut
+    constexpr std::uint32_t kGnTagMegavolt = 42;        // EL3 heroic: two 40 degree / 30 yd cones at players
+    constexpr std::uint32_t kGnTagChainBoltKick = 43;   // EL4: Chain Bolt nobody kicked (group; expected on heroic)
+    constexpr std::uint32_t kGnTagChainBolt = 44;       // EL4 heroic: the 10 yd spread (jumps within 10 yd)
+    constexpr std::uint32_t kGnTagChainBoltNormal = 45; // EL4 normal: the 6 yd spread
+    constexpr std::uint32_t kGnTagDischarge = 46;       // EL6 heroic: a Static carrier's 10 yd discharge
+    constexpr std::uint32_t kGnTagBand = 47;            // §7 #12 A: a healer past 13 yd of him (OffSpot, 1 s), reported
+    constexpr std::uint32_t kGnTagCarrierDodge = 48;    // EL6 / §7 #12 A: a dodge a Static carrier still makes
+    constexpr std::uint32_t kGnTagSearchlight = 50;     // MA1 normal: Spotted by the 40 degree lock-on light
+    constexpr std::uint32_t kGnTagLights = 52;          // MA2 heroic: Spotted by the two turning 30 degree lights
+    constexpr std::uint32_t kGnTagCameras = 54;         // §7 #21 A: past 30 yd of him (OffSpot every 3 s)
+    constexpr std::uint32_t kGnTagLeftHook = 60;        // CP2: the east (left) half
+    constexpr std::uint32_t kGnTagRightHook = 61;       // CP3: the west (right) half
+    constexpr std::uint32_t kGnTagPummel = 62;          // CP4: within 12 yd
+    constexpr std::uint32_t kGnTagClinch = 63;          // CP6 heroic: 12 to 40 yd
+    constexpr std::uint32_t kGnTagUppercut = 64;        // CP5 heroic: the 8 yd lane
+    constexpr std::uint32_t kGnTagBigOne = 70;          // MT13 heroic: the 8 yd Stack on the walking bomb (Stack/70)
+    constexpr std::uint32_t kGnTagPlate = 71;           // MT4: a plate nobody touched (group)
+    constexpr std::uint32_t kGnTagBombChase = 72;       // MT3: the walking bomb's circle (its mark only), reported
+    constexpr std::uint32_t kGnTagBombBlast = 73;       // MT3: the 8 yd blast where it stops (the chase's tag + 1)
+    constexpr std::uint32_t kGnTagBombRunOut = 74;      // MT3: the RunOut on the mark (others within 8 yd)
+    constexpr std::uint32_t kGnTagMine = 75;            // MT5: a mine set off (the 3 yd trigger)
+    constexpr std::uint32_t kGnTagMineRing = 76;        // MT5: standing in a mine's 6 yd blast ring, reported
+    constexpr std::uint32_t kGnTagDetonator = 77;       // MT14: the Detonator nobody kicked (group)
+    constexpr std::uint32_t kGnTagHmMines = 80;         // MT5 hard mode: the 20 mines
+    constexpr std::uint32_t kGnTagHmPuddles = 81;       // MT19: 45 moving puddles
+    constexpr std::uint32_t kGnTagHmLights = 82;        // MT23: Spotted by the lights on the walking boss
+    constexpr std::uint32_t kGnTagHmFist = 84;          // MT24: the fist's three shapes
+    constexpr std::uint32_t kGnTagHmJustice = 85;       // MT22: the room outside 8 yd of him
+    constexpr std::uint32_t kGnLastTag = kGnTagHmJustice;
+
+    // The lights' swept-floor contacts count one tag past the Spotted tag.
+    constexpr std::uint32_t LightsFloorTag(std::uint32_t spottedTag)
+    {
+        return spottedTag + 1;
+    }
+
+    // Gated per spec run (gates the boss's heroic sign-off; §3.9 "Gates" column).
+    constexpr std::uint32_t kGnBarTags[] = { 1, 3, 4, 5, 6, 20, 21, 22, 23, 24, 25, 26, 27, 40, 41, 42, 44, 45, 46, 48,
+        50, 52, 54, 60, 61, 62, 63, 64, 70, 74, 75 };
+    // Group failures (casts, plates).
+    constexpr std::uint32_t kGnGroupTags[] = { 10, 11, 12, 43, 71, 77 };
+    // Barred on the reference members too: every gated pool takes any member, the tank included (rule 17); Saturated
+    // is the reference tank's.
+    constexpr std::uint32_t kGnReferenceTags[] = { 1, 3, 4, 5, 6, 20, 21, 22, 23, 24, 25, 26, 27, 40, 41, 42, 44, 45,
+        46, 48, 50, 52, 54, 60, 61, 62, 63, 64, 70, 74, 75 };
+    // Reported: the RunOut before the save point, the healer's band, the lights' floors, the bomb's own circle and
+    // blast (the mark is caught by design when nobody kills it), the mine rings, and row 10 (the hard mode, §3.9).
+    constexpr std::uint32_t kGnReportedTags[] = { 2, 47, 51, 53, 72, 73, 76, 80, 81, 82, 83, 84, 85 };
+
+    // Which boss WP each tag gates (§3.9 rows: D1 rows 1-2, D2 rows 3-4, D3 row 5, D4 row 6, D5 row 7, D6 rows 8-9,
+    // D6Hb row 10 reported).
+    inline char const* GnGateOf(std::uint32_t tag)
+    {
+        return tag < 20 ? "D1" : tag < 40 ? "D2" : tag < 50 ? "D3" : tag < 60 ? "D4" : tag < 70 ? "D5"
+            : tag < 80 ? "D6" : "D6Hb";
+    }
+
+    constexpr std::uint32_t kGnCycleMs = 60000;
+    constexpr std::uint32_t kGnCycles = 6;              // 360 s: the sweep runs gnomeregan-shapes:6 --duration 360
+    // Techbot (D1; SP TB1-TB8, §3.6 heroic): the Rubber Band from its start, two owners.
+    constexpr std::uint32_t kGnRubberMs = 5000;         // TB6: the snap-back 5 s after the band starts
+    constexpr std::uint32_t kGnSaveSetMs = 2000;        // TB6: the save point is set at 2 s
+    constexpr std::uint32_t kGnSpikeApartMs = 1500;     // TB6: spikes at 2 s and 3.5 s, 1.5 s each
+    constexpr float kGnSavePointYd = 6.f;
+    constexpr float kGnSpikeYd = 5.f;
+    constexpr float kGnEchoYd = 4.f;
+    constexpr std::uint32_t kGnMaxEchoes = 12;          // §3.9 row 1: up to 12 moving adds
+    // Viscous Fallout (D2; SP VF3-VF9).
+    constexpr float kGnSloughYd = 7.f;                  // grows 1 yd per 10 s live; 7 to 9 yd by re-registration here
+    constexpr float kGnVolleyPoolYd = 4.f;
+    constexpr float kGnOozeYd = 5.f;
+    constexpr std::uint32_t kGnMinPools = 7;            // §3.9 row 3: 7-14 lasting pools
+    constexpr std::uint32_t kGnMinLeaks = 30;           // §3.9 row 3: Leaking trails, 30-60 circles
+    constexpr std::uint32_t kGnHalfLifeStacks = 8;      // §7 #37 A: the bot threshold (Marked stands in for the dose)
+    constexpr float kGnHalfLifeYd = 10.f;
+    constexpr float kGnMeltdownYd = 6.f;
+    // Electrocutioner 6000 (D3; SP EL2-EL6, BM-G).
+    constexpr float kGnJusticeInnerYd = 8.f;
+    // The donut's outer edge as live: the platform plus the walkway, the farthest point plus 2 yd from the platform's
+    // center (MDB GnomerElectro::JusticeOuterYd over JusticeFloor, R-1-A M1; 31.4 yd before the walkway was added).
+    constexpr float kGnJusticeOuterYd = 48.6f;
+    constexpr float kGnJusticeCircleYd = 15.f;
+    constexpr std::uint32_t kGnJusticeMs = 4000;
+    constexpr std::uint32_t kGnStaticAbove = 4;         // BM-G kMoveCostDrillAbove (Marked caps at 10; live 12)
+    constexpr std::uint32_t kGnStaticStacks = 6;        // the drill's carriers: above it
+    constexpr float kGnBandMinYd = 11.f;
+    constexpr float kGnBandMaxYd = 12.f;
+    // The Mobile Alert System (D4; SP MA1-MA4, §7 #21 A).
+    constexpr float kGnSearchlightDeg = 40.f;           // MA1 normal: 40 degrees, 60 degrees swept in 3 s (20 deg/s)
+    constexpr float kGnSearchlightDegPerSec = 20.f;
+    constexpr std::uint32_t kGnSearchlightDimMs = 2000;
+    constexpr float kGnLightDeg = 30.f;                 // MA2 heroic: two opposite 30 degree lights
+    constexpr float kGnLightDegPerSec = 12.f;
+    constexpr std::uint32_t kGnLightDarkMs = 3000;
+    constexpr std::uint32_t kGnLightReverseMs = 15000;  // MA4: every 15 to 25 s live; the shortest in the drill
+    constexpr std::uint32_t kGnLightStopMs = 2000;
+    constexpr float kGnLightFasterPct = 10.f;
+    constexpr float kGnLightYd = 30.f;
+    constexpr std::uint32_t kGnSpottedLatchMs = 3000;   // MA3 (§7 #37 A)
+    // Crowd Pummeler 9-60 (D5; SP CP1-CP7, §7 #28 A): a frame on the selected unit along the run's facing (the
+    // pocket's due south). Heroic: a 1 s call per punch in order, the live marker 0.8 s, punches 1.2 s apart.
+    constexpr std::uint32_t kGnCallMs = 1000;
+    constexpr std::uint32_t kGnLiveMs = 800;
+    constexpr std::uint32_t kGnPunchApartMs = 1200;
+    constexpr float kGnPummelYd = 12.f;
+    constexpr float kGnClinchYd = 40.f;
+    constexpr float kGnHookReachYd = 30.f;
+    constexpr float kGnUppercutWidthYd = 8.f;
+    constexpr float kGnUppercutYd = 25.f;
+
+    // When punch i of an n-punch heroic combination strikes, from its call (KT-G ComboTimeline, Sequential).
+    constexpr std::uint32_t GnPunchStrikeMs(std::uint32_t n, std::uint32_t i)
+    {
+        return n * kGnCallMs + kGnLiveMs + i * kGnPunchApartMs;
+    }
+
+    // Mekgineer Thermaplugg (D6; SP MT3-MT14, §7 #30 A, #31 B, #38 h).
+    constexpr float kGnPlateRingYd = 25.f;
+    constexpr float kGnPlateApartDeg = 51.f;            // the faces: 51 degrees apart, a 103 degree gap behind
+    constexpr float kGnBombSpeedYdS = 4.6f;             // §7 #31 B
+    constexpr float kGnBombBlastYd = 8.f;
+    constexpr float kGnMineTriggerYd = 3.f;
+    constexpr float kGnMineBlastYd = 6.f;
+    constexpr float kGnBigOneSpeedYdS = 3.f;            // §7 #38 h
+    constexpr float kGnBigOneYd = 8.f;
+    // The Whole Workshop (D6Hb; SP MT19-MT24): the fist's frame from a face 50 yd out, facing him.
+    constexpr float kGnFistFaceYd = 50.f;
+    constexpr std::uint32_t kGnFistWindUpMs = 4000;
+    constexpr std::uint32_t kGnFistApartMs = 2500;      // ruling 69
+    constexpr std::uint32_t kGnHmMines = 20;
+    constexpr std::uint32_t kGnHmPuddles = 45;
+    constexpr float kGnHmPuddleSpeedYdS = 2.f;
+
+    // ---- the rows (the drill entry below) ----
+    // Cycle 0 (0/6): Techbot (two normal Lag Spikes; the heroic Rubber Band on two owners at once: a RunOut, then each
+    // owner's save point eligible to everyone else, chained spikes under each owner 1.5 s apart and 12 bug echoes on
+    // each spike near random members; two Battle Nets) and his casts (three Duplications on a twin with a casting-first
+    // kill order, Patch twice as a kick while a bug lives, twice as a never-kick entry). Cycle 1 (1/6): Viscous Fallout
+    // (him following his tank's drag for 36 s while six Sloughs land under him, two globs and their pools, Volley pools
+    // under everyone twice and 30 Leaking pools, Saturated judged; then two 20+ carriers spreading 6 yd and Half-Life
+    // twice: a Stack for 8+ and a keep-out for the rest). Cycle 2 (2/6): Electrocutioner 6000 (the move cost and the
+    // 11-12 yd band for 56 s, two pairs of Static carriers, the donut and the 15 yd circle in turn twice, three pairs
+    // of Megavolt cones, Chain Bolt kicks with the 10 yd and the 6 yd spreads, two discharges, two carrier dodges).
+    // Cycle 3 (3/6): the Alert System (two normal lock-on sweeps, then the two heroic lights for 42 s with reversals
+    // and the speed-up, the 30 yd rule). Cycle 4 (4/6): Crowd Pummeler (combinations of 3, 5 and 8 punches on the frame
+    // with One-Two pairs) and The Big One twice (the stand-in walks back 15 yd at 3 yd/s under a Stack). Cycle 5 (5/6):
+    // Thermaplugg (two plates, then three after an Override, with the lockout; two walking bombs with a RunOut on the
+    // mark; mines under everyone; a Detonator kick) and the hard mode (reported): 20 mines, 45 moving puddles, two
+    // lights on the walking boss, two fist combinations and a Justice donut.
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -2735,6 +2934,222 @@ namespace BossMechanics::Drill
                     { 53000, "stack 5 4000 anchor=member pick=any cycle=4/5 tag=39" },
                     { 54000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
                 }, 5 },     // five cycles a run (300 s): the sweep runs zul-farrak-shapes:5
+            // Gnomeregan build §3.9 (WP-G1): see kGnTagLagSpike above.
+            { "gnomeregan-shapes", "point spikes and two rubber bands with save points for everyone else, "
+                "duplicating twins and kick or never-kick patches, a drag-out from growing pools, a dose stack and "
+                "meltdown spread, a donut and circle in turn under a move cost and a ranged band, turning lights, "
+                "called punch chains, plates with a lockout, walking bombs and mines, a stack on a walking bomb, the "
+                "hard mode's load", 60000,
+                false, {
+                    // row 1, Techbot TB1 normal: two Lag Spikes where a picked player stood
+                    { 0, "circle 5 2000 at=member pick=any pct=40 tankpct=40 weak=1 cycle=0/6 tag=1" },
+                    { 3000, "circle 5 2000 at=member pick=any pct=40 tankpct=40 weak=1 cycle=0/6 tag=1" },
+                    // row 1, TB6 + TB7 heroic: two owners (1 and 2 Marked stacks) run out; at 2 s each one's save
+                    // point (everyone else) and spike; the second spike 1.5 s later; 12 bug echoes on each spike
+                    { 7000, "marker 1 pick=any cycle=0/6" },
+                    { 7000, "marker 2 pick=unmarked cycle=0/6" },
+                    { 7000, "runout 6 2000 at=member pick=marked:1 pct=0 cycle=0/6 tag=2" },
+                    { 7000, "runout 6 2000 at=member pick=marked:2 pct=0 cycle=0/6 tag=2" },
+                    { 9000, "circle 6 3000 at=member pick=marked:1 exempt=member school=arcane pct=60 tankpct=60 "
+                        "cycle=0/6 tag=3" },
+                    { 9000, "circle 6 3000 at=member pick=marked:2 exempt=member school=arcane pct=60 tankpct=60 "
+                        "cycle=0/6 tag=3" },
+                    { 9000, "circle 5 1500 at=member pick=marked:1 school=arcane pct=60 tankpct=60 weak=1 cycle=0/6 "
+                        "tag=4" },
+                    { 9000, "circle 5 1500 at=member pick=marked:2 school=arcane pct=60 tankpct=60 weak=1 cycle=0/6 "
+                        "tag=4" },
+                    { 9000, "circle 4 2000 at=member pick=any scatter=4 repeat=12 every=50 pct=40 tankpct=40 weak=1 "
+                        "cycle=0/6 tag=5" },
+                    { 10500, "circle 5 1500 at=member pick=marked:1 school=arcane pct=60 tankpct=60 weak=1 cycle=0/6 "
+                        "tag=4" },
+                    { 10500, "circle 5 1500 at=member pick=marked:2 school=arcane pct=60 tankpct=60 weak=1 cycle=0/6 "
+                        "tag=4" },
+                    { 10500, "circle 4 2000 at=member pick=any scatter=4 repeat=12 every=50 pct=40 tankpct=40 weak=1 "
+                        "cycle=0/6 tag=5" },
+                    { 13500, "marker 0 cycle=0/6" },
+                    // row 1, TB8 heroic: Battle Net twice
+                    { 15000, "circle 8 1500 at=member pick=any pct=20 tankpct=20 weak=1 cycle=0/6 tag=6" },
+                    { 20000, "circle 8 1500 at=member pick=any pct=20 tankpct=20 weak=1 cycle=0/6 tag=6" },
+                    // row 2, TB3 + TB4: a duplicating twin (a kill target while it casts), Patch kicked while a bug
+                    // lives (205011), Patch never kicked with none (205013, a do-not-kick entry)
+                    { 26000, "cast 205010 2000 kick=1 twin=1 kill=5 cycle=0/6 tag=10" },
+                    { 31000, "cast 205011 2500 kick=1 cycle=0/6 tag=11" },
+                    { 36000, "cast 205010 2000 kick=1 twin=1 kill=5 cycle=0/6 tag=10" },
+                    { 41000, "cast 205013 2500 nokick=1 cycle=0/6 tag=12" },
+                    { 46000, "cast 205010 2000 kick=1 twin=1 kill=5 cycle=0/6 tag=10" },
+                    { 51000, "cast 205011 2500 kick=1 cycle=0/6 tag=11" },
+                    { 55500, "cast 205013 2500 nokick=1 cycle=0/6 tag=12" },
+                    // row 3, Viscous Fallout heroic: he follows his tank for 36 s (the drag-out, L47); Saturated
+                    // judged on armed pools; six Sloughs (7 to 9 yd) under him, two globs and their pools, Volley pools
+                    // under everyone twice, Leaking pools under everyone every 3 s (30)
+                    { 0, "chase 25 36000 home=1 cycle=1/6" },
+                    { 0, "saturated 1000 36000 cycle=1/6 tag=21" },
+                    { 0, "circle 7 2000 at=target persist=34000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 3000, "circle 4 1500 at=each persist=20000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=22" },
+                    { 6000, "circle 7 2000 at=target persist=28000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 9000, "circle 5 2000 at=member pick=fresh school=nature pct=60 tankpct=60 weak=1 cycle=1/6 "
+                        "tag=23" },
+                    { 9000, "circle 5 2000 at=prev persist=25000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 9000, "circle 5 2000 at=member pick=fresh school=nature pct=60 tankpct=60 weak=1 cycle=1/6 "
+                        "tag=23" },
+                    { 9000, "circle 5 2000 at=prev persist=25000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 12000, "circle 8 2000 at=target persist=22000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 15000, "circle 4 1500 at=each persist=19500 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=22" },
+                    { 16000, "circle 4 1500 at=each persist=8000 tick=1000 school=nature pct=8 tankpct=8 repeat=6 "
+                        "every=3000 cycle=1/6 tag=24" },
+                    { 18000, "circle 8 2000 at=target persist=16000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 24000, "circle 9 2000 at=target persist=10000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    { 30000, "circle 9 2000 at=target persist=4000 tick=1000 school=nature pct=8 tankpct=8 cycle=1/6 "
+                        "tag=20" },
+                    // row 4, VF8 + VF9 heroic: two 20+ carriers (Marked 10) and an 8+ one (Marked 8); the carriers'
+                    // lasting 6 yd spread, Half-Life twice: a Stack on him for 8+ and a keep-out for the rest
+                    { 38000, "marker 10 pick=any cycle=1/6" },
+                    { 38000, "marker 10 pick=any cycle=1/6" },
+                    { 38000, "marker 8 pick=any cycle=1/6" },
+                    { 40000, "spread 6 2000 self=205009:10 persist=14000 tick=1000 school=nature pct=5 tankpct=5 "
+                        "cycle=1/6 tag=25" },
+                    { 42000, "stack 10 3000 anchor=target aura=205009:8 cycle=1/6 tag=26" },
+                    { 42000, "circle 10 3000 anchor=target aura=205009:0:7 school=nature pct=0 cycle=1/6 tag=27" },
+                    { 50000, "stack 10 3000 anchor=target aura=205009:8 cycle=1/6 tag=26" },
+                    { 50000, "circle 10 3000 anchor=target aura=205009:0:7 school=nature pct=0 cycle=1/6 tag=27" },
+                    { 57000, "marker 0 cycle=1/6" },
+                    // row 5, Electrocutioner 6000 heroic: the move cost above 4 Marked (Static above 12 live) and
+                    // the 11-12 yd band for 56 s; two carriers, then two more; the donut and the 15 yd circle in turn;
+                    // Megavolt pairs; Chain Bolt kicks with the heroic 10 yd and normal 6 yd spreads; discharges;
+                    // a circle on a carrier (the dodge still goes); the healer's band reported
+                    { 0, "movecost 4 56000 band=11:12 cycle=2/6" },
+                    { 0, "leash 13 56000 role=healer tick=1000 cycle=2/6 tag=47" },
+                    { 1000, "marker 6 pick=any cycle=2/6" },
+                    { 1000, "marker 6 pick=any cycle=2/6" },
+                    { 4000, "donut 48.6 4000 inner=8 at=target pct=75 tankpct=75 cycle=2/6 tag=40" },
+                    { 9000, "circle 6 1500 at=member pick=marked pct=60 tankpct=60 weak=1 cycle=2/6 tag=48" },
+                    { 11000, "cone 30 2000 angle=40 anchor=target to=member pick=any fix=1 pct=60 tankpct=60 weak=1 "
+                        "cycle=2/6 tag=42" },
+                    { 11000, "cone 30 2000 angle=40 anchor=target to=member pick=fresh fix=1 pct=60 tankpct=60 "
+                        "weak=1 cycle=2/6 tag=42" },
+                    { 15000, "cast 205011 2500 kick=1 cycle=2/6 tag=43" },
+                    { 15000, "spread 10 2500 school=nature pct=40 tankpct=40 cycle=2/6 tag=44" },
+                    { 19000, "spread 10 2000 self=205009:6 school=nature pct=40 tankpct=40 weak=1 cycle=2/6 tag=46" },
+                    { 22000, "circle 15 4000 at=target pct=75 tankpct=75 cycle=2/6 tag=41" },
+                    { 27000, "marker 0 cycle=2/6" },
+                    { 28000, "marker 6 pick=any cycle=2/6" },
+                    { 28000, "marker 6 pick=any cycle=2/6" },
+                    { 30000, "cone 30 2000 angle=40 anchor=target to=member pick=any fix=1 pct=60 tankpct=60 weak=1 "
+                        "cycle=2/6 tag=42" },
+                    { 30000, "cone 30 2000 angle=40 anchor=target to=member pick=fresh fix=1 pct=60 tankpct=60 "
+                        "weak=1 cycle=2/6 tag=42" },
+                    { 33000, "circle 6 1500 at=member pick=marked pct=60 tankpct=60 weak=1 cycle=2/6 tag=48" },
+                    { 36000, "cast 205011 2500 kick=1 cycle=2/6 tag=43" },
+                    { 36000, "spread 6 2500 school=nature pct=20 tankpct=20 cycle=2/6 tag=45" },
+                    { 40000, "donut 48.6 4000 inner=8 at=target pct=75 tankpct=75 cycle=2/6 tag=40" },
+                    { 45000, "spread 10 2000 self=205009:6 school=nature pct=40 tankpct=40 weak=1 cycle=2/6 tag=46" },
+                    { 48000, "circle 15 4000 at=target pct=75 tankpct=75 cycle=2/6 tag=41" },
+                    { 53000, "cone 30 2000 angle=40 anchor=target to=member pick=any fix=1 pct=60 tankpct=60 weak=1 "
+                        "cycle=2/6 tag=42" },
+                    { 53000, "cone 30 2000 angle=40 anchor=target to=member pick=fresh fix=1 pct=60 tankpct=60 "
+                        "weak=1 cycle=2/6 tag=42" },
+                    { 56000, "marker 0 cycle=2/6" },
+                    // row 6, the Mobile Alert System: MA1 normal twice (a 40 degree light locked on a member, dark
+                    // 2 s, then 60 degrees clockwise in 3 s); MA2-MA4 heroic (two opposite 30 degree lights, dark 3 s,
+                    // 12 degrees a second, reversing every 15 s with a 2 s stop, +10% per Spotted); §7 #21's 30 yd rule
+                    { 0, "lights 40 5000 n=1 len=30 speed=20 dir=-1 pick=any lit=2000 ahead=5000 cycle=3/6 tag=50" },
+                    { 7000, "lights 40 5000 n=1 len=30 speed=20 dir=-1 pick=any lit=2000 ahead=5000 cycle=3/6 tag=50" },
+                    { 14000, "lights 30 42000 n=2 len=30 speed=12 lit=3000 reverse=15000 stop=2000 faster=10 "
+                        "cycle=3/6 tag=52" },
+                    { 14000, "leash 30 42000 tick=3000 cycle=3/6 tag=54" },
+                    // row 7, Crowd Pummeler 9-60 heroic: three combinations of 3, 5 and 8 punches on the frame (the
+                    // stand-in at the origin, the run's facing the pocket's south), the whole chain registered at the
+                    // call (strikes at n x 1 s + 0.8 s, then 1.2 s apart), One-Two pairs from the fourth punch
+                    { 0, "line 60 3800 width=30 at=target shift=-30:15 pct=60 tankpct=60 weak=1 cycle=4/6 tag=60" },
+                    { 0, "circle 12 5000 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=62" },
+                    { 0, "line 60 6200 width=30 at=target shift=-30:-15 pct=60 tankpct=60 weak=1 cycle=4/6 tag=61" },
+                    { 9000, "line 25 5800 width=8 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=64" },
+                    { 9000, "line 60 7000 width=30 at=target shift=-30:-15 pct=60 tankpct=60 weak=1 cycle=4/6 tag=61" },
+                    { 9000, "donut 40 8200 inner=12 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=63" },
+                    { 9000, "line 60 9400 width=30 at=target shift=-30:15 pct=60 tankpct=60 weak=1 cycle=4/6 tag=60" },
+                    { 9000, "circle 12 9400 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=62" },
+                    { 9000, "line 60 10600 width=30 at=target shift=-30:-15 pct=60 tankpct=60 weak=1 cycle=4/6 "
+                        "tag=61" },
+                    { 9000, "donut 40 10600 inner=12 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=63" },
+                    { 21000, "line 60 8800 width=30 at=target shift=-30:15 pct=60 tankpct=60 weak=1 cycle=4/6 tag=60" },
+                    { 21000, "line 60 10000 width=30 at=target shift=-30:-15 pct=60 tankpct=60 weak=1 cycle=4/6 "
+                        "tag=61" },
+                    { 21000, "circle 12 11200 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=62" },
+                    { 21000, "line 60 12400 width=30 at=target shift=-30:15 pct=60 tankpct=60 weak=1 cycle=4/6 "
+                        "tag=60" },
+                    { 21000, "donut 40 12400 inner=12 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=63" },
+                    { 21000, "line 25 13600 width=8 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=64" },
+                    { 21000, "line 60 14800 width=30 at=target shift=-30:-15 pct=60 tankpct=60 weak=1 cycle=4/6 "
+                        "tag=61" },
+                    { 21000, "circle 12 14800 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=62" },
+                    { 21000, "donut 40 16000 inner=12 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=63" },
+                    { 21000, "line 60 17200 width=30 at=target shift=-30:15 pct=60 tankpct=60 weak=1 cycle=4/6 "
+                        "tag=60" },
+                    { 21000, "circle 12 17200 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=62" },
+                    // row 9, The Big One heroic (MT13): the stand-in steps back 15 yd, then walks to its spot (the
+                    // center) at 3 yd/s under an 8 yd Stack that lands on the arrival; twice
+                    { 41000, "walk 15 1500 offset=180 cycle=4/6" },
+                    { 43000, "walk 15 5000 cycle=4/6" },
+                    { 43000, "stack 8 5000 anchor=target cycle=4/6 tag=70" },
+                    { 50000, "walk 15 1500 offset=180 cycle=4/6" },
+                    { 52000, "walk 15 5000 cycle=4/6" },
+                    { 52000, "stack 8 5000 anchor=target cycle=4/6 tag=70" },
+                    // row 8, Mekgineer Thermaplugg heroic: two plates 25 yd out on the face bearings (the first to
+                    // resolve first: face priority), the soaker Locked Out (Marked) and the tank last; two walking
+                    // bombs at 4.6 yd/s with a RunOut on the mark; mines under everyone (the 3 yd trigger and the
+                    // 6 yd ring); three plates after an Override; the Detonator kick
+                    { 0, "soak 3 6000 need=1 at=target shift=22.56:10.76 aura=205009:0:0 mark=1 last=tank cycle=5/6 "
+                        "tag=71" },
+                    { 0, "soak 3 7000 need=1 at=target shift=5.84:24.31 aura=205009:0:0 mark=1 last=tank cycle=5/6 "
+                        "tag=71" },
+                    { 3000, "mound 3 2000 persist=4000 speed=4.6 erupt=8 boom=1000 pick=any pct=60 tankpct=60 weak=1 "
+                        "cycle=5/6 tag=72" },
+                    { 3000, "runout 8 7000 at=member pick=same pct=60 tankpct=60 weak=1 cycle=5/6 tag=74" },
+                    { 9000, "mound 3 2000 persist=4000 speed=4.6 erupt=8 boom=1000 pick=any pct=60 tankpct=60 weak=1 "
+                        "cycle=5/6 tag=72" },
+                    { 9000, "runout 8 7000 at=member pick=same pct=60 tankpct=60 weak=1 cycle=5/6 tag=74" },
+                    { 12000, "soak 3 6000 need=1 at=target shift=-15.22:19.83 aura=205009:0:0 mark=1 last=tank "
+                        "cycle=5/6 tag=71" },
+                    { 12000, "soak 3 7000 need=1 at=target shift=22.56:-10.76 aura=205009:0:0 mark=1 last=tank "
+                        "cycle=5/6 tag=71" },
+                    { 12000, "soak 3 8000 need=1 at=target shift=5.84:-24.31 aura=205009:0:0 mark=1 last=tank "
+                        "cycle=5/6 tag=71" },
+                    { 14000, "mine 3 3000 at=each life=18000 pct=60 tankpct=60 weak=1 cycle=5/6 tag=75" },
+                    { 14000, "circle 6 3000 at=each persist=18000 tick=1000 pct=0 cycle=5/6 tag=76" },
+                    { 24000, "cast 205012 3000 kick=1 cycle=5/6 tag=77" },
+                    { 33000, "marker 0 cycle=5/6" },
+                    // row 10, the Whole Workshop (reported, §3.9): 20 mines, 45 moving puddles at 2 yd/s, two lights
+                    // on the boss walking 10 yd, two fist combinations from a face 50 yd out (all three shapes at once,
+                    // 2.5 s apart after a 4 s wind-up), Electric Justice's donut
+                    { 36000, "mine 3 3000 at=member pick=any scatter=15 repeat=20 every=100 life=16000 pct=70 "
+                        "tankpct=70 weak=1 cycle=5/6 tag=80" },
+                    { 36000, "projectile 30 1500 width=4 speed=2 at=group away=15 school=nature pct=8 repeat=45 "
+                        "every=100 cycle=5/6 tag=81" },
+                    { 36000, "walk 10 18000 offset=90 cycle=5/6" },
+                    { 36000, "lights 30 20000 n=2 len=40 speed=12 cycle=5/6 tag=82" },
+                    { 40000, "line 145 4000 width=140 offset=180 at=target shift=-55:70 pct=60 tankpct=60 weak=1 "
+                        "cycle=5/6 tag=84" },
+                    { 40000, "circle 50 6500 at=target shift=50:0 pct=60 tankpct=60 weak=1 cycle=5/6 tag=84" },
+                    { 40000, "donut 150 9000 inner=50 at=target shift=50:0 pct=60 tankpct=60 weak=1 cycle=5/6 "
+                        "tag=84" },
+                    { 49500, "line 145 4000 width=140 offset=180 at=target shift=-55:-70 pct=60 tankpct=60 weak=1 "
+                        "cycle=5/6 tag=84" },
+                    { 49500, "donut 150 6500 inner=50 at=target shift=50:0 pct=60 tankpct=60 weak=1 cycle=5/6 "
+                        "tag=84" },
+                    { 49500, "line 145 9000 width=140 offset=180 at=target shift=-55:70 pct=60 tankpct=60 weak=1 "
+                        "cycle=5/6 tag=84" },
+                    { 52000, "donut 60 4000 inner=8 at=target pct=75 tankpct=75 cycle=5/6 tag=85" },
+                    { 56500, "walk 10 3000 offset=270 cycle=5/6" },
+                }, 6 },     // six cycles a run (360 s): the sweep runs gnomeregan-shapes:6
         };
         return drills;
     }
@@ -2985,7 +3400,8 @@ namespace BossMechanics::Drill
         Fresh,          // a member, the tank included, the chain has not picked (Ragefire Chasm G1; see PickPool)
         Marked,         // a member holding Marked (drill) (Zul'Farrak G1: the walker); none: anyone
         Unmarked,       // a member without it (the living); none: anyone
-        Healer          // a healer by the role provider (the healer walker); none: anyone
+        Healer,         // a healer by the role provider (the healer walker); none: anyone
+        MarkedAt        // pick=marked:<n> (Gnomeregan G1): a member holding exactly n Marked stacks; none: anyone
     };
 
     // One member as a pick sees it (members in guid order).
@@ -2997,6 +3413,7 @@ namespace BossMechanics::Drill
         float dist = 0.f;       // from the shape's source (min=)
         bool marked = false;    // holds Marked (drill) (pick=marked, unmarked)
         bool healer = false;    // a healer by the role provider (pick=healer)
+        std::uint32_t stacks = 0;   // its Marked (drill) stacks (pick=marked:<n>)
     };
 
     // The members a pick draws from (indices into `c`, in order; empty: nobody). pick=other: a non-tank outside the
@@ -3004,7 +3421,10 @@ namespace BossMechanics::Drill
     // targets). pick=fresh (Ragefire Chasm G1): a member, the tank included, outside the chain; everyone picked: anyone
     // but the previous pick, and the chain starts over (a shuffled rotation; FreshRestarts). min > 0: of those, the
     // ones at least `min` yd from the source, else the single farthest one.
-    inline std::vector<std::size_t> PickPool(std::vector<PickCandidate> const& c, PickRule rule, float min)
+    // pick=marked:<n> (Gnomeregan G1): the holders of exactly `stacks` Marked stacks (two Rubber Band owners at 1 and
+    // 2 stacks are told apart for every later step of their chains), else anyone.
+    inline std::vector<std::size_t> PickPool(std::vector<PickCandidate> const& c, PickRule rule, float min,
+        std::uint32_t stacks = 0)
     {
         std::vector<std::size_t> pool;
         auto collect = [&c, &pool](auto const& keep)
@@ -3022,6 +3442,12 @@ namespace BossMechanics::Drill
         }
         else if (rule == PickRule::Any)
             collect([](PickCandidate const&) { return true; });
+        else if (rule == PickRule::MarkedAt)
+        {
+            collect([stacks](PickCandidate const& m) { return m.stacks == stacks; });
+            if (pool.empty())
+                collect([](PickCandidate const&) { return true; });
+        }
         else if (rule == PickRule::Marked || rule == PickRule::Unmarked || rule == PickRule::Healer)
         {
             // Zul'Farrak G1: the walker, the living, the healer walker; nobody fits: anyone.
@@ -3341,7 +3767,11 @@ namespace BossMechanics::Drill
         bool kick = false;
         std::uint32_t ledgerTag = 0;
         bool twin = false;              // twin=1 (Zul'Farrak G1): a Drill Caster beside it casts it too, judged alone
+        bool noKick = false;            // nokick=1 (Gnomeregan G1): a do-not-kick entry (priority 0); not with kick=1
+        std::uint32_t kill = 0;         // kill=<n> (Gnomeregan G1, with twin=1): the twin a kill target of priority n
     };
+
+    constexpr std::uint32_t kMaxCastKill = 10;
 
     // Is the cast a group failure? `running`: it still runs kCastJudgeLeadMs before its end (false: it never started,
     // was interrupted, or was cut). A kick=1 cast fails when nobody stopped it, and when it never started (a row that
@@ -3354,7 +3784,7 @@ namespace BossMechanics::Drill
     inline std::optional<CastStep> ParseCast(std::string_view line)
     {
         std::vector<std::string_view> const t = Tokens(line);
-        if (t.size() < 3 || t[0] != "cast" || !OnlyKeys(t, { "kick", "every", "tag", "twin" }))
+        if (t.size() < 3 || t[0] != "cast" || !OnlyKeys(t, { "kick", "every", "tag", "twin", "nokick", "kill" }))
             return std::nullopt;
         std::optional<float> const ms = Number(t[2]);
         if (!ms || *ms < static_cast<float>(kMinCastMs) || *ms > static_cast<float>(kMaxCastMs))
@@ -3387,6 +3817,21 @@ namespace BossMechanics::Drill
             if (*v != "0" && *v != "1")
                 return std::nullopt;
             c.twin = *v == "1";
+        }
+        // Gnomeregan G1: nokick=1 lists the spell as never kicked (the cast must run to its end: kick=0's bar);
+        // kill=<n> lists the twin (Drill Caster) as a kill target of priority n while it lives (a casting bug first).
+        if (std::optional<std::string_view> const v = Value(line, "nokick"))
+        {
+            if ((*v != "0" && *v != "1") || (*v == "1" && c.kick))
+                return std::nullopt;
+            c.noKick = *v == "1";
+        }
+        if (std::optional<std::string_view> const v = Value(line, "kill"))
+        {
+            std::optional<float> const n = Number(*v);
+            if (!n || *n < 1.f || *n > static_cast<float>(kMaxCastKill) || *n != std::floor(*n) || !c.twin)
+                return std::nullopt;
+            c.kill = static_cast<std::uint32_t>(*n);
         }
         std::optional<std::string_view> const tag = Value(line, "tag");
         std::optional<float> const n = tag ? Number(*tag) : std::nullopt;
@@ -3828,6 +4273,298 @@ namespace BossMechanics::Drill
 
     // `cast ... twin=1`: the second head stands this far to the selected unit's left.
     constexpr float kTwinApartYd = 4.f;
+
+    // ---- Gnomeregan shapes: the grammar's pure halves (WP-G1; MechanicDrill.h "Gnomeregan shapes") ----------------
+
+    // pick=marked:<n>: n from 1 to kMaxMark; nullopt for anything else (plain `marked` is PickRule::Marked).
+    inline std::optional<std::uint32_t> ParseMarkedPick(std::string_view value)
+    {
+        constexpr std::string_view head = "marked:";
+        if (value.substr(0, head.size()) != head)
+            return std::nullopt;
+        std::optional<std::uint32_t> const n = DigitsNumber(value.substr(head.size()));
+        if (!n || !*n || *n > kMaxMark)
+            return std::nullopt;
+        return n;
+    }
+
+    // `lights <angle> <ms> [n=1] [len=30] [speed=12] [dir=1] [start=<deg>|pick=any] [lit=0] [reverse=0] [stop=2000]
+    // [faster=0] [latch=3000] [ahead=3000] [step=500] tag=<n>` (the Alert System's searchlights, MA1-MA4, and the
+    // hard mode's MT23; KT-G's TurningLights as a drill): n cones of `angle` degrees and `len` yd on the selected unit,
+    // 360 / n apart, light 0 at start= degrees from the run's facing (pick=any: at a random member; neither: a random
+    // bearing), turning `speed` degrees a second (dir=1 counterclockwise, -1 clockwise). Dark for `lit` ms (they hold
+    // still and judge nobody), then every kLightsTickMs each alive member inside a light (2D, InLightCone) is Spotted
+    // once per `latch` ms, shared by every light: a Hit failure `Zone/<tag>`, and the speed grows by `faster` percent
+    // (no cap but kLightsMaxDegPerSec). From `lit`, every `reverse` ms the lights turn the other way after a `stop` ms
+    // halt (MA4). Every `step` ms each light's floor over the next `ahead` ms (LightsClock::Swept, KT-G's look ahead)
+    // registers as a lasting cone on the unit's spot that lives `step` ms plus kLightsOverlapMs past its warning (no
+    // damage, contacts reported under tag + 1), so the bots see the swept floor with no gap between two steps.
+    constexpr std::uint32_t kLightsTickMs = 250;
+    constexpr std::uint32_t kLightsWarnMs = 250;        // each step's cone: warned this long, then lasting
+    constexpr std::uint32_t kLightsOverlapMs = 250;     // ... and this long past the next step's arming
+    constexpr std::uint32_t kLightsMaxCount = 4;
+    constexpr float kLightsMaxDegPerSec = 180.f;
+
+    struct LightsStep
+    {
+        float angleDeg = 30.f;
+        std::uint32_t ms = 0;
+        std::uint32_t count = 1;
+        float lengthYd = 30.f;
+        float degPerSec = 12.f;
+        int direction = 1;                  // +1 counterclockwise, -1 clockwise
+        std::optional<float> startDeg;      // from the run's facing
+        bool pickMember = false;            // pick=any: light 0 starts at a random member
+        std::uint32_t litMs = 0;
+        std::uint32_t reverseMs = 0;        // 0: never reverses
+        std::uint32_t stopMs = 2000;
+        float fasterPct = 0.f;
+        std::uint32_t latchMs = 3000;
+        std::uint32_t aheadMs = 3000;
+        std::uint32_t stepMs = 500;
+        std::uint32_t ledgerTag = 0;        // Spotted; the swept floor's contacts are ledgerTag + 1
+    };
+
+    // The step's swept-floor cones: warned kLightsWarnMs, then lasting this long (so step k's cone is hot until step
+    // k + 1's is armed, plus kLightsOverlapMs).
+    constexpr std::uint32_t LightsPersistMs(std::uint32_t stepMs)
+    {
+        return stepMs + kLightsOverlapMs;
+    }
+
+    inline std::optional<LightsStep> ParseLights(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "lights" || !OnlyKeys(t, { "n", "len", "speed", "dir", "start", "pick", "lit",
+            "reverse", "stop", "faster", "latch", "ahead", "step", "tag" }))
+            return std::nullopt;
+        LightsStep l;
+        std::optional<float> const angle = Number(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        if (!angle || *angle <= 0.f || *angle > 180.f || !ms || *ms > kMaxWalkMs)
+            return std::nullopt;
+        l.angleDeg = *angle;
+        l.ms = *ms;
+        for (auto [key, field] : { std::pair<std::string_view, std::uint32_t*>{ "n", &l.count }, { "lit", &l.litMs },
+            { "reverse", &l.reverseMs }, { "stop", &l.stopMs }, { "latch", &l.latchMs }, { "ahead", &l.aheadMs },
+            { "step", &l.stepMs }, { "tag", &l.ledgerTag } })
+            if (std::optional<std::string_view> const v = Value(line, key))
+            {
+                std::optional<std::uint32_t> const n = DigitsNumber(*v);
+                if (!n)
+                    return std::nullopt;
+                *field = *n;
+            }
+        for (auto [key, field] : { std::pair<std::string_view, float*>{ "len", &l.lengthYd },
+            { "speed", &l.degPerSec }, { "faster", &l.fasterPct } })
+            if (std::optional<std::string_view> const v = Value(line, key))
+            {
+                std::optional<float> const n = Number(*v);
+                if (!n)
+                    return std::nullopt;
+                *field = *n;
+            }
+        if (std::optional<std::string_view> const v = Value(line, "dir"))
+        {
+            if (*v != "1" && *v != "-1")
+                return std::nullopt;
+            l.direction = *v == "1" ? 1 : -1;
+        }
+        if (std::optional<std::string_view> const v = Value(line, "start"))
+        {
+            l.startDeg = SignedNumber(*v);
+            if (!l.startDeg || std::fabs(*l.startDeg) > 360.f)
+                return std::nullopt;
+        }
+        if (std::optional<std::string_view> const v = Value(line, "pick"))
+        {
+            if (*v != "any" || l.startDeg)
+                return std::nullopt;
+            l.pickMember = true;
+        }
+        bool const ok = l.count >= 1 && l.count <= kLightsMaxCount && l.lengthYd > 0.f && l.lengthYd <= 60.f
+            && l.degPerSec > 0.f && l.degPerSec <= kLightsMaxDegPerSec && l.fasterPct >= 0.f && l.fasterPct <= 50.f
+            && l.litMs < l.ms && l.stopMs <= 5000 && l.stopMs % kLightsTickMs == 0
+            && (!l.reverseMs || (l.reverseMs >= l.stopMs + 1000 && l.reverseMs % kLightsTickMs == 0))
+            && l.latchMs >= 500 && l.aheadMs <= 10000 && l.stepMs >= kLightsTickMs && l.stepMs <= 2000
+            && l.stepMs % kLightsTickMs == 0 && l.ms >= l.stepMs && l.litMs % kLightsTickMs == 0 && l.ledgerTag >= 1;
+        if (!ok)
+            return std::nullopt;
+        return l;
+    }
+
+    // A sector of the floor round the lights' apex: `bearing` its middle (radians), `angleDeg` its width (360: all).
+    struct LightSector
+    {
+        float bearing = 0.f;
+        float angleDeg = 0.f;
+    };
+
+    // The lights' clock (KT-G LightClock's drill twin): light 0's bearing, the turn rate and direction, a hold (the
+    // dark start, a reversal's stop) that runs down before any turn.
+    class LightsClock
+    {
+    public:
+        LightsClock(float startBearing = 0.f, float degPerSec = 12.f, int direction = 1, std::uint32_t holdMs = 0)
+            : _bearing(Geo::WrapPi(startBearing)), _degPerSec(degPerSec), _direction(direction < 0 ? -1 : 1),
+            _holdMs(holdMs)
+        {
+        }
+
+        float Bearing() const { return _bearing; }
+        float DegPerSec() const { return _degPerSec; }
+        int Direction() const { return _direction; }
+        std::uint32_t HoldMs() const { return _holdMs; }
+
+        // Light i of n: 360 / n degrees on from light 0.
+        float BearingOf(std::uint32_t i, std::uint32_t n) const
+        {
+            return Geo::WrapPi(_bearing + Geo::kTwoPi * static_cast<float>(i) / static_cast<float>(n ? n : 1));
+        }
+
+        // The hold runs down first; the rest of `ms` turns.
+        void Advance(std::uint32_t ms)
+        {
+            std::uint32_t const held = std::min(_holdMs, ms);
+            _holdMs -= held;
+            _bearing = Geo::WrapPi(_bearing + static_cast<float>(_direction) * Geo::DegToRad(_degPerSec)
+                * static_cast<float>(ms - held) / 1000.f);
+        }
+
+        // MA4: the other way, after a stop (a longer hold already running is kept).
+        void Reverse(std::uint32_t stopMs)
+        {
+            _direction = -_direction;
+            _holdMs = std::max(_holdMs, stopMs);
+        }
+
+        void SetSpeed(float degPerSec)
+        {
+            _degPerSec = std::clamp(degPerSec, 0.f, kLightsMaxDegPerSec);
+        }
+
+        // The floor light i of n covers over the next `aheadMs` (the hold first, then the current direction): one
+        // sector of the light's width plus the turn, a full circle past 360 degrees.
+        LightSector Swept(std::uint32_t i, std::uint32_t n, float angleDeg, std::uint32_t aheadMs) const
+        {
+            std::uint32_t const turning = aheadMs > _holdMs ? aheadMs - _holdMs : 0;
+            float const turnDeg = _degPerSec * static_cast<float>(turning) / 1000.f;
+            LightSector s;
+            s.angleDeg = std::min(360.f, angleDeg + turnDeg);
+            s.bearing = Geo::WrapPi(BearingOf(i, n) + static_cast<float>(_direction) * Geo::DegToRad(turnDeg) / 2.f);
+            return s;
+        }
+
+    private:
+        float _bearing = 0.f;
+        float _degPerSec = 12.f;
+        int _direction = 1;
+        std::uint32_t _holdMs = 0;
+    };
+
+    // Is p in the light (2D): within `lengthYd` of the apex and inside `angleDeg` round `bearing`? The apex itself is.
+    inline bool InLightCone(Geo::Vec3 const& apex, float bearing, float angleDeg, float lengthYd, Geo::Vec3 const& p)
+    {
+        float const dx = p.x - apex.x;
+        float const dy = p.y - apex.y;
+        float const d2 = dx * dx + dy * dy;
+        if (d2 > lengthYd * lengthYd)
+            return false;
+        if (d2 < 0.01f || angleDeg >= 360.f)
+            return true;
+        return std::fabs(Geo::WrapPi(std::atan2(dy, dx) - bearing)) <= Geo::DegToRad(angleDeg) * 0.5f;
+    }
+
+    // A reversal is due at `elapsed` (ms since the step's start, on the tick grid): every `reverseMs` once lit.
+    constexpr bool LightsReverseDue(std::uint32_t elapsed, std::uint32_t litMs, std::uint32_t reverseMs)
+    {
+        return reverseMs && elapsed > litMs && (elapsed - litMs) % reverseMs == 0;
+    }
+
+    // MA2: +`pct` percent per Spotted, kLightsMaxDegPerSec at most.
+    inline float LightsFaster(float degPerSec, float pct)
+    {
+        return std::min(kLightsMaxDegPerSec, degPerSec * (1.f + pct / 100.f));
+    }
+
+    // `movecost <above> <ms> [band=11:12|0]` (Electrocutioner's Static, EL6 heroic, §7 #12 A; BM-G's MoveCostEntry and
+    // RangeBandEntry): for `ms` the encounter's descriptor carries "more than `above` Marked (drill) stacks: no
+    // optional move" and the ranged band round the owner (band=0: none); both come off at the end. BM-G's own
+    // `describe move-cost` preset (4 stacks, 11-12 yd) is the same rule for a whole program; this step scopes it to
+    // one row, so the other rows' Marked carriers (the dose) and ranged bots are not touched.
+    struct MoveCostStep
+    {
+        std::uint32_t above = 4;
+        std::uint32_t ms = 0;
+        bool band = true;
+        float bandMinYd = 11.f;
+        float bandMaxYd = 12.f;
+    };
+
+    inline std::optional<MoveCostStep> ParseMoveCost(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "movecost" || !OnlyKeys(t, { "band" }))
+            return std::nullopt;
+        MoveCostStep m;
+        std::optional<std::uint32_t> const above = DigitsNumber(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        if (!above || *above >= kMaxMark || !ms || !*ms || *ms > kMaxWalkMs)
+            return std::nullopt;
+        m.above = *above;
+        m.ms = *ms;
+        if (std::optional<std::string_view> const v = Value(line, "band"))
+        {
+            if (*v == "0")
+                m.band = false;
+            else
+            {
+                std::size_t const colon = v->find(':');
+                std::optional<float> const lo = colon == std::string_view::npos ? std::nullopt
+                    : Number(v->substr(0, colon));
+                std::optional<float> const hi = colon == std::string_view::npos ? std::nullopt
+                    : Number(v->substr(colon + 1));
+                if (!lo || !hi || *lo <= 0.f || *hi <= *lo || *hi > 40.f)
+                    return std::nullopt;
+                m.bandMinYd = *lo;
+                m.bandMaxYd = *hi;
+            }
+        }
+        return m;
+    }
+
+    // `saturated <tick> <ms> tag=<n>` (Viscous Fallout VF5, §7 #38 b: Saturated is judged on armed pools only): every
+    // `tick` ms for `ms`, the selected unit standing inside an armed lasting point circle of the owner (a pool past its
+    // warning) is an OffSpot failure `Zone/<tag>` on its victim, the tank that should have dragged it out (L47).
+    struct SaturatedStep
+    {
+        std::uint32_t tickMs = 1000;
+        std::uint32_t ms = 0;
+        std::uint32_t ledgerTag = 0;
+    };
+
+    inline std::optional<SaturatedStep> ParseSaturated(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "saturated" || !OnlyKeys(t, { "tag" }))
+            return std::nullopt;
+        std::optional<std::uint32_t> const tick = DigitsNumber(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        std::optional<std::uint32_t> const tag = StepTag(line);
+        if (!tick || *tick < kMinLeashTickMs || !ms || *ms < *tick || *ms > kMaxWalkMs || !tag || !*tag)
+            return std::nullopt;
+        SaturatedStep s;
+        s.tickMs = *tick;
+        s.ms = *ms;
+        s.ledgerTag = *tag;
+        return s;
+    }
+
+    // Is p inside an armed pool: a circle of `radius` round `center` whose warning ended (now >= armedAt)?
+    constexpr bool InArmedPool(float distYd, float radius, std::uint64_t nowMs, std::uint64_t armedAtMs)
+    {
+        return nowMs >= armedAtMs && distYd <= radius;
+    }
 
     // ---- repeat= and every= on a drill step (Scarlet Monastery G2: the runner used to drop them) -------------------
     // `.mech test` reads `repeat=` (1, at most kMaxStepRepeat) and `every=` (1000 ms) and registers the repeats every

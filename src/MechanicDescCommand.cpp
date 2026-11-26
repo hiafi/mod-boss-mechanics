@@ -132,10 +132,11 @@ namespace BossMechanics
             Descriptor const& d = e.descriptor;
             Milliseconds const now = GameTime::GetGameTimeMS();
             handler->PSendSysMessage("Descriptor of {}: phase {}, {} interrupt(s), {} dispel(s), {} purge(s), "
-                "{} target(s), {} ignore(s), {} taunt swap(s), {} pass(es), {} hold(s), {} heal-until, stamp {}",
-                UnitLabel(map, e.owner.GetRawValue()), d.phase, d.interrupts.size(), d.dispels.size(),
-                d.purges.size(), d.targets.size(), d.ignores.size(), d.tauntSwaps.size(), d.passes.size(),
-                d.holds.size(), d.healUntil.size(), e.descriptorStamp);
+                "{} target(s), {} ignore(s), {} taunt swap(s), {} pass(es), {} hold(s), {} heal-until, {} move "
+                "cost(s), {} band(s), stamp {}", UnitLabel(map, e.owner.GetRawValue()), d.phase, d.interrupts.size(),
+                d.dispels.size(), d.purges.size(), d.targets.size(), d.ignores.size(), d.tauntSwaps.size(),
+                d.passes.size(), d.holds.size(), d.healUntil.size(), d.moveCosts.size(), d.rangeBands.size(),
+                e.descriptorStamp);
             for (InterruptEntry const& i : d.interrupts)
                 handler->PSendSysMessage("  kick {} by {}: {}{}{}", SpellLabel(i.spellId), UnitOrEntry(map,
                     i.casterEntry, 0), i.priority ? Acore::StringFormat("priority {}", int32(i.priority))
@@ -162,6 +163,14 @@ namespace BossMechanics
             for (HealUntilEntry const& x : d.healUntil)
                 handler->PSendSysMessage("  heal until {} to {:.0f}% (read as {:.0f}%)", SpellLabel(x.auraId), x.pct,
                     x.readAsPct);
+            // Gnomeregan BM-G: the move cost (no optional move above the stacks) and the preferred band.
+            for (MoveCostEntry const& x : d.moveCosts)
+                handler->PSendSysMessage("  move cost: above {} stacks of {}, no optional move (dodges by the "
+                    "shortest way out)", x.aboveStacks, SpellLabel(x.auraId));
+            for (RangeBandEntry const& x : d.rangeBands)
+                handler->PSendSysMessage("  ranged band: {:.1f} to {:.1f} yd from the owner{}{}", x.minYd, x.maxYd,
+                    x.who == Who::Any ? std::string() : Acore::StringFormat(" ({} only)", WhoName(x.who)),
+                    Desc::RangeBandValid(x) ? "" : " (invalid: ignored)");
             // Blackrock Depths WP-DS (BD3): each hold, and the encounter's live units it covers now by its aura (the
             // `when` part is judged by the bots' view, not here).
             for (HoldEntry const& h : d.holds)

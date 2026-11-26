@@ -209,6 +209,15 @@ namespace BossMechanics
         // Blackrock Spire WP-PS: the pass decision (throw, ready spot) and its counters (MechanicBotPass.cpp).
         Pass::BotState pass;
 
+        // ---- Gnomeregan BM-G (HANDOFF §7 #12 A, F19, F20; MechanicBotBrain.cpp ReadMoveCost) ----
+        bool moveCost = false;                              // a descriptor MoveCostEntry holds for the bot this step
+        Solver::RoleBand rangeBand;                         // the descriptor's preferred band for it (present: one)
+        Milliseconds outOfBandSince{ 0 };                   // out of rangeBand since (0 = in it, or no band)
+        Milliseconds lastBandAt{ 0 };                       // the last band check's role solve (0 = none)
+        Milliseconds nextBandAt{ 0 };                       // ...none before this (one that found nothing backs off)
+        Milliseconds moveCostDodgeUntil{ 0 };               // the lock let a stock dodge through under the move cost:
+                                                            // its walk is not stopped before this
+
         // ---- gate ----
         bool avoidAoeByGate = false;                        // `avoid aoe` is the gate's (strip it when leaving)
 

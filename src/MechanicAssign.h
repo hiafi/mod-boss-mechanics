@@ -25,11 +25,11 @@ namespace BossMechanics::Assign
                       std::int64_t etaMs = 0; std::int64_t claimedSince = 0; /* 0 = no claim */
                       bool last = false; };
     // count: bodies needed; ordered: rank by aura stacks (ascending or not); capStacks > 0: players at or above it
-    // never claim.
+    // never claim; minStacks > 0: players below it never claim (Gnomeregan BM-G, Ordering::minStacks).
     // keepSticky: a lasting soak whose window is already open; a sticky claim stays whatever its eta (the claimer
     // trails a moving circle and is briefly outside; STAGE-M3-R-REPORT m-5).
     struct SoakRule { std::uint32_t count = 0; bool ordered = false, ascending = true; std::uint32_t capStacks = 0;
-                      std::int64_t deadlineMs = 0; bool keepSticky = false; };
+                      std::int64_t deadlineMs = 0; bool keepSticky = false; std::uint32_t minStacks = 0; };
 
     namespace Detail
     {
@@ -44,7 +44,8 @@ namespace BossMechanics::Assign
 
     // Who claims: players already inside first (humans and bots, by the rule, up to count); then sticky bot claims
     // that are still eligible and can make it (eta <= deadline); then bots ranked by (stacks per the rule, eta, guid).
-    // Players at or above capStacks never claim; count 0: nobody. Late bots fill leftover slots last (best effort).
+    // Players at or above capStacks, or below minStacks, never claim; count 0: nobody. Late bots fill leftover slots
+    // last (best effort).
     // Humans count only once they stand inside. The caller passes eligible players only (Registry::IsEligible), so a
     // claim of a player no longer listed is dropped. Returned in claim order, each guid once.
     // Scarlet Monastery F7 (Ordering::roleLast): steps 1-3 run over the players who are not `last` first, then over
@@ -63,6 +64,8 @@ namespace BossMechanics::Assign
         for (Claimant const& c : players)
         {
             if (rule.capStacks > 0 && c.stacks >= rule.capStacks)
+                continue;
+            if (rule.minStacks > 0 && c.stacks < rule.minStacks)
                 continue;
             bool dup = false;
             for (Claimant const* q : pool)

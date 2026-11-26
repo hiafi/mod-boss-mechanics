@@ -12,8 +12,8 @@
  *   .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
  *               |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
  *               |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes
- *               |scarlet-monastery-shapes-2|ragefire-chasm-shapes|zul-farrak-shapes> [cycles=3] [seed=] [dmg=1]
- *               [self=0]
+ *               |scarlet-monastery-shapes-2|ragefire-chasm-shapes|zul-farrak-shapes|gnomeregan-shapes> [cycles=3]
+ *               [seed=] [dmg=1] [self=0]
  *   .mech dummy <program|stop|report> [dmg=<n>]      (the selected training dummy 300402, MechanicDummyAI.cpp)
  *   .mech bots [all]                                 (the report itself lives in the playerbots glue, M2)
  *
@@ -156,6 +156,14 @@
  * SeenOnlyWith(type) (its markers carry invisibility of that type: only a player with a detect aura of it sees them;
  * the GM needs one to see the shape), and `healreach=1` on a soak or crawl is HealerWithinTankReach (no bot healer
  * claims it while it lies past healer reach of the healer's nearest live tank).
+ *
+ * Gnomeregan build (WP-G1 §3.9, drill `gnomeregan-shapes`): `pick=marked:<n>` picks the holder of exactly n Marked
+ * stacks (`marker <n> pick=unmarked` marks a member without it), `circle exempt=member` is eligible to everyone but the
+ * member of its pick=, `cast nokick=1` lists the spell as never kicked, `cast twin=1 kill=<n>` makes the twin a kill
+ * target, and three drill-only steps: `lights` (turning cones on the selected unit with a Spotted judge and the swept
+ * floor for the bots: ScheduleLights), `movecost` (BM-G's move cost and ranged band on the descriptor for a while:
+ * ScheduleMoveCost) and `saturated` (the selected unit in an armed lasting pool fails its tank: ScheduleSaturated).
+ * MechanicDrill.h "Gnomeregan shapes".
  *
  * Commands run on the world thread while no map updates (handoff §2.1), so they may write the registry directly.
  */
@@ -426,12 +434,12 @@ namespace
         return true;
     }
 
-    // `order=<spell>[:asc|desc][:cap=<n>]`.
+    // `order=<spell>[:asc|desc][:cap=<n>][:min=<n>]` (min: Gnomeregan BM-G, Ordering::minStacks).
     bool ParseOrdering(std::string const& s, Ordering& o)
     {
         std::vector<std::string_view> const f = Fields(s);
         Optional<uint32> spell = f.empty() ? std::nullopt : Acore::StringTo<uint32>(f[0]);
-        if (!spell || !*spell || f.size() > 3)
+        if (!spell || !*spell || f.size() > 4)
             return false;
         o.auraSpell = *spell;
         for (std::size_t i = 1; i < f.size(); ++i)
@@ -446,6 +454,13 @@ namespace
                 if (!cap || *cap > 255)
                     return false;
                 o.capStacks = static_cast<uint8>(*cap);
+            }
+            else if (f[i].substr(0, 4) == "min=")
+            {
+                Optional<uint32> min = Acore::StringTo<uint32>(f[i].substr(4));
+                if (!min || *min > 255)
+                    return false;
+                o.minStacks = static_cast<uint8>(*min);
             }
             else
                 return false;
@@ -540,7 +555,8 @@ namespace
             Fresh,              // a member, the tank included, the chain has not picked (Ragefire Chasm WP-G1)
             Marked,             // a member holding Marked (drill), else anyone (Zul'Farrak WP-G1: the walker)
             Unmarked,           // a member without it, else anyone (the living)
-            Healer              // a healer by the role provider, else anyone (the healer walker)
+            Healer,             // a healer by the role provider, else anyone (the healer walker)
+            MarkedAt            // pick=marked:<n> (Gnomeregan WP-G1): a member holding exactly n stacks, else anyone
         };
         enum class To : uint8
         {
@@ -674,6 +690,9 @@ namespace
         // Zul'Farrak BM-1
         int seen = -1;                  // seen=<type>: SeenOnlyWith(type) (markers seen with that detect aura only)
         bool healReach = false;         // soak / crawl healreach=1: HealerWithinTankReach
+        // Gnomeregan build WP-G1 (drill `gnomeregan-shapes`)
+        uint32 pickStacks = 0;          // pick=marked:<n>: the stacks a MarkedAt pick looks for
+        bool exemptMember = false;      // circle exempt=member: everyone but the member of the step's pick=
     };
 
     bool IsShapeName(std::string const& s)
@@ -1315,6 +1334,7 @@ namespace
             c.dist = source ? p->GetExactDist2d(source) : 0.f;
             // Zul'Farrak WP-G1: pick=marked|unmarked (the walker, the living) and pick=healer.
             c.marked = p->HasAura(Ids::SPELL_MARKED_DRILL);
+            c.stacks = p->GetAuraCount(Ids::SPELL_MARKED_DRILL);     // Gnomeregan WP-G1: pick=marked:<n>
             if (spec.pick == TestSpec::Pick::Healer)
                 if (Unit* selected = spec.selected.IsEmpty() ? nullptr : ObjectAccessor::GetUnit(*owner, spec.selected))
                     c.healer = HasRole(GetRoleProvider().Get(selected, p), Role::Healer);
@@ -1326,8 +1346,10 @@ namespace
             : spec.pick == TestSpec::Pick::Fresh ? Drill::PickRule::Fresh
             : spec.pick == TestSpec::Pick::Marked ? Drill::PickRule::Marked
             : spec.pick == TestSpec::Pick::Unmarked ? Drill::PickRule::Unmarked
-            : spec.pick == TestSpec::Pick::Healer ? Drill::PickRule::Healer : Drill::PickRule::NonTank;
-        std::vector<std::size_t> const pool = Drill::PickPool(candidates, rule, source ? spec.minDist : 0.f);
+            : spec.pick == TestSpec::Pick::Healer ? Drill::PickRule::Healer
+            : spec.pick == TestSpec::Pick::MarkedAt ? Drill::PickRule::MarkedAt : Drill::PickRule::NonTank;
+        std::vector<std::size_t> const pool = Drill::PickPool(candidates, rule, source ? spec.minDist : 0.f,
+            spec.pickStacks);
         if (pool.empty())
             return nullptr;
         Player* p = members[pool[dice.rng.Index(static_cast<uint32>(pool.size()))]];
@@ -2048,6 +2070,27 @@ namespace
             elig.playersOnly = true;
             spec.eligibility = elig;
         }
+        if (spec.exemptMember)
+        {
+            // exempt=member (Gnomeregan WP-G1, TB6): every scope member (the GM too, as for any zone) but the member of
+            // a pick= drawn now (pick=same, pick=marked:<n>: the owner the step landed on) is eligible; nobody left
+            // keeps a set no player is in.
+            Player* member = PickMember(owner, spec, dice);
+            if (!member)
+            {
+                err = kNoMemberMessage;
+                return {};
+            }
+            std::vector<ObjectGuid> members;
+            for (Player const* p : GroupMembers(owner, spec.gm, true))
+                members.push_back(p->GetGUID());
+            std::vector<ObjectGuid> const rest = Drill::AllBut(members, member->GetGUID());
+            Eligibility elig = spec.eligibility.value_or(Eligibility());
+            elig.carriers = GuidSet(rest.begin(), rest.end());
+            if (elig.carriers.empty())
+                elig.carriers.insert(ObjectGuid::Empty);
+            spec.eligibility = elig;
+        }
         PlaceInside(owner, spec);
         if (spec.hideOf)
             spec.hideSlots = Drill::PickDistinct(spec.hideOf, spec.hideBlockers,
@@ -2718,6 +2761,14 @@ namespace
             else
                 opt.MarkBad("exempt");
         }
+        // exempt=member (Gnomeregan WP-G1, TB6's save point): a circle eligible to all but the member of its pick=.
+        if (s == "circle" && opt.Has("exempt"))
+        {
+            if (opt.Str("exempt", "") == "member")
+                spec.exemptMember = true;
+            else
+                opt.MarkBad("exempt");
+        }
 
         // eligibility, ordering, self-trigger
         Eligibility elig;
@@ -2944,6 +2995,12 @@ namespace
             spec.pick = TestSpec::Pick::Unmarked;
         else if (pick == "healer")
             spec.pick = TestSpec::Pick::Healer;
+        else if (std::optional<uint32> const stacks = Drill::ParseMarkedPick(pick))
+        {
+            // Gnomeregan WP-G1: pick=marked:<n>, the holder of exactly n Marked stacks (a Rubber Band owner).
+            spec.pick = TestSpec::Pick::MarkedAt;
+            spec.pickStacks = *stacks;
+        }
         else if (pick != "any")
             opt.MarkBad("pick");
         if (opt.Has("shift"))
@@ -3047,8 +3104,10 @@ namespace
             return "bell= places the soak on one of its points: no backoff= or tanknear=";
         if (spec.fix && spec.to == TestSpec::To::None)
             return "fix=1 and reach=1 aim at the to= unit: add to=member, target or me";
-        if (spec.fix && (spec.follow || s == "projectile"))
-            return "fix=1 and reach=1 freeze a line: no follow=1, no projectile";
+        // A frozen projectile is fine (Zul'Farrak's swarms, Gnomeregan F-1f): RegisterRepeat makes either a point
+        // source along a fixed facing, the shape a projectile without to= already has.
+        if (spec.fix && spec.follow)
+            return "fix=1 and reach=1 freeze a line: no follow=1";
         if (spec.minDist > 0.f && spec.to != TestSpec::To::Member)
             return "min= measures a to=member pick from the line's source: add to=member";
         if (spec.past > 0.f && (!spec.reach || spec.to == TestSpec::To::Last))
@@ -3064,6 +3123,8 @@ namespace
             return "away= moves a point anchor; leave anchor= out";
         if (spec.decoy && s == "lanes" && !spec.safe)
             return "decoy=1 on lanes draws the safe=1 lane as a decoy: add safe=1";
+        if (spec.exemptMember && (spec.onlyMember || spec.atEach || spec.decoy))
+            return "exempt=member spares the member of the step's pick=: not with only=member, at=each or decoy=1";
         if (spec.decoy && (spec.lethal || spec.insideYd > 0.f || spec.inBox))
             return "a decoy is never seen by the bots: no lethal=1, inside= or inbox=";
         // Zul'Farrak WP-G1
@@ -3166,6 +3227,16 @@ namespace
         }), members.end());
         if (members.empty())
             return;
+        // pick=unmarked (Gnomeregan WP-G1, the second Rubber Band owner): a member without Marked when there is one.
+        if (spec.pick == TestSpec::Pick::Unmarked)
+        {
+            std::vector<Player*> clean;
+            for (Player* p : members)
+                if (!p->HasAura(Ids::SPELL_MARKED_DRILL))
+                    clean.push_back(p);
+            if (!clean.empty())
+                members = std::move(clean);
+        }
         // pick=healer (Zul'Farrak WP-G1, the healer walker): a healer by the role provider when there is one.
         if (spec.pick == TestSpec::Pick::Healer && selected)
         {
@@ -3457,6 +3528,16 @@ namespace
                         if (twin->IsAIEnabled && twin->AI())
                             twin->AI()->AttackStart(victim);
                     heads.push_back(twin);
+                    // kill=<n> (Gnomeregan WP-G1, TB3): the casting twin is a kill target of priority n (a duplicating
+                    // bug first); the entry outlives it harmlessly (no live unit of the entry, no pick).
+                    if (c.kill)
+                        reg.EditDescriptor(testOwner->GetGUID(), [&c](Descriptor& d)
+                        {
+                            for (TargetEntry const& e : d.targets)
+                                if (e.entry == Ids::NPC_DRILL_CASTER && !e.guid)
+                                    return;
+                            d.targets.emplace_back(Ids::NPC_DRILL_CASTER, static_cast<int8>(c.kill));
+                        });
                 }
                 else
                     LOG_DEBUG("module.bossmechanics", "Drill cast twin: could not summon {}", Ids::NPC_DRILL_CASTER);
@@ -3475,6 +3556,20 @@ namespace
                 if (c.everyMs)
                     for (Creature* head : heads)
                         reg.NoteNextCast(head->GetGUID(), head->GetEntry(), c.spell, now + Milliseconds(c.everyMs));
+            }
+            if (c.noKick)
+            {
+                // nokick=1 (Gnomeregan WP-G1, TB4 with no bug alive): a do-not-kick entry (priority 0), so the bots
+                // hold their kicks; the cast must run to its end (kick=0's must-play judge below).
+                if (unit != testOwner)
+                    Mechanic::TrackUnit(testOwner, unit);
+                reg.EditDescriptor(testOwner->GetGUID(), [&c](Descriptor& d)
+                {
+                    for (InterruptEntry const& e : d.interrupts)
+                        if (e.spellId == c.spell)
+                            return;
+                    d.interrupts.emplace_back(0, c.spell, 0);
+                });
             }
             for (Creature* head : heads)
             {
@@ -3824,6 +3919,180 @@ namespace
             });
     }
 
+    // Drill step `lights` (Gnomeregan WP-G1, MechanicDrill.h LightsStep; the Alert System's MA1-MA4 and the hard mode's
+    // MT23, as KT-G's TurningLights runs them live): every kLightsTickMs the clock turns (the dark start and a
+    // reversal's stop hold it), and once lit each alive member inside a light (2D, InLightCone round the unit where it
+    // stands now) is Spotted once per latch, shared by every light: a Hit failure `Zone/<tag>`, and `faster` percent
+    // more speed. Every `step` ms each light's floor over the next `ahead` ms (LightsClock::Swept) registers as a
+    // lasting no-damage cone on the unit's spot, hot `step` + kLightsOverlapMs past its warning, so the bots read the
+    // swept floor with no gap (its contacts are reported under LightsFloorTag). Nothing is re-registered on a ring's
+    // resolve instant: the cones carry no damage (RB-29).
+    void ScheduleLights(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::LightsStep const& l, RngPtr const& rng)
+    {
+        struct State
+        {
+            Drill::LightsClock clock;
+            std::unordered_map<ObjectGuid, uint32> spottedAt;   // each player's last Spotted (ms into the step)
+            bool started = false;
+        };
+        auto const state = std::make_shared<State>();
+        uint32 const ticks = l.ms / Drill::kLightsTickMs;
+        for (uint32 k = 0; k < ticks; ++k)
+        {
+            uint32 const elapsed = k * Drill::kLightsTickMs;
+            schedule(delay + Milliseconds(elapsed), [spec, l, rng, state, elapsed](Creature* testOwner)
+            {
+                Unit* unit = ObjectAccessor::GetUnit(*testOwner, spec.selected);
+                if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                    return;
+                if (!state->started)
+                {
+                    // light 0's start: start= from the run's facing, pick=any at a random member, else anywhere
+                    float start = rng->rng.Float(0.f, Geo::kTwoPi);
+                    if (l.startDeg)
+                        start = spec.facing + Geo::DegToRad(*l.startDeg);
+                    else if (l.pickMember)
+                    {
+                        TestSpec pick = spec;
+                        pick.pick = TestSpec::Pick::Any;
+                        if (Player* p = PickMember(testOwner, pick, *rng))
+                            start = unit->GetAngle(p);
+                    }
+                    state->clock = Drill::LightsClock(start, l.degPerSec, l.direction, l.litMs);
+                    state->started = true;
+                }
+                else
+                {
+                    state->clock.Advance(Drill::kLightsTickMs);
+                    if (Drill::LightsReverseDue(elapsed, l.litMs, l.reverseMs))
+                        state->clock.Reverse(l.stopMs);
+                }
+                Geo::Vec3 const apex{ unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ() };
+                if (elapsed >= l.litMs)
+                    for (Player const* m : GroupMembers(testOwner, spec.gm, spec.includeGm))
+                    {
+                        if (!m->IsAlive())
+                            continue;
+                        Geo::Vec3 const p{ m->GetPositionX(), m->GetPositionY(), m->GetPositionZ() };
+                        bool lit = false;
+                        for (uint32 i = 0; i < l.count && !lit; ++i)
+                            lit = Drill::InLightCone(apex, state->clock.BearingOf(i, l.count), l.angleDeg, l.lengthYd,
+                                p);
+                        if (!lit)
+                            continue;
+                        auto const last = state->spottedAt.find(m->GetGUID());
+                        if (last != state->spottedAt.end() && elapsed < last->second + l.latchMs)
+                            continue;
+                        state->spottedAt[m->GetGUID()] = elapsed;
+                        PostDrillFailure(testOwner, l.ledgerTag, m->GetGUID(), FailureEvent::Type::Hit);
+                        if (l.fasterPct > 0.f)
+                            state->clock.SetSpeed(Drill::LightsFaster(state->clock.DegPerSec(), l.fasterPct));
+                    }
+                if (elapsed % l.stepMs != 0)
+                    return;
+                uint32 const left = l.ms - elapsed;
+                uint32 const persist = std::min(Drill::LightsPersistMs(l.stepMs),
+                    left > Drill::kLightsWarnMs ? left - Drill::kLightsWarnMs : 0u);
+                if (!persist)
+                    return;
+                for (uint32 i = 0; i < l.count; ++i)
+                {
+                    Drill::LightSector const sector = state->clock.Swept(i, l.count, l.angleDeg, l.aheadMs);
+                    TestSpec cone;
+                    cone.shape = "cone";
+                    cone.size = l.lengthYd;
+                    cone.angle = sector.angleDeg;
+                    cone.warn = Milliseconds(Drill::kLightsWarnMs);
+                    cone.persist = Milliseconds(persist);
+                    cone.tick = Milliseconds(1000);
+                    cone.dmg = -1;
+                    cone.pct = 0.f;
+                    cone.color = Color::Yellow;
+                    cone.tag = Drill::LightsFloorTag(l.ledgerTag);
+                    cone.gm = spec.gm;
+                    cone.includeGm = spec.includeGm;
+                    cone.selected = spec.selected;
+                    cone.facing = sector.bearing;
+                    cone.point = Position(apex.x, apex.y, apex.z, sector.bearing);
+                    std::string ignored;
+                    RegisterTest(testOwner, cone, ignored);
+                }
+            });
+        }
+    }
+
+    // Drill step `movecost` (Gnomeregan WP-G1, MechanicDrill.h MoveCostStep; Static's bot rule, BM-G §7 #12 A): for
+    // `m.ms` the owner's descriptor carries "more than `above` Marked (drill) stacks: no optional move" and, unless
+    // band=0, the ranged band round the owner; the step takes exactly its own entries off at the end (a `describe` or
+    // another step's entries stay).
+    void ScheduleMoveCost(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::MoveCostStep const& m)
+    {
+        schedule(delay, [gm = spec.gm, m](Creature* testOwner)
+        {
+            Registry::GetOrCreate(testOwner->GetMap()).AddScopePlayer(testOwner->GetGUID(), gm);
+            Registry::GetOrCreate(testOwner->GetMap()).EditDescriptor(testOwner->GetGUID(), [&m](Descriptor& d)
+            {
+                d.moveCosts.emplace_back(Ids::SPELL_MARKED_DRILL, m.above);
+                if (m.band)
+                    d.rangeBands.emplace_back(m.bandMinYd, m.bandMaxYd);
+            });
+        });
+        schedule(delay + Milliseconds(m.ms), [m](Creature* testOwner)
+        {
+            Registry::GetOrCreate(testOwner->GetMap()).EditDescriptor(testOwner->GetGUID(), [&m](Descriptor& d)
+            {
+                auto const cost = std::find_if(d.moveCosts.begin(), d.moveCosts.end(), [&m](MoveCostEntry const& e)
+                {
+                    return e.auraId == Ids::SPELL_MARKED_DRILL && e.aboveStacks == m.above;
+                });
+                if (cost != d.moveCosts.end())
+                    d.moveCosts.erase(cost);
+                if (!m.band)
+                    return;
+                auto const band = std::find_if(d.rangeBands.begin(), d.rangeBands.end(), [&m](RangeBandEntry const& e)
+                {
+                    return e.minYd == m.bandMinYd && e.maxYd == m.bandMaxYd && e.who == Who::Any;
+                });
+                if (band != d.rangeBands.end())
+                    d.rangeBands.erase(band);
+            });
+        });
+    }
+
+    // Drill step `saturated` (Gnomeregan WP-G1, MechanicDrill.h SaturatedStep; Viscous Fallout VF5, §7 #38 b A): every
+    // `tick` ms the selected unit inside an armed lasting point circle of the owner (InArmedPool: past its warning) is
+    // an OffSpot failure on its victim, the tank who should have dragged it out (L47, BM drag-out).
+    void ScheduleSaturated(StepScheduler const& schedule, Milliseconds delay, TestSpec const& spec,
+        Drill::SaturatedStep const& st)
+    {
+        for (uint32 at = st.tickMs; at <= st.ms; at += st.tickMs)
+            schedule(delay + Milliseconds(at), [selected = spec.selected, st](Creature* testOwner)
+            {
+                Unit* unit = ObjectAccessor::GetUnit(*testOwner, selected);
+                if (!unit || !unit->IsInWorld() || !unit->IsAlive())
+                    return;
+                Player* tank = unit->GetVictim() ? unit->GetVictim()->ToPlayer() : nullptr;
+                Registry const* reg = Registry::Get(testOwner->GetMap());
+                if (!tank || !reg)
+                    return;
+                Milliseconds const now = GameTime::GetGameTimeMS();
+                bool inside = false;
+                Position const pos = unit->GetPosition();
+                reg->ForEachActive(now, [&inside, &pos, testOwner, now](ActiveMechanic const& m)
+                {
+                    if (inside || m.owner != testOwner->GetGUID() || !m.persist || m.decoy || m.anchor.IsUnit()
+                        || !m.IsShapeKind() || m.shape.type != ShapeType::Circle)
+                        return;
+                    inside = Drill::InArmedPool(m.anchor.point.GetExactDist2d(&pos), m.shape.radius,
+                        static_cast<uint64>(now.count()), static_cast<uint64>(m.resolveAt.count()));
+                });
+                if (inside)
+                    PostDrillFailure(testOwner, st.ledgerTag, tank->GetGUID(), FailureEvent::Type::OffSpot);
+            });
+    }
+
     // RunDrill with the run's dice (a program shares one across its entries).
     bool RunDrillWith(Creature* owner, Unit* boss, ObjectGuid scopeGuid, Drill::Def const& def,
         DrillOptions const& opt, RngPtr const& rng, DrillResult& out, std::string& err)
@@ -3864,6 +4133,9 @@ namespace
             std::optional<Drill::PartnerStep> partner;  // `partner`
             std::optional<Drill::StalkStep> stalk;      // `stalk`
             std::optional<Drill::FloesStep> floes;      // `floes`
+            std::optional<Drill::LightsStep> lights;    // `lights` (Gnomeregan WP-G1)
+            std::optional<Drill::MoveCostStep> moveCost;    // `movecost`
+            std::optional<Drill::SaturatedStep> saturated;  // `saturated`
             std::vector<uint32> repeats{ 0 };           // repeat= / every=: each repeat's offset (Drill::RepeatOffsets)
             TestSpec spec;
         };
@@ -3901,13 +4173,14 @@ namespace
                 p.spec.includeGm = self;
                 p.spec.selected = boss->GetGUID();
                 std::optional<std::string_view> const pick = Drill::Value(line, "pick");
-                if (pick && *pick != "nontank" && *pick != "any" && *pick != "healer")
+                if (pick && *pick != "nontank" && *pick != "any" && *pick != "healer" && *pick != "unmarked")
                 {
                     err = Acore::StringFormat("Drill {}: bad step '{}'", def.name, step.line);
                     return false;
                 }
                 p.spec.pick = pick && *pick == "nontank" ? TestSpec::Pick::NonTank
-                    : pick && *pick == "healer" ? TestSpec::Pick::Healer : TestSpec::Pick::Any;
+                    : pick && *pick == "healer" ? TestSpec::Pick::Healer
+                    : pick && *pick == "unmarked" ? TestSpec::Pick::Unmarked : TestSpec::Pick::Any;
                 std::optional<std::string_view> const one = Drill::Value(line, "one");
                 if (one && (*one != "1" || *n))
                 {
@@ -3979,6 +4252,31 @@ namespace
                 {
                     err = Acore::StringFormat("Drill {}: step '{}': no creature {}", def.name, step.line,
                         p.partner->entry);
+                    return false;
+                }
+                p.spec.gm = scopeGuid;
+                p.spec.includeGm = self;
+                p.spec.selected = boss->GetGUID();
+                p.spec.facing = ctx.facing;
+                planned.push_back(std::move(p));
+                continue;
+            }
+            if (!head.empty() && (head[0] == "lights" || head[0] == "movecost" || head[0] == "saturated"))
+            {
+                // Drill-only (MechanicDrill.h "Gnomeregan shapes"): turning lights with their own Spotted judge, BM-G's
+                // move cost and ranged band for a while, the boss in an armed pool; nothing deals damage.
+                if (head[0] == "lights")
+                    p.lights = Drill::ParseLights(line);
+                else if (head[0] == "movecost")
+                    p.moveCost = Drill::ParseMoveCost(line);
+                else
+                    p.saturated = Drill::ParseSaturated(line);
+                if (!p.lights && !p.moveCost && !p.saturated)
+                {
+                    err = Acore::StringFormat("Drill {}: bad step '{}' (lights <angle> <ms> [n=] [len=] [speed=] "
+                        "[dir=1|-1] [start=<deg>|pick=any] [lit=] [reverse=] [stop=] [faster=] [latch=] [ahead=] "
+                        "[step=] tag=<n>, movecost <above> <ms> [band=<min>:<max>|0], saturated <tick> <ms> tag=<n>)",
+                        def.name, step.line);
                     return false;
                 }
                 p.spec.gm = scopeGuid;
@@ -4083,6 +4381,12 @@ namespace
                 ScheduleStalk(schedule, delay, p.spec, *p.stalk, rng);
             else if (p.floes)
                 ScheduleFloes(schedule, delay, p.spec, *p.floes, rng);
+            else if (p.lights)
+                ScheduleLights(schedule, delay, p.spec, *p.lights, rng);
+            else if (p.moveCost)
+                ScheduleMoveCost(schedule, delay, p.spec, *p.moveCost);
+            else if (p.saturated)
+                ScheduleSaturated(schedule, delay, p.spec, *p.saturated);
             else if (p.holdFacingMs)
                 schedule(delay, [selected = p.spec.selected, ms = *p.holdFacingMs](Creature* testOwner)
                 {

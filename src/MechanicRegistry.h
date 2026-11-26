@@ -186,6 +186,10 @@ namespace BossMechanics
         // Flame: the tank last). Role::None = no role key. The role is the module's role provider's (the owner's
         // victim is the tank). Bots only (Assign::SoakClaimers).
         Role roleLast = Role::None;
+        // Gnomeregan BM-G (F41, the hard mode plates): players below this many stacks of auraSpell never claim (0 =
+        // no floor). Claim only: they stay eligible (a human below it who touches the plate still counts, and a bot
+        // below it keeps out of the soak as an eligible player with no claim). Soak only (Assign::SoakClaimers).
+        uint8 minStacks = 0;
     };
 
     struct SelfTrigger
