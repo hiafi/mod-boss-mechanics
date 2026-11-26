@@ -61,7 +61,8 @@ BossMechanics.ReferenceHealth.Rows = "16:1100:1080 20:1300:1290 35:2038:2072 40:
 #        Example:     "36:20 36h:60 289:60"
 #        Default:     "36:20 36h:60" - Deadmines normal is level 20, heroic level 60 (the code's fallback for a
 #                     missing or malformed value). This file ships
-#                     "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 189h:60":
+#                     "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 189h:60
+#                     389h:60 209:46 209h:60":
 #                     Shadowfang Keep normal is level 20 too (its level 21 bosses read the level 20 row), heroic
 #                     level 60; Scholomance, Stratholme and Blackrock Spire are level 60 on both difficulties
 #                     (their bosses span levels 57 to 62, so the pin keeps them all on the level 60 rows; without
@@ -71,10 +72,12 @@ BossMechanics.ReferenceHealth.Rows = "16:1100:1080 20:1300:1290 35:2038:2072 40:
 #                     Monastery pins heroic only too (level 60): its four wings' normal bosses (levels 32 to 40)
 #                     read the reference health of their own level. Ragefire Chasm pins heroic only (level 60): its
 #                     normal bosses (level 16) read the row 16 of Rows; Deadmines (levels 17 to 21) and Shadowfang Keep
-#                     are pinned to row 20 above, so the new row moves no other dungeon.
+#                     are pinned to row 20 above, so the new row moves no other dungeon. Zul'Farrak pins both
+#                     difficulties: normal level 46 (its bosses span levels 43 to 46; the pin keeps the crew and the
+#                     Pyramid on one row, interpolated between rows 40 and 52 of Rows), heroic level 60.
 #
 
-BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 189h:60 389h:60"
+BossMechanics.ReferenceHealth.MapLevels = "36:20 36h:60 33:20 33h:60 289:60 289h:60 329:60 329h:60 229:60 229h:60 230h:60 189h:60 389h:60 209:46 209h:60"
 
 #
 #    BossMechanics.Telegraph.FollowMode

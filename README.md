@@ -2154,8 +2154,9 @@ Mechanic::Soak(me, soul, 2.f, 1, 26s).OneClaimPerBot().HealerWithinTankReach();
   emergency lines (Lay on Hands, Sacrifice).
 - **Seen only with** (`ActiveMechanic::markerInvisibility`, `Judge::SeenOnlyWithFits`): every marker of the mechanic
   gets the invisibility flag of `type` with value `Rules::kMarkerInvisibilityValue` (1) before it enters the map (what
-  an aura 18 of that type would set, without an aura), so a player needs a detect aura (aura 132) of that type with an
-  amount of at least 1 to see it, and one without never gets the create packet. Set it in the registering statement,
+  an aura 18 of that type would set, without an aura), so a player needs a detect aura (aura 19,
+  SPELL_AURA_MOD_INVISIBILITY_DETECT) of that type with an amount of at least 1 to see it, and one without never
+  gets the create packet. Set it in the registering statement,
   on a mechanic that draws. The hitbox, the ledger and the bots are unchanged; the resolve casts from a hidden marker
   (`Judge::ResolveFromMarker`), since an invisible caster does not detect a player who cannot detect it.
 - **Healer within tank reach** (`ActiveMechanic::healerTankReach`, `Assign::HealerSoakOutOfReach`): a bot healer in

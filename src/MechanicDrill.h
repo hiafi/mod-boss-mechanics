@@ -1530,7 +1530,7 @@ namespace BossMechanics::Drill
     constexpr float kZfSwarmSpeedYdS = 5.f;             // heroic (12.5 yd out at 2.5 s)
     constexpr float kZfSwarmSpeedNormalYdS = 4.f;       // normal (10 yd out at 2.5 s)
     constexpr std::uint32_t kZfRiseMs = 2000;
-    constexpr std::uint32_t kZfReaimMs = 500;           // the turn's warning (the body keeps moving; D1's constant)
+    constexpr std::uint32_t kZfReaimMs = 1500;          // the turn's warning (the body keeps moving; D1's kReaimMs)
     constexpr float kZfTheka2MovedYd = 6.f;             // the drill walks him this far while the pair travels
     constexpr float kZfDevourYd = 6.f;
     constexpr std::uint32_t kZfDevourMs = 2500;
@@ -2564,9 +2564,9 @@ namespace BossMechanics::Drill
                     { 0, "projectile 30 2000 width=4 speed=5 shift=15:-26 to=target fix=1 school=nature pct=45 "
                         "tankpct=45 weak=1 cycle=0/5 tag=1" },
                     { 2000, "walk 6 4000 offset=90 cycle=0/5" },
-                    { 7200, "circle 6 2500 anchor=target school=nature pct=60 tankpct=60 weak=1 cycle=0/5 tag=3" },
-                    { 8000, "projectile 1 500 width=4 speed=5 at=last to=target reach=1 school=nature pct=45 "
+                    { 8000, "projectile 1 1500 width=4 speed=5 at=last to=target reach=1 school=nature pct=45 "
                         "tankpct=45 weak=1 cycle=0/5 tag=2" },
+                    { 8200, "circle 6 2500 anchor=target school=nature pct=60 tankpct=60 weak=1 cycle=0/5 tag=3" },
                     { 12000, "walk 6 4000 offset=270 cycle=0/5" },
                     { 16500, "projectile 30 2000 width=4 speed=4 shift=26:15 to=target fix=1 school=nature pct=30 "
                         "tankpct=30 weak=1 cycle=0/5 tag=4" },
