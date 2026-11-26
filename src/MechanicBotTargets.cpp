@@ -17,6 +17,7 @@
 #include "CreatureAI.h"
 #include "GameTime.h"
 #include "GenericSpellActions.h"
+#include "HealthUtils.h"
 #include "Item.h"
 #include "Log.h"
 #include "Map.h"
@@ -39,6 +40,7 @@
 #include "StringFormat.h"
 #include "UnitScript.h"
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 using namespace BossMechanics;
@@ -96,6 +98,27 @@ namespace
     {
         return v.Active() && (!v.descriptor.ignores.empty()
             || Desc::HasHolds(v.descriptor, HoldEntry::Action::Attacks));
+    }
+
+    // Zul'Farrak F33: an ignore entry for one role (IgnoreEntry::who): only then does the ignore check need the bot's
+    // role (PlayerbotAI::IsTank and the rest are not free; the target filter runs for many units per tick).
+    bool HasRoleIgnores(DescriptorView const& v)
+    {
+        return std::any_of(v.descriptor.ignores.begin(), v.descriptor.ignores.end(),
+            [](IgnoreEntry const& e) { return e.who != Who::Any; });
+    }
+
+    // The bot's role as the target rules read it (Desc::BotFacts).
+    Desc::BotFacts BotFactsOf(Player const* bot)
+    {
+        Player* const p = const_cast<Player*>(bot);     // the playerbots role reads take a non-const player
+        Desc::BotFacts facts;
+        facts.tank = PlayerbotAI::IsTank(p);
+        facts.healer = PlayerbotAI::IsHeal(p);
+        facts.melee = PlayerbotAI::IsMelee(p);
+        facts.mainTank = facts.tank && PlayerbotAI::IsMainTank(p);    // WP-TS: Who::MainTank / Who::AssistTank
+        facts.guid = bot->GetGUID().GetRawValue();
+        return facts;
     }
 
     bool HasDamageHolds(DescriptorView const& v)
@@ -456,7 +479,11 @@ bool BotTargets::IsIgnoredNow(MechanicBotState& st, Registry const& reg, Player 
     DescriptorView& v = st.descriptor;
     if (!unit || !HasIgnores(v) || !TargetRules::MayBeIgnored(v.descriptor, KeyOf(unit), unit->GetEntry()))
         return false;
-    return Desc::IsIgnored(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot));
+    // Zul'Farrak F33: the bot's role only when an entry is for one role (no bot: only the Any entries apply).
+    std::optional<Desc::BotFacts> facts;
+    if (bot && HasRoleIgnores(v))
+        facts = BotFactsOf(bot);
+    return Desc::IsIgnored(v.descriptor, FactsOf(v, reg, unit, now), ContextOf(v, bot), facts ? &*facts : nullptr);
 }
 
 bool BotTargets::KicksHeldNow(MechanicBotState& st, Registry const& reg, Player const* bot, Unit const* unit,
@@ -558,6 +585,24 @@ void BotTargets::AppendExclusions(PlayerbotAI* botAI, GuidSet& exclusions)
         add(g);
 }
 
+float BotTargets::HealReadPct(Unit const* unit, float pct)
+{
+    if (!unit || !unit->IsInWorld())
+        return pct;
+    Registry const* reg = Registry::Get(unit->GetMap());
+    if (!reg)
+        return pct;
+    float out = pct;
+    reg->ForEachEncounter([&](Encounter const& e)
+    {
+        if (!e.described || e.ending || e.descriptor.healUntil.empty())
+            return;
+        out = std::min(out, Desc::HealReadPct(e.descriptor.healUntil, pct,
+            [unit](uint32 aura) { return unit->HasAura(aura); }));
+    });
+    return out;
+}
+
 void BotTargets::InstallTargetFilter()
 {
 #if defined(PLAYERBOTS_HAS_TARGET_FILTER)
@@ -574,6 +619,13 @@ void BotTargets::InstallTargetFilter()
 #else
     LOG_INFO(kLog, "mod-boss-mechanics: this mod-playerbots has no AttackersValue::SetHostileTeammateFilter; bots "
         "never attack a charmed teammate, whatever the boss descriptor's hostilePlayerAuras say");
+#endif
+#if defined(PLAYERBOTS_HAS_HEAL_READ_HOOK)
+    ai::health::SetHealReadHook(&BotTargets::HealReadPct);
+    LOG_INFO(kLog, "mod-boss-mechanics: installed the heal read hook (ai::health::SetHealReadHook)");
+#else
+    LOG_INFO(kLog, "mod-boss-mechanics: this mod-playerbots has no ai::health::SetHealReadHook; bot healers stop at "
+        "their usual line, whatever the boss descriptor's healUntil entries say");
 #endif
 }
 
@@ -676,12 +728,7 @@ TargetRules::Focus MechanicBotKillTargetValue::Calculate()
         units.push_back(unit);
     }
 
-    Desc::BotFacts facts;
-    facts.tank = PlayerbotAI::IsTank(bot);
-    facts.healer = PlayerbotAI::IsHeal(bot);
-    facts.melee = PlayerbotAI::IsMelee(bot);
-    facts.mainTank = facts.tank && PlayerbotAI::IsMainTank(bot);   // WP-TS: Who::MainTank / Who::AssistTank
-    facts.guid = bot->GetGUID().GetRawValue();
+    Desc::BotFacts const facts = BotFactsOf(bot);
     Desc::Context const ctx = ContextOf(v, bot);
     auto unitOf = [&candidates, &units](Desc::Key key) -> Unit*
     {

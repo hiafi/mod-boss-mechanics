@@ -67,7 +67,7 @@ namespace BossMechanics::TargetRules
         for (Desc::TargetCandidate const& c : candidates)
         {
             Desc::UnitFacts const* u = c.facts;
-            if (!u || !u->alive || u->guid == f.target || Desc::IsIgnored(d, *u, ctx))
+            if (!u || !u->alive || u->guid == f.target || Desc::IsIgnored(d, *u, ctx, &bot))
                 continue;
             std::int8_t rank = 0;
             if (std::optional<std::size_t> const e = Desc::MatchTarget(d, *u, bot, ctx))

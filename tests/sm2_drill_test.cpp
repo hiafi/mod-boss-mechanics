@@ -268,11 +268,13 @@ namespace
             <= eggs->cycleMs);
         // the repeats keep the step's tag: the `pass` descriptor counts Zone/60 (DrillPresets::kPassEggTag)
         CHECK(Tag(line) == 60);
-        // every other drill step registers once (none relied on the dropped keys); Ragefire Chasm's fel spots came
-        // later and repeat on purpose (rfc_drill_test)
+        // every other drill step registers once (none relied on the dropped keys); Ragefire Chasm's fel spots and
+        // Zul'Farrak's wails, graves, echoes and Storm Strikes came later and repeat on purpose (rfc_drill_test,
+        // zf_drill_test)
         for (Drill::Def const& d : Drill::All())
             for (Drill::Step const& s : d.steps)
-                if (&d != eggs && std::string_view(d.name) != "ragefire-chasm-shapes")
+                if (&d != eggs && std::string_view(d.name) != "ragefire-chasm-shapes"
+                    && std::string_view(d.name) != "zul-farrak-shapes")
                     CHECK(Drill::StepRepeatOffsets(s.line).size() == 1);
     }
 

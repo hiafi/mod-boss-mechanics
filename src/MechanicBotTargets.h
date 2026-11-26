@@ -85,8 +85,14 @@ namespace BossMechanics
         // MechanicBotStrategy::AppendTargetExclusions: the owner and tracked units that are ignored now.
         void AppendExclusions(PlayerbotAI* botAI, GuidSet& exclusions);
 
+        // Zul'Farrak F17: the health percent bots read for `unit` (the playerbots fork's heal read hook): `pct`, or
+        // less while `unit` carries the aura of a healUntil entry of a live described encounter on its map and is
+        // below that entry's percent (Desc::HealReadPct). Never raises it; `pct` when the map has no registry. Runs
+        // on the unit's map thread.
+        float HealReadPct(Unit const* unit, float pct);
+
         // From the glue's latch (world thread): AttackersValue::SetTargetFilter and SetHostileTeammateFilter when the
-        // fork has them, else nothing.
+        // fork has them, and (Zul'Farrak F17) ai::health::SetHealReadHook, else nothing.
         void InstallTargetFilter();
 
         // One `.mech bots` line.

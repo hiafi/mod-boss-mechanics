@@ -117,7 +117,8 @@ Misuse never asserts: an option that does not fit the kind, a size <= 0 or an op
 `AnchorOn(unit)`, `FollowFacing()`, `ZTolerance(yd)`, `Eligible(...)`, `Order(...)`, `OneClaimPerBot()`,
 `MissedSoak(mode)`, `Count(n)`, `EndBacksOff(yd)`, `TankNearSource(yd)`, `HoldTankFacing(unit)`,
 `Targets(set)`, `SelfTrigger(spell, stacks)`, `From(MeasuredFrom)`, `TankExempt()`, `Color(c)`, `Tag(n)`,
-`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `SparesPets()`, `OnHit(fn)`, `OnResolve(fn)`.
+`NoTelegraph()`, `NoFillTimer()`, `Decoy()`, `Lethal()`, `SparesPets()`, `OnHit(fn)`, `OnResolve(fn)`;
+Zul'Farrak: `SeenOnlyWith(type)`, `HealerWithinTankReach()` ([below](#zulfarrak-additions-bm-1)).
 
 M3 options:
 
@@ -447,7 +448,7 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
             |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
             |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes|scarlet-monastery-shapes-2
-            |ragefire-chasm-shapes> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |ragefire-chasm-shapes|zul-farrak-shapes> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
 .mech bots [all]
 ```
 
@@ -658,6 +659,34 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
     `blink 0 0 at=prev`: on the last point circle's centre; `blink 0 0 home=1`: back) and `cast <spell> <ms> [kick=1]
     [every=<ms>] tag=<n>` (it casts the spell at its victim; `kick=1`: listed for the bots' kicks and a group failure
     when nobody stopped it, else a must-play bar and a group failure when it does not run to its end).
+- Zul'Farrak build (WP-G1 §3.9, drill `zul-farrak-shapes`):
+  - `inbox=<w>x<l>[:<ahead>]` (any shape but a decoy): the bots' hard bounds (`Within`) of a box `w` wide and `l` long
+    along your facing, centered `ahead` yd along it from the selected unit's place at the parse (Antu'sul's trench).
+  - `crawl ... from=<yd>:<bearing>`: the crawling unit starts `yd` from the selected unit at `bearing` degrees from
+    your facing (a soul rising at a grave), not `off=` from a member; `mark=<n>` (soak, crawl): whoever fills it gains
+    n Marked (drill) stacks, up to 10 (a Gathered Soul; the Block's wound: `aura=205009:0:0` then keeps the soaker out
+    of the next one).
+  - `pick=marked|unmarked|healer`: a member holding Marked (the walker), one without it (the living), a healer by the
+    role provider (`marker 1 pick=healer` too); nobody fits: anyone.
+  - `circle ... around=<yd>:<n>`: n circles on a ring of `yd` round the landing, the first along your facing (not
+    with `grid=`, `anchor=` or `at=each`); `circle ... drop=prefer judge=prefer`: the carrier not inside a live
+    lasting point circle of the test owner as it resolves is an OffSpot failure under the tag + 1 (the Icicle's target
+    off the puddles).
+  - `cast ... twin=1`: a Drill Caster (300404) appears 4 yd to the selected unit's left at the owner's level and casts
+    the same spell at the same time; each cast is judged alone (Twin Call: two group failures when neither is kicked;
+    a twin killed in time counts as stopped).
+  - Four drill-only steps (they register nothing in the plan's damage keys; their judges post to the ledger):
+    `afflict <spell> <ms> [n=1] [pick=any|same] [lone=6] [burst=6] tag=<n>` (the spell on n members, cast by the
+    owner, on the dispel list while nobody stands within `lone` of the carrier; a carrier that loses it before `ms`
+    makes every other member within `burst` a Hit `Zone/<tag>`: Calcify's Shatter), `partner <entry> <ms>
+    [every=15000] [grace=3000] [tick=1000] [apart=6] tag=<n>` (a twin of the entry beside the selected unit, its
+    health matched; the kill order flips between the two every `every` ms, the disfavored one ignored by the DPS bots
+    (`IgnoreEntry.For(Who::Dps)`); a DPS member on the disfavored one outside `grace` of a flip is an OffSpot each
+    tick), `stalk <speed> <ms> [every=2000] [trail=<r>] [trailms=15000] [trailtag=<n>] [home=1]` (the selected unit
+    walks at a member picked every `every` ms; a lasting no-damage circle of `r` each 2 yd walked) and `floes <r> <ms>
+    n=<n> ring=<yd> [centre=1] [grace=2000] [tick=1000] tag=<n>` (n circles on a ring round the selected unit, plus one
+    on it, the strict bounds of every member for `ms`, drawn as teal decoys; a member on none of them after `grace` is
+    an OffSpot each tick).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -909,6 +938,29 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     mod-dungeon-bosses `RagefireChasm/`): change both together. The sweep runs `ragefire-chasm-shapes:3`, one sweep for
     this drill alone, 180 s: `mechanics_sweep.py run --programs ragefire-chasm-shapes:3 --duration 180 --iterations 5
     --step 100 --jobs 6 --sweep ragefire-chasm-shapes`.
+  - `zul-farrak-shapes` (Zul'Farrak build §3.9, WP-G1; 60 s, five cycles = 300 s, heroic numbers in `pct=`, §10
+    rulings): cycle 0 Theka (TK1 + TK2: two 4 x 30 yd swarm projectiles at 5 yd/s from points 60 degrees either side of your
+    facing, the creature walking 6 yd meanwhile, the turn after it at their end and the 6 yd circle on it as the body
+    lands; normal's single line at 4 yd/s) and Antu'sul (AS6: 6 yd bolts on anyone in a 10 x 42 yd trench, 9 s apart;
+    AS3 / AS7: a 3-stack, then a 5-stack Marked carrier on the dispel list while nobody is within 6 yd, a dispel near
+    others a Hit; AS10: the 5-stack carrier's 6 yd Stack on the creature); cycle 1 Zum'rah (ZR4 / ZR6: a walker, eight
+    souls every 2 s from 45 to 58 yd out crawling at 4 yd/s, each taken a Marked stack, the 3-stack delivery at the
+    cauldron; ZR12-ZR14: walker-only wails and graves `seen=11` next to living-only echoes; §7 #30 A: a healer walker
+    with `healreach=1` souls, leashed 36.5 yd to the tank) and the crew (BC8 Rain of Fire; BC9 the Seed's 10 yd RunOut,
+    BC1 Gang Up on a fresh mark and BC4 the Ambush under it, landing together; an Ambush elsewhere); cycle 2 the
+    Pyramid (PY1: six 1-body Block soaks 12, 10, 8, 6, 5 s apart, the soaker Marked and kept out until healed; PY4: two
+    28 x 35 yd barrel lanes below the landing's 10 yd bounds; PY7: two Trampling lanes); cycle 3 Ukorz (UK1: a twin and
+    the kill order flipping every 15 s; UK3 + UK4: two 8 yd Bladestorms walking at players at 5 yd/s with sand trails;
+    UK13: the donut 30, 25, 20, 15, 10 yd to 45, 6 s a step, with UK12's 8 yd Lashes and UK5's pairs of pits); cycle 4
+    the pool (GZ2 / GZ3: eleven 14 yd puddles on a 30 yd ring and the 57 x 15 yd pool, water reported, two 3 s
+    Discharges; GZ6: two 2.5 s Icicles dropped into a puddle) and the hard mode, reported (GZ19's 15 yd gather on a
+    walking anchor with a 6 yd lasting spread, three Twin Calls, two sets of floes under Storm Strikes three a second,
+    two Storm's Chosen Stacks). Tags 1-8, 12-19, 21-24, 26, 28, 29, 32, 34 gated and barred on the reference members
+    too, 9, 10, 20 group bars, 11, 25, 27, 30, 31, 33, 35-40 reported (`kZfBarTags`, `kZfGroupTags`,
+    `kZfReferenceTags`, `kZfReportedTags`). The live numbers are mirrored by hand from the bosses' Logic headers in
+    mod-dungeon-bosses `ZulFarrak/`: change both together. The sweep runs `zul-farrak-shapes:5`, one sweep for this
+    drill alone, 300 s: `mechanics_sweep.py run --programs zul-farrak-shapes:5 --duration 300 --iterations 5 --step
+    100 --jobs 6 --sweep zul-farrak-shapes`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -2066,6 +2118,56 @@ kicked), `dispel-stacks` (Magic Affliction cured on the member with the most Tau
 same names. **Limits**: a hold binds the bots only (a human may still hit or kick); pets' own spells on a Damage-held
 unit are not stopped (only an `Attacks` hold pulls pets off); an AoE centered elsewhere that clips a held unit is not
 held. Host tests: `tests/descriptor_ds_test.cpp`.
+
+### Zul'Farrak additions (BM-1)
+
+Four small options for the Zul'Farrak build (HANDOFF §3.11, gaps F11, F14, F17, F33); each is off by default.
+
+| Option | Where | What |
+| --- | --- | --- |
+| `IgnoreEntry(...).For(Who)` | descriptor | only bots of that role ignore it (`Desc::Fits`); default `Who::Any` |
+| `HealUntilEntry(aura, pct, readAs)` | `healUntil` | bots read a carrier below `pct` as at most `readAs` (80) |
+| `SeenOnlyWith(type)` | any drawn kind | markers carry invisibility `type` (0-11): seen only by players detecting it |
+| `HealerWithinTankReach()` | Soak | no bot healer claims it while it lies past healer reach of its nearest tank |
+
+```cpp
+Descriptor d;
+// Ukorz (F33, gap 14): DPS bots leave the disfavored boss out (attacker counts, damage, pets); the tank holds it.
+d.ignores.push_back(IgnoreEntry(NPC_RUUZLU, Condition::Custom(...)).For(Who::Dps));
+// The Pyramid (F17): bot healers keep healing a Grievous Wound carrier on to 95% (the script removes it there).
+d.healUntil.emplace_back(SPELL_GRIEVOUS_WOUND, 95.f);
+// Zum'rah (F11, F14): walker-only graves; a soul a bot healer only takes within its tank's reach.
+Mechanic::Circle(me, pos, 5.f, 3s).Damage(30.f).SeenOnlyWith(11);
+Mechanic::Soak(me, soul, 2.f, 1, 26s).OneClaimPerBot().HealerWithinTankReach();
+```
+
+- **Ignore for one role** (`IgnoreEntry::who`, `Desc::IgnoreConcerns`): `Desc::IsIgnored(d, u, ctx, bot)` applies a
+  role entry only to a bot that fits it (no bot facts: only the `Any` entries). Everything an ignore entry does
+  applies to those bots alone: the unit leaves their `attackers` value (so the stock AoE triggers and the YAML
+  `enemies_within` count one boss fewer), the target filter, their kill order, their damage and their pets'. Tanks and
+  healers keep it; a tank's own splash is a human's and stays. The bot's role is read only when an entry names one.
+- **Heal until** (`Desc::HealReadPct`): while a unit carries the entry's aura (any caster) below `pct`, the percent the
+  bots read is `min(real, readAsPct)`; several entries: the lowest; never raised. The playerbots fork applies it
+  through `ai::health::SetHealReadHook` (`HealthUtils.h`, macro `PLAYERBOTS_HAS_HEAL_READ_HOOK`); this module installs
+  `BotTargets::HealReadPct` beside the target filter (every described, not ending encounter on the unit's map). A fork
+  without the hook logs it at startup and changes nothing. 80 sits under the shared 85% heal trigger and above the
+  emergency lines (Lay on Hands, Sacrifice).
+- **Seen only with** (`ActiveMechanic::markerInvisibility`, `Judge::SeenOnlyWithFits`): every marker of the mechanic
+  gets the invisibility flag of `type` with value `Rules::kMarkerInvisibilityValue` (1) before it enters the map (what
+  an aura 18 of that type would set, without an aura), so a player needs a detect aura (aura 132) of that type with an
+  amount of at least 1 to see it, and one without never gets the create packet. Set it in the registering statement,
+  on a mechanic that draws. The hitbox, the ledger and the bots are unchanged; the resolve casts from a hidden marker
+  (`Judge::ResolveFromMarker`), since an invisible caster does not detect a player who cannot detect it.
+- **Healer within tank reach** (`ActiveMechanic::healerTankReach`, `Assign::HealerSoakOutOfReach`): a bot healer in
+  combat (playerbots' `IsHeal`) is left out of the soak's claimants, and so keeps out of it, while its nearest live
+  group tank stands farther than healer reach (`HealDistance - 2`, 36.5 yd) from the shape (0 when inside it); a
+  claim it holds stays until that passes reach + 3 yd. It is the leash's own anchor and reach (STAGE-HEALER-RANGE), so
+  the leash never pulls a claimer back off its soak. Humans and the other roles are unaffected; with no live tank the
+  rule is off. With `OneClaimPerBot`, the healer is simply not in that soak's list.
+
+**Check**: `.mech desc` prints `ignore ... (dps only)` and `heal until <aura> to 95% (read as 80%)`. `.mech` keys:
+`seen=<type>` on any shape that draws, `healreach=1` on a `soak` or `crawl`. Host tests:
+`tests/zf_bm1_test.cpp`.
 
 ### Gate
 

@@ -105,6 +105,23 @@ namespace BossMechanics
             return IsShapeKind(k) && !mine && !decoy;
         }
 
+        // SeenOnlyWith(type) (Zul'Farrak F11): a mechanic that draws (telegraph), set in the registering statement
+        // (markers spawn at the commit), with an invisibility type the core has (0 to kMaxMarkerInvisibilityType).
+        constexpr unsigned kMaxMarkerInvisibilityType = 11;     // InvisibilityType: TOTAL_INVISIBILITY_TYPES 12
+
+        constexpr bool SeenOnlyWithFits(bool telegraph, bool committed, unsigned type)
+        {
+            return telegraph && !committed && type <= kMaxMarkerInvisibilityType;
+        }
+
+        // The resolve casts from a marker only while every player can see it: a marker SeenOnlyWith a type
+        // (markerInvisibility >= 0) is invisible, and an invisible unit does not detect a player who cannot detect it
+        // (WorldObject::CanDetectInvisibilityOf), so such a resolve casts from a hidden marker (MechanicResolve.cpp).
+        constexpr bool ResolveFromMarker(int markerInvisibility)
+        {
+            return markerInvisibility < 0;
+        }
+
         // Eligibility's stack window (Registry::IsEligible): a player with `stacks` of the eligibility aura is
         // eligible when minStacks <= stacks <= maxStacks. maxStacks 0 keeps out everyone carrying the aura at all
         // (Vosh'gajin's Needle, `Eligible({BOUND, maxStacks = 0})`: the Bound player is never the needle's target).

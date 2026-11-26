@@ -70,6 +70,11 @@ namespace BossMechanics
         // Blackrock Depths WP-DS: is the bot itself a melee damage dealer (playerbots' IsMelee), for SpotBounds::For
         // (BoundsFor::Melee / Ranged)? Empty: unknown (a damage dealer then fits either bit).
         std::optional<bool> selfMelee;
+        // Zul'Farrak F14 (Soak HealerWithinTankReach): for a group member that is a healer in combat (playerbots'
+        // IsHeal), where its nearest live group tank stands (the healer leash's anchor, BotRole::HealerTankYd);
+        // nullopt for anyone else or with no live tank on the map. Empty: no healer is held back.
+        std::function<std::optional<Geo::Vec3>(ObjectGuid)> healerTank;
+        float healerReachYd = 0.f;          // ...and the leash's reach (BotRole::HealerReachYd)
     };
 
     // What the bot is asked to do for one mechanic (§3.4).

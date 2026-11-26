@@ -105,13 +105,14 @@ namespace BossMechanics::Drill
     };
 
     // Shapes that carry damage keys (dmg=, weak=); stack, soak, holdstill and spot never deal damage (a bell soak's
-    // landing does: DamageStep), nor the drill-only steps marker, walk, leash, chase, holdfacing, blink and cast, nor
-    // `crawl` (a soak on a moving unit).
+    // landing does: DamageStep), nor the drill-only steps marker, walk, leash, chase, holdfacing, blink, cast,
+    // afflict, partner, stalk and floes, nor `crawl` (a soak on a moving unit).
     inline bool DamageShape(std::string_view shape)
     {
         return shape != "stack" && shape != "soak" && shape != "holdstill" && shape != "spot" && shape != "marker"
             && shape != "walk" && shape != "leash" && shape != "chase" && shape != "holdfacing" && shape != "crawl"
-            && shape != "blink" && shape != "cast";
+            && shape != "blink" && shape != "cast" && shape != "afflict" && shape != "partner" && shape != "stalk"
+            && shape != "floes";
     }
 
     // Alexei's slots: one rule (or heroic pair) per slot. Singles warn 3 s (normal), pairs 4 s (heroic); the window is
@@ -1414,6 +1415,201 @@ namespace BossMechanics::Drill
     // same), shadowstep-fans. Cycle 2 (2/3), Taragaman: felstorm-spots three times, spike-hide with three spikes, then
     // an opposite pair, the hard mode bursts.
 
+    // ---- Zul'Farrak shapes (Zul'Farrak build §3.9, WP-G1, drill `zul-farrak-shapes`) -------------------------------
+    // The 13 rows of HANDOFF §3.9 on the heroic numbers of their bosses (pct= in the percent mode; SP's Build spec rows
+    // and the §3.5 tables, §10 rulings). Each step registers what the boss WP registers (the SP row is named at each
+    // tag); change both together. Grammar added for it (MechanicCommand.cpp; parsers at the end of this file):
+    //   inbox=<w>x<l>[:<ahead>]
+    //       a box of hard bounds (Within) <w> wide and <l> long along the run's facing, centered <ahead> yd along it
+    //       from the selected unit's place at the parse (Antu'sul's trench; BoxCorner).
+    //   crawl ... from=<yd>:<bearing>
+    //       the crawling unit starts <yd> from the selected unit at <bearing> degrees from the run's facing (a soul
+    //       rising at a grave), not off= from a member.
+    //   soak ... mark=<n>, crawl ... mark=<n>
+    //       whoever fills it gains <n> Marked (drill) stacks (a Gathered Soul; the Block's Grievous Wound).
+    //   pick=marked|unmarked|healer
+    //       a member holding Marked (the walker), one without it (the living), a healer (else anyone).
+    //   circle ... around=<yd>:<n>
+    //       n circles on a ring of <yd> round the landing, the first along the run's facing (the pool's puddles).
+    //   circle ... drop=prefer judge=prefer
+    //       the carrier not inside a live persistent point circle of the owner at the resolve is an OffSpot failure
+    //       under DropJudgeTag(tag) (the Icicle's target off the puddles; 2.5 s, §10 #40 B).
+    //   cast ... twin=1
+    //       a Drill Caster (300404) appears beside the selected unit and casts the same spell with it; each cast is
+    //       judged (Twin Call: both must be kicked).
+    // And four drill-only steps (nothing in the plan's damage keys):
+    //   afflict <spell> <ms> [n=1] [pick=any|same] [lone=6] [burst=6] tag=<n>
+    //       the spell on n members for <ms>, on the encounter's dispel list held while another player stands within
+    //       lone= of the carrier (Calcify's spacing rule, DispelEntry when Not(NearPlayer)); a carrier that loses it
+    //       before <ms> (a dispel) makes every other member within burst= yd a Hit failure (Shatter).
+    //   partner <entry> <ms> [every=15000] [grace=3000] [tick=1000] [apart=6] tag=<n>
+    //       a twin of <entry> beside the selected unit (its health matched) for <ms>; the kill order flips between the
+    //       two every every= ms (TargetEntry by guid, the other one ignored by the DPS bots: IgnoreEntry.For(Dps)),
+    //       and each DPS member whose victim is not the favored unit grace= after a flip is an OffSpot failure at each
+    //       tick (Fury of the Sands' meter).
+    //   stalk <speed> <ms> [every=2000] [trail=0] [trailms=15000] [trailtag=0] [home=1]
+    //       the selected unit walks at <speed> yd/s toward a member picked anew every every= ms (Bladestorm); with
+    //       trail=<r>, a lasting circle of r (no damage) every kZfTrailEveryYd walked (Bladestorm's trail).
+    //   floes <r> <ms> n=<n> ring=<yd> [centre=1] [grace=2000] [tick=1000] tag=<n>
+    //       n circles of r on a ring round the selected unit (a random rotation; centre=1 adds one on it), the strict
+    //       bounds (Within ... Strict) of every member for <ms>, drawn as decoys; a member on none of them grace= after
+    //       the start is an OffSpot failure at each tick (the Deluge's floes).
+    // Tags (sweep keys `<Kind>/<tag>`):
+    constexpr std::uint32_t kZfTagSwarm = 1;            // TK1 heroic: the 4 yd swarm lines, two at once at 5 yd/s
+    constexpr std::uint32_t kZfTagReaim = 2;            // TK1: the swarm turning at its end after him
+    constexpr std::uint32_t kZfTagDevour = 3;           // TK2 heroic: the 6 yd circle on him at the arrival
+    constexpr std::uint32_t kZfTagSwarmNormal = 4;      // TK1 normal: one line at 4 yd/s
+    constexpr std::uint32_t kZfTagDevourNormal = 5;     // TK2 normal
+    constexpr std::uint32_t kZfTagBolt = 6;             // AS6 / AS7: the 6 yd Shatterbolt circle round its target
+    constexpr std::uint32_t kZfTagShatter = 7;          // AS7: a dispel with another player within 6 yd
+    constexpr std::uint32_t kZfTagStoneflesh = 8;       // AS10 heroic: the 5-stack carrier's Stack on him (Stack/8)
+    constexpr std::uint32_t kZfTagSoul = 9;             // ZR4 / ZR6: a soul bound at the cauldron (group)
+    constexpr std::uint32_t kZfTagDelivery = 10;        // ZR6: a Bound Dead not freed by a 2-soul walker (group)
+    constexpr std::uint32_t kZfTagHealerSoul = 11;      // ZR4 with a healer walker past reach: souls bound, reported
+    constexpr std::uint32_t kZfTagHealerLeash = 12;     // §7 #30 A: the walking healer past 36.5 yd of the tank
+    constexpr std::uint32_t kZfTagWail = 13;            // ZR13 heroic: 6 yd at the walker (walker only, seen=11)
+    constexpr std::uint32_t kZfTagGrave = 14;           // ZR14 heroic: 6 yd graves near the walker (walker only)
+    constexpr std::uint32_t kZfTagEcho = 15;            // ZR12 heroic: 5 yd under a living player (living only)
+    constexpr std::uint32_t kZfTagSeed = 16;            // BC9 heroic: the Seed's 10 yd RunOut
+    constexpr std::uint32_t kZfTagGangUp = 17;          // BC1: the 6 yd Stack on the mark (Stack/17)
+    constexpr std::uint32_t kZfTagAmbush = 18;          // BC4 heroic: the 3 yd Ambush, once on the running mark
+    constexpr std::uint32_t kZfTagRain = 19;            // BC8 heroic: the 8 yd Rain of Fire, 9 s
+    constexpr std::uint32_t kZfTagBlock = 20;           // PY1: the Block unsoaked (group)
+    constexpr std::uint32_t kZfTagBarrel = 21;          // PY4 heroic: the stair-wide barrel lane
+    constexpr std::uint32_t kZfTagTrample = 22;         // PY7 heroic: the 4 yd Trampling Charge lanes
+    constexpr std::uint32_t kZfTagKillOrder = 23;       // UK1: a DPS member on the disfavored boss after the grace
+    constexpr std::uint32_t kZfTagBladestorm = 24;      // UK3 heroic: the 8 yd storm on the walking boss
+    constexpr std::uint32_t kZfTagTrail = 25;           // UK4 heroic: the 4 yd sand trail (a slow), reported
+    constexpr std::uint32_t kZfTagCreeping = 26;        // UK13 heroic: the donut from 30 down to 15 yd
+    constexpr std::uint32_t kZfTagCreepingLast = 27;    // UK13 at 10 yd (reached 80 s into phase 3 live), reported
+    constexpr std::uint32_t kZfTagLash = 28;            // UK12 heroic: the 8 yd Lash spread
+    constexpr std::uint32_t kZfTagPit = 29;             // UK5 heroic: two 6 yd Sinking Sands pits (Sunk)
+    constexpr std::uint32_t kZfTagPitSlow = 30;         // UK5: the pit's lasting slow, reported
+    constexpr std::uint32_t kZfTagWater = 31;           // GZ2 / GZ12: standing in water (Charged), reported
+    constexpr std::uint32_t kZfTagDischarge = 32;       // GZ3 heroic: the 3 s hot water (11 puddles of 14 + the pool)
+    constexpr std::uint32_t kZfTagIcicle = 33;          // GZ6: the Icicle's 1 yd circle on others, reported
+    constexpr std::uint32_t kZfTagIcicleDrop = 34;      // GZ6: the Icicle's target not in a puddle (DropJudgeTag(33))
+    constexpr std::uint32_t kZfTagGather = 35;          // GZ19 hard mode: the 15 yd Stack on the walking anchor
+    constexpr std::uint32_t kZfTagConductive = 36;      // GZ14 / GZ19 hard mode: the 6 yd lasting Spread
+    constexpr std::uint32_t kZfTagFloe = 37;            // GZ22 / GZ23 hard mode: off every floe (OffSpot)
+    constexpr std::uint32_t kZfTagStrike = 38;          // GZ24 hard mode: the 3 yd Storm Strikes, 3 a second
+    constexpr std::uint32_t kZfTagChosen = 39;          // GZ17 hard mode, Bly dead: the 5 yd Stack on the mark
+    constexpr std::uint32_t kZfTagTwinCall = 40;        // GZ20 hard mode: a Twin Call cast nobody kicked (group)
+    constexpr std::uint32_t kZfLastTag = kZfTagTwinCall;
+    constexpr std::uint32_t kZfBarTags[] = { 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24,
+        26, 28, 29, 32, 34 };
+    constexpr std::uint32_t kZfGroupTags[] = { 9, 10, 20 };
+    // Barred on the reference members too: every gated pool takes any member, the tank included (rule 17), the leash
+    // the reference healer and the kill order the reference DPS.
+    constexpr std::uint32_t kZfReferenceTags[] = { 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23,
+        24, 26, 28, 29, 32, 34 };
+    // Reported (§7 #58 A: rows 9, 10 and 13 are the hard mode's; 11, 25, 27, 30, 31 and 33 are by design).
+    constexpr std::uint32_t kZfReportedTags[] = { 11, 25, 27, 30, 31, 33, 35, 36, 37, 38, 39, 40 };
+
+    inline bool ZfBarTag(std::uint32_t tag)
+    {
+        for (std::uint32_t t : kZfBarTags)
+            if (t == tag)
+                return true;
+        return false;
+    }
+
+    // An Icicle's drop judge counts under the circle's tag + 1.
+    constexpr std::uint32_t DropJudgeTag(std::uint32_t circleTag)
+    {
+        return circleTag + 1;
+    }
+
+    constexpr std::uint32_t kZfCycleMs = 60000;
+    constexpr std::uint32_t kZfCycles = 5;              // 300 s: the sweep runs zul-farrak-shapes:5 --duration 300
+    // Theka (D1; SP TK1, TK2; §3.8: rise points 30 yd out in two sectors, here 60 degrees either side of the run's
+    // facing, away from the group). The body leaves its rise point at the end of the 2 s rise and reaches his spot
+    // 30 / speed later; it turns after him there (TK1 "re-aims at its end"), and TK2 is drawn 2.5 s before it lands.
+    constexpr float kZfSwarmYd = 30.f;
+    constexpr float kZfSwarmWidthYd = 4.f;
+    constexpr float kZfSwarmSpeedYdS = 5.f;             // heroic (12.5 yd out at 2.5 s)
+    constexpr float kZfSwarmSpeedNormalYdS = 4.f;       // normal (10 yd out at 2.5 s)
+    constexpr std::uint32_t kZfRiseMs = 2000;
+    constexpr std::uint32_t kZfReaimMs = 500;           // the turn's warning (the body keeps moving; D1's constant)
+    constexpr float kZfTheka2MovedYd = 6.f;             // the drill walks him this far while the pair travels
+    constexpr float kZfDevourYd = 6.f;
+    constexpr std::uint32_t kZfDevourMs = 2500;
+    // Antu'sul (D2; SP AS5-AS7, AS10; §3.8: the trench is 42 yd long and 7 to 13 yd wide, median 9.5; he stands at
+    // its dead end, 1.4 yd off the east wall). §7 #9 A: bots cure only a lone carrier (nobody within 6 yd).
+    constexpr float kZfTrenchWidthYd = 10.f;
+    constexpr float kZfTrenchLengthYd = 42.f;
+    constexpr float kZfTrenchAheadYd = -19.f;           // the box runs from 2 yd behind him to 40 yd toward the group
+    constexpr float kZfBoltYd = 6.f;
+    constexpr std::uint32_t kZfBoltMs = 2000;           // heroic 2 s cast
+    constexpr float kZfLoneYd = 6.f;
+    constexpr std::uint32_t kZfStonefleshStacks = 5;
+    // Zum'rah (D3; SP ZR4, ZR6, ZR12-ZR14; §7 #29 A: graves within 60 yd, souls walk the floor; §7 #30 A: a bot healer
+    // takes only souls within reach of the tank). Heroic: a soul every 2 s at 4 yd/s, a 15 s walk.
+    constexpr std::uint32_t kZfWalkMs = 15000;
+    constexpr std::uint32_t kZfSoulEveryMs = 2000;
+    constexpr float kZfSoulSpeedYdS = 4.f;
+    constexpr float kZfSoulYd = 2.f;
+    constexpr float kZfCauldronYd = 3.f;                // the souls' goal, toward the group (the cauldron is 2.7 yd)
+    constexpr std::uint32_t kZfSoulLifeMs = 16000;      // 55 yd at 4 yd/s take 13 s
+    constexpr std::uint32_t kZfDeliveryStacks = 3;      // the walker's own Marked stack plus two Gathered Souls
+    constexpr float kZfHealerReachYd = 36.5f;           // MechanicLockRules (HealDistance - 2)
+    constexpr std::uint32_t kZfMinLiveSouls = 6;        // crawling at once at the walk's peak (8 a walk; §3.9 "8 to 10")
+    // The Pyramid (D4a, D4b; SP PY1, PY4, PY7; §7 #43: the Block's gap shrinks to the 4 s cast + 1 s).
+    constexpr std::uint32_t kZfBlockMs = 4000;
+    constexpr std::uint32_t kZfBlockFloorMs = kZfBlockMs + 1000;
+    constexpr float kZfBlockYd = 2.f;
+    constexpr float kZfStairWidthYd = 28.f;             // §3.8: 28 yd at the foot, 12 at the lip (§7 #31 A)
+    constexpr float kZfStairYd = 35.f;
+    constexpr float kZfLandingYd = 10.f;                // §3.8: the landing's best disc
+    // Ukorz (D6; SP UK1, UK3-UK5, UK12, UK13; §7 #41).
+    constexpr std::uint32_t kZfFlipMs = 15000;
+    constexpr std::uint32_t kZfFlipGraceMs = 3000;
+    constexpr float kZfStormYd = 8.f;
+    constexpr float kZfStormSpeedYdS = 5.f;             // D6's walk speed is its own constant (designer question)
+    constexpr float kZfTrailYd = 4.f;
+    constexpr float kZfTrailEveryYd = 2.f;
+    constexpr std::uint32_t kZfStalkStepMs = 250;
+    constexpr float kZfCreepOuterYd = 45.f;
+    constexpr float kZfCreepStartYd = 30.f;
+    constexpr float kZfCreepStepYd = 5.f;               // every 20 s live; every 6 s in the drill
+    constexpr float kZfCreepGatedYd = 15.f;             // the last inner radius the bar holds (10: reported)
+    constexpr float kZfLashYd = 8.f;
+    constexpr float kZfPitYd = 6.f;
+    // Velratha and Gahz'rilla (D7; SP GZ2, GZ3, GZ6; §3.8: eleven puddles of 8 yd grown 3 yd a Discharge twice, the
+    // pool as a 57 x 15 yd line).
+    constexpr float kZfPuddleYd = 14.f;
+    constexpr std::uint32_t kZfPuddles = 11;
+    constexpr float kZfPuddleRingYd = 30.f;
+    constexpr std::uint32_t kZfDischargeMs = 3000;
+    constexpr std::uint32_t kZfIcicleMs = 2500;         // §10 (#40 B): 2.5 s on both difficulties (§3.9 said 1.5)
+    // The hard mode (D7Ha, D7Hb; SP GZ17-GZ24).
+    constexpr float kZfGatherYd = 15.f;
+    constexpr float kZfConductiveYd = 6.f;
+    constexpr float kZfFloeYd = 8.f;
+    constexpr std::uint32_t kZfStrikeEveryMs = 333;     // three a second (ruling 43)
+    constexpr float kZfStrikeYd = 3.f;
+    constexpr float kZfStrikeScatterYd = 10.f;
+    constexpr std::uint32_t kZfTwinCallMs = 2000;
+    constexpr std::uint32_t kZfTwinCallSpell = 205010;  // Frost Bolt (drill): 2 s, InterruptFlags 15
+    constexpr std::uint32_t kZfDispelSpell = 205014;    // Magic Affliction (drill): the Calcify stand-in
+    constexpr std::uint32_t kZfPartnerEntry = 300405;   // Drill Add: Ruuzlu's stand-in
+    constexpr std::uint32_t kZfTwinCasterEntry = 300404;    // Drill Caster: the second head
+
+    // ---- the rows (the drill entry below) ----
+    // Cycle 0 (0/5): Theka (a pair of 5 yd/s swarm lines from two rise points, him walking 6 yd meanwhile, the turn
+    // after him at their end and TK2 on the arrival; then a single normal line at 4 yd/s) and Antu'sul (6 yd bolts on
+    // anyone in a 10 x 42 yd trench, a lone 3-stack carrier on the dispel list, then a 5-stack carrier on the dispel
+    // list who also stacks on him). Cycle 1 (1/5): Zum'rah (a walker and eight souls, the 3-stack delivery at the
+    // cauldron, walker-only wails and graves next to living-only echoes; then a healer walker with healreach souls and
+    // the 36.5 yd leash) and the crew (a Seed RunOut, a Gang Up Stack on a running mark and an Ambush under it inside
+    // 4 s, Rain of Fire). Cycle 2 (2/5): the Block (six 1-body Soaks, gaps 12, 10, 8, 6, 5 s, the soaker marked as
+    // wounded and never eligible while marked) and the stair (two barrel lanes over the whole stair with the landing
+    // as bounds, two Trampling lanes). Cycle 3 (3/5): Ukorz (the kill order flipping every 15 s on a partner, two
+    // Bladestorms walking at players with sand trails) and the Creeping Sands (30, 25, 20, 15, then 10 yd, with three
+    // Lashes and two pairs of pits). Cycle 4 (4/5): the pool (eleven 14 yd puddles and the pool line, water reported,
+    // two 3 s Discharges, two Icicles dropped into the puddles) and the hard mode rows (reported): the loose gather on
+    // a walking anchor, three Twin Calls, two sets of floes under Storm Strikes and two Storm's Chosen Stacks.
+
     inline std::vector<Def> const& All()
     {
         static std::vector<Def> const drills = {
@@ -2355,6 +2551,186 @@ namespace BossMechanics::Drill
                     { 54000, "circle 6 1500 shift=0:8 school=shadow pct=30 weak=1 cycle=2/3 tag=17" },
                     { 55000, "circle 6 1500 shift=0:-8 school=shadow pct=30 weak=1 cycle=2/3 tag=17" },
                 }, 3 },     // three cycles a run (180 s): the sweep runs ragefire-chasm-shapes:3
+            // Zul'Farrak build §3.9 (WP-G1): see kZfTagSwarm above.
+            { "zul-farrak-shapes", "slow swarm lines turning after the boss, bolts in a trench with a lone-carrier "
+                "dispel, souls for one walker, walker-only and living-only circles, a stack with a seed and an ambush, "
+                "a shrinking soak rotation, a stair-wide lane, a flipping kill order under a walking storm, a closing "
+                "donut, hot puddles with a carried freeze, the hard mode's gather, floes and twin casts", 60000,
+                false, {
+                    // row 1, Theka TK1 + TK2 heroic: two swarms from rise points 30 yd out, him walking 6 yd meanwhile;
+                    // each body turns after him at its end, TK2 lands with it; then normal's single line
+                    { 0, "projectile 30 2000 width=4 speed=5 shift=15:26 to=target fix=1 school=nature pct=45 "
+                        "tankpct=45 weak=1 cycle=0/5 tag=1" },
+                    { 0, "projectile 30 2000 width=4 speed=5 shift=15:-26 to=target fix=1 school=nature pct=45 "
+                        "tankpct=45 weak=1 cycle=0/5 tag=1" },
+                    { 2000, "walk 6 4000 offset=90 cycle=0/5" },
+                    { 7200, "circle 6 2500 anchor=target school=nature pct=60 tankpct=60 weak=1 cycle=0/5 tag=3" },
+                    { 8000, "projectile 1 500 width=4 speed=5 at=last to=target reach=1 school=nature pct=45 "
+                        "tankpct=45 weak=1 cycle=0/5 tag=2" },
+                    { 12000, "walk 6 4000 offset=270 cycle=0/5" },
+                    { 16500, "projectile 30 2000 width=4 speed=4 shift=26:15 to=target fix=1 school=nature pct=30 "
+                        "tankpct=30 weak=1 cycle=0/5 tag=4" },
+                    { 23500, "circle 6 2500 anchor=target school=nature pct=40 tankpct=40 weak=1 cycle=0/5 tag=5" },
+                    // row 2, Antu'sul AS6 / AS7 heroic in the trench, AS3's spacing rule on a 3-stack and then a
+                    // 5-stack carrier, AS10 heroic: the 5-stack carrier's Stack on him
+                    { 28000, "circle 6 2000 anchor=member pick=any inbox=10x42:-19 pct=27 tankpct=27 weak=1 "
+                        "cycle=0/5 tag=6" },
+                    { 30000, "marker 3 pick=any cycle=0/5" },
+                    { 30000, "afflict 205014 10000 pick=same lone=6 burst=6 cycle=0/5 tag=7" },
+                    { 37000, "circle 6 2000 anchor=member pick=any inbox=10x42:-19 pct=27 tankpct=27 weak=1 "
+                        "cycle=0/5 tag=6" },
+                    { 41000, "marker 0 cycle=0/5" },
+                    { 43000, "marker 5 pick=any cycle=0/5" },
+                    { 43000, "afflict 205014 13000 pick=same lone=6 burst=6 cycle=0/5 tag=7" },
+                    { 43000, "stack 6 3000 anchor=target aura=205009:5 persist=9000 tick=1000 cycle=0/5 tag=8" },
+                    { 46000, "circle 6 2000 anchor=member pick=any inbox=10x42:-19 pct=27 tankpct=27 weak=1 "
+                        "cycle=0/5 tag=6" },
+                    { 55000, "circle 6 2000 anchor=member pick=any inbox=10x42:-19 pct=27 tankpct=27 weak=1 "
+                        "cycle=0/5 tag=6" },
+                    { 57000, "marker 0 cycle=0/5" },
+                    // rows 3 and 4, Zum'rah heroic: a walker (Marked 1), a soul every 2 s from graves 30 to 55 yd out
+                    // crawling to the cauldron at 4 yd/s (each one taken a Marked stack), the delivery (3 stacks: two
+                    // souls); walker-only wails and graves (seen=11) and living-only echoes. Graves 45 to 58 yd out (§7 #29 A: 60 at
+    // most), so six souls crawl at once at the walk's peak
+                    { 0, "marker 1 pick=any cycle=1/5" },
+                    { 0, "crawl 2 16000 from=50:150 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 tag=9" },
+                    { 2000, "crawl 2 16000 from=55:200 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 2000, "circle 6 1500 at=member pick=marked away=7 aura=205009:1 seen=11 school=shadow pct=40 "
+                        "tankpct=40 weak=1 repeat=5 every=3000 cycle=1/5 tag=14" },
+                    { 2000, "circle 6 1500 at=member pick=marked away=14 aura=205009:1 seen=11 school=shadow pct=40 "
+                        "tankpct=40 weak=1 repeat=5 every=3000 cycle=1/5 tag=14" },
+                    { 3000, "circle 6 1500 at=member pick=marked aura=205009:1 seen=11 school=shadow pct=40 "
+                        "tankpct=40 weak=1 repeat=3 every=4000 cycle=1/5 tag=13" },
+                    { 4000, "crawl 2 16000 from=45:120 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 4000, "circle 5 2000 at=member pick=unmarked aura=205009:0:0 school=shadow pct=35 tankpct=35 "
+                        "weak=1 repeat=3 every=4000 cycle=1/5 tag=15" },
+                    { 6000, "crawl 2 16000 from=58:240 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 6000, "soak 2 7000 need=1 at=target shift=-3:0 aura=205009:3 cycle=1/5 tag=10" },
+                    { 8000, "crawl 2 16000 from=52:170 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 10000, "crawl 2 16000 from=48:210 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 12000, "crawl 2 16000 from=56:130 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 14000, "crawl 2 16000 from=50:190 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 cycle=1/5 "
+                        "tag=9" },
+                    { 15500, "marker 0 cycle=1/5" },
+                    // row 3's healer walker (§7 #30 A), once walk 1's souls are all gone (25.3 s at the latest):
+                    // healreach souls 45 to 55 yd out, the healer leashed to the tank
+                    { 26000, "marker 1 pick=healer cycle=1/5" },
+                    { 26000, "leash 36.5 15000 role=healer anchor=tank cycle=1/5 tag=12" },
+                    { 26000, "crawl 2 16000 from=45:150 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 28000, "crawl 2 16000 from=55:200 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 30000, "crawl 2 16000 from=50:120 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 32000, "crawl 2 16000 from=55:240 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 34000, "crawl 2 16000 from=45:170 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 36000, "crawl 2 16000 from=50:210 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 38000, "crawl 2 16000 from=55:130 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 40000, "crawl 2 16000 from=45:190 yd=3 bearing=180 speed=4 aura=205009:1 mark=1 healreach=1 "
+                        "cycle=1/5 tag=11" },
+                    { 41500, "marker 0 cycle=1/5" },
+                    // row 7, the crew heroic: Rain of Fire, then the Seed's RunOut, Gang Up on a fresh mark and the
+                    // Ambush under that mark, all three landing together (inside 4 s); then the Ambush elsewhere
+                    { 42000, "circle 8 1500 at=member pick=any persist=9000 tick=3000 school=fire pct=8 tankpct=8 "
+                        "cycle=1/5 tag=19" },
+                    { 44000, "runout 10 6000 at=member pick=any school=shadow pct=35 tankpct=35 cycle=1/5 tag=16" },
+                    { 46000, "stack 6 4000 anchor=member pick=fresh cycle=1/5 tag=17" },
+                    { 48500, "circle 3 1500 at=member pick=same pct=40 tankpct=40 weak=1 cycle=1/5 tag=18" },
+                    { 53000, "circle 3 1500 at=member pick=fresh pct=40 tankpct=40 weak=1 cycle=1/5 tag=18" },
+                    // row 5, the Block heroic: gaps 12, 10, 8, 6, 5 s (the floor, §7 #43); the soaker is wounded
+                    // (Marked) and not eligible while it lasts; the healers clear it about two Blocks later
+                    { 0, "soak 2 4000 need=1 at=target shift=-2.5:0 aura=205009:0:0 mark=1 cycle=2/5 tag=20" },
+                    { 12000, "soak 2 4000 need=1 at=target shift=-2.5:0 aura=205009:0:0 mark=1 cycle=2/5 tag=20" },
+                    { 19000, "marker 0 cycle=2/5" },
+                    { 22000, "soak 2 4000 need=1 at=target shift=-2.5:0 aura=205009:0:0 mark=1 cycle=2/5 tag=20" },
+                    { 30000, "soak 2 4000 need=1 at=target shift=-2.5:0 aura=205009:0:0 mark=1 cycle=2/5 tag=20" },
+                    { 33000, "marker 0 cycle=2/5" },
+                    { 36000, "soak 2 4000 need=1 at=target shift=-2.5:0 aura=205009:0:0 mark=1 cycle=2/5 tag=20" },
+                    { 41000, "soak 2 4000 need=1 at=target shift=-2.5:0 aura=205009:0:0 mark=1 cycle=2/5 tag=20" },
+                    // row 6, the stair heroic (§7 #31 A): the barrel lane over the stair's whole width below the
+                    // landing (the landing's 10 yd as bounds), the Berserkers' Trampling lanes up to the landing
+                    { 45000, "line 35 3000 width=28 offset=180 shift=11:0 inside=10:0 school=fire pct=50 tankpct=50 "
+                        "weak=1 cycle=2/5 tag=21" },
+                    { 45500, "marker 0 cycle=2/5" },
+                    { 49000, "line 8 1500 width=4 shift=-14:6 to=member pick=any exempt=target reach=1 inside=10:0 "
+                        "pct=30 tankpct=30 weak=1 cycle=2/5 tag=22" },
+                    { 51000, "line 8 1500 width=4 shift=-14:-6 to=member pick=any exempt=target reach=1 inside=10:0 "
+                        "pct=30 tankpct=30 weak=1 cycle=2/5 tag=22" },
+                    { 54000, "line 35 3000 width=28 offset=180 shift=11:0 inside=10:0 school=fire pct=50 tankpct=50 "
+                        "weak=1 cycle=2/5 tag=21" },
+                    // row 8, Ukorz UK1 + UK3 + UK4 heroic: the kill order flips every 15 s between him and a partner;
+                    // two Bladestorms walking at a new player every 2 s, sand trails behind
+                    { 0, "partner 300405 28000 every=15000 grace=3000 apart=6 cycle=3/5 tag=23" },
+                    { 2000, "circle 8 2000 anchor=target persist=8000 tick=1000 pct=15 tankpct=15 cycle=3/5 tag=24" },
+                    { 4000, "stalk 5 8000 every=2000 trail=4 trailms=15000 trailtag=25 home=1 cycle=3/5" },
+                    { 16000, "circle 8 2000 anchor=target persist=8000 tick=1000 pct=15 tankpct=15 cycle=3/5 "
+                        "tag=24" },
+                    { 18000, "stalk 5 8000 every=2000 trail=4 trailms=15000 trailtag=25 home=1 cycle=3/5" },
+                    // row 12, the Creeping Sands heroic: 30 to 10 yd, a step every 6 s (live 20 s), three Lashes and
+                    // two pairs of pits inside the ring's room
+                    { 30000, "donut 45 2000 inner=30 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                        "cycle=3/5 tag=26" },
+                    { 34000, "spread 8 2000 inside=30 school=shadow pct=25 tankpct=25 cycle=3/5 tag=28" },
+                    { 36000, "donut 45 2000 inner=25 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                        "cycle=3/5 tag=26" },
+                    { 38000, "circle 6 1500 at=member pick=fresh inside=25 pct=0 cycle=3/5 tag=29" },
+                    { 38000, "circle 6 1500 at=prev persist=15000 tick=1000 pct=0 cycle=3/5 tag=30" },
+                    { 38000, "circle 6 1500 at=member pick=fresh inside=25 pct=0 cycle=3/5 tag=29" },
+                    { 38000, "circle 6 1500 at=prev persist=15000 tick=1000 pct=0 cycle=3/5 tag=30" },
+                    { 42000, "donut 45 2000 inner=20 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                        "cycle=3/5 tag=26" },
+                    { 42000, "spread 8 2000 inside=20 school=shadow pct=25 tankpct=25 cycle=3/5 tag=28" },
+                    { 47000, "circle 6 1500 at=member pick=fresh inside=20 pct=0 cycle=3/5 tag=29" },
+                    { 47000, "circle 6 1500 at=prev persist=10000 tick=1000 pct=0 cycle=3/5 tag=30" },
+                    { 47000, "circle 6 1500 at=member pick=fresh inside=20 pct=0 cycle=3/5 tag=29" },
+                    { 47000, "circle 6 1500 at=prev persist=10000 tick=1000 pct=0 cycle=3/5 tag=30" },
+                    { 48000, "donut 45 2000 inner=15 at=target persist=6000 tick=1000 school=shadow pct=8 tankpct=8 "
+                        "cycle=3/5 tag=26" },
+                    { 50000, "spread 8 2000 inside=15 school=shadow pct=25 tankpct=25 cycle=3/5 tag=28" },
+                    { 54000, "donut 45 2000 inner=10 at=target persist=4000 tick=1000 school=shadow pct=8 tankpct=8 "
+                        "cycle=3/5 tag=27" },
+                    // row 11, the pool heroic: eleven 14 yd puddles round him and the pool (water, reported), two 3 s
+                    // Discharges over all of it, two Icicles (2.5 s, §10) whose target drops into a puddle
+                    { 0, "circle 14 1000 around=30:11 persist=24000 tick=1000 school=nature pct=0 cycle=4/5 tag=31" },
+                    { 0, "line 57 1000 width=15 offset=90 shift=-28.5:-12 persist=24000 tick=1000 school=nature pct=0 "
+                        "cycle=4/5 tag=31" },
+                    { 6000, "circle 14 3000 around=30:11 school=nature pct=40 tankpct=40 cycle=4/5 tag=32" },
+                    { 6000, "line 57 3000 width=15 offset=90 shift=-28.5:-12 school=nature pct=40 tankpct=40 "
+                        "cycle=4/5 tag=32" },
+                    { 10000, "circle 1 2500 anchor=member pick=any drop=prefer room=45 judge=prefer pct=0 cycle=4/5 "
+                        "tag=33" },
+                    { 14500, "circle 1 2500 anchor=member pick=any drop=prefer room=45 judge=prefer pct=0 cycle=4/5 "
+                        "tag=33" },
+                    { 19000, "circle 14 3000 around=30:11 school=nature pct=40 tankpct=40 cycle=4/5 tag=32" },
+                    { 19000, "line 57 3000 width=15 offset=90 shift=-28.5:-12 school=nature pct=40 tankpct=40 "
+                        "cycle=4/5 tag=32" },
+                    // rows 9, 10, 13, the hard mode (reported, §7 #58 A): the loose gather on a walking anchor, Twin
+                    // Call three times, then two sets of floes under Storm Strikes with Storm's Chosen Stacks
+                    { 26000, "walk 10 12000 offset=90 cycle=4/5" },
+                    { 26000, "stack 15 2000 anchor=target persist=12000 tick=1000 cycle=4/5 tag=35" },
+                    { 26000, "spread 6 2000 persist=12000 tick=2000 school=nature pct=25 tankpct=25 cycle=4/5 "
+                        "tag=36" },
+                    { 30000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
+                    { 40000, "walk 10 3000 offset=270 cycle=4/5" },
+                    { 42000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
+                    { 44000, "floes 8 7000 n=6 ring=18 centre=1 cycle=4/5 tag=37" },
+                    { 45000, "circle 3 1500 at=member pick=any scatter=10 repeat=39 every=333 school=nature pct=30 "
+                        "weak=1 cycle=4/5 tag=38" },
+                    { 46000, "stack 5 4000 anchor=member pick=any cycle=4/5 tag=39" },
+                    { 51000, "floes 8 7000 n=5 ring=17 centre=1 cycle=4/5 tag=37" },
+                    { 53000, "stack 5 4000 anchor=member pick=any cycle=4/5 tag=39" },
+                    { 54000, "cast 205010 2000 kick=1 twin=1 cycle=4/5 tag=40" },
+                }, 5 },     // five cycles a run (300 s): the sweep runs zul-farrak-shapes:5
         };
         return drills;
     }
@@ -2602,7 +2978,10 @@ namespace BossMechanics::Drill
         NonTank,        // never the selected unit's victim
         Other,          // a non-tank the chain has not picked yet (see PickPool)
         Tank,           // the selected unit's victim (Scarlet Monastery G1: Torment on the tank); none: anyone
-        Fresh           // a member, the tank included, the chain has not picked (Ragefire Chasm G1; see PickPool)
+        Fresh,          // a member, the tank included, the chain has not picked (Ragefire Chasm G1; see PickPool)
+        Marked,         // a member holding Marked (drill) (Zul'Farrak G1: the walker); none: anyone
+        Unmarked,       // a member without it (the living); none: anyone
+        Healer          // a healer by the role provider (the healer walker); none: anyone
     };
 
     // One member as a pick sees it (members in guid order).
@@ -2612,6 +2991,8 @@ namespace BossMechanics::Drill
         bool chained = false;   // picked since the last pick that was not pick=other (the chain)
         bool last = false;      // the previous pick
         float dist = 0.f;       // from the shape's source (min=)
+        bool marked = false;    // holds Marked (drill) (pick=marked, unmarked)
+        bool healer = false;    // a healer by the role provider (pick=healer)
     };
 
     // The members a pick draws from (indices into `c`, in order; empty: nobody). pick=other: a non-tank outside the
@@ -2637,6 +3018,16 @@ namespace BossMechanics::Drill
         }
         else if (rule == PickRule::Any)
             collect([](PickCandidate const&) { return true; });
+        else if (rule == PickRule::Marked || rule == PickRule::Unmarked || rule == PickRule::Healer)
+        {
+            // Zul'Farrak G1: the walker, the living, the healer walker; nobody fits: anyone.
+            collect([rule](PickCandidate const& m)
+            {
+                return rule == PickRule::Marked ? m.marked : rule == PickRule::Unmarked ? !m.marked : m.healer;
+            });
+            if (pool.empty())
+                collect([](PickCandidate const&) { return true; });
+        }
         else if (rule == PickRule::Fresh)
         {
             collect([](PickCandidate const& m) { return !m.chained; });
@@ -2931,9 +3322,9 @@ namespace BossMechanics::Drill
         return b;
     }
 
-    // `cast <spell> <ms> [kick=1] [every=<ms>] tag=<n>` (Ragefire Chasm G1; plan keys stripped): ms from kMinCastMs to
-    // kMaxCastMs, every= (with kick=1 only) longer than ms, a whole tag >= 1; nullopt otherwise. `<ms>` is the cast's
-    // own length: the judge reads it kCastJudgeLeadMs before its end.
+    // `cast <spell> <ms> [kick=1] [every=<ms>] [twin=1] tag=<n>` (Ragefire Chasm G1, twin= Zul'Farrak G1; plan keys
+    // stripped): ms from kMinCastMs to kMaxCastMs, every= (with kick=1 only) longer than ms, a whole tag >= 1; nullopt
+    // otherwise. `<ms>` is the cast's own length: the judge reads it kCastJudgeLeadMs before its end.
     constexpr std::uint32_t kMinCastMs = 500;
     constexpr std::uint32_t kMaxCastMs = 30000;
     constexpr std::uint32_t kCastJudgeLeadMs = 150;
@@ -2945,6 +3336,7 @@ namespace BossMechanics::Drill
         std::uint32_t everyMs = 0;      // 0: no cadence noted
         bool kick = false;
         std::uint32_t ledgerTag = 0;
+        bool twin = false;              // twin=1 (Zul'Farrak G1): a Drill Caster beside it casts it too, judged alone
     };
 
     // Is the cast a group failure? `running`: it still runs kCastJudgeLeadMs before its end (false: it never started,
@@ -2958,7 +3350,7 @@ namespace BossMechanics::Drill
     inline std::optional<CastStep> ParseCast(std::string_view line)
     {
         std::vector<std::string_view> const t = Tokens(line);
-        if (t.size() < 3 || t[0] != "cast" || !OnlyKeys(t, { "kick", "every", "tag" }))
+        if (t.size() < 3 || t[0] != "cast" || !OnlyKeys(t, { "kick", "every", "tag", "twin" }))
             return std::nullopt;
         std::optional<float> const ms = Number(t[2]);
         if (!ms || *ms < static_cast<float>(kMinCastMs) || *ms > static_cast<float>(kMaxCastMs))
@@ -2985,6 +3377,12 @@ namespace BossMechanics::Drill
             if (!every || !c.kick || *every <= *ms)
                 return std::nullopt;
             c.everyMs = static_cast<std::uint32_t>(*every);
+        }
+        if (std::optional<std::string_view> const v = Value(line, "twin"))
+        {
+            if (*v != "0" && *v != "1")
+                return std::nullopt;
+            c.twin = *v == "1";
         }
         std::optional<std::string_view> const tag = Value(line, "tag");
         std::optional<float> const n = tag ? Number(*tag) : std::nullopt;
@@ -3020,6 +3418,402 @@ namespace BossMechanics::Drill
         }
         return out;
     }
+
+    // ---- Zul'Farrak shapes: the grammar's pure halves (WP-G1; MechanicDrill.h "Zul'Farrak shapes") ----------------
+
+    // A whole number token (digits only, at most 9 of them); nullopt otherwise.
+    inline std::optional<std::uint32_t> DigitsNumber(std::string_view s)
+    {
+        if (s.empty() || s.size() > 9)
+            return std::nullopt;
+        std::uint32_t n = 0;
+        for (char const ch : s)
+        {
+            if (ch < '0' || ch > '9')
+                return std::nullopt;
+            n = n * 10 + static_cast<std::uint32_t>(ch - '0');
+        }
+        return n;
+    }
+
+    // `tag=<n>` of a drill-only step: a whole tag >= 1; nullopt otherwise.
+    inline std::optional<std::uint32_t> StepTag(std::string_view line)
+    {
+        std::optional<std::string_view> const tag = Value(line, "tag");
+        std::optional<std::uint32_t> const n = tag ? DigitsNumber(*tag) : std::nullopt;
+        return n && *n >= 1 ? n : std::nullopt;
+    }
+
+    // `inbox=<w>x<l>[:<ahead>]`: w and l in (0, 100], ahead at most 50 yd either way (0 when absent).
+    struct BoxSpec
+    {
+        float width = 0.f;
+        float length = 0.f;
+        float ahead = 0.f;
+    };
+
+    inline std::optional<BoxSpec> ParseInBox(std::string_view value)
+    {
+        std::size_t const colon = value.find(':');
+        std::string_view const dims = value.substr(0, colon);
+        std::size_t const x = dims.find('x');
+        if (x == std::string_view::npos)
+            return std::nullopt;
+        std::optional<float> const w = Number(dims.substr(0, x));
+        std::optional<float> const l = Number(dims.substr(x + 1));
+        if (!w || !l || *w <= 0.f || *l <= 0.f || *w > 100.f || *l > 100.f)
+            return std::nullopt;
+        BoxSpec out{ *w, *l, 0.f };
+        if (colon != std::string_view::npos)
+        {
+            std::optional<float> const ahead = SignedNumber(value.substr(colon + 1));
+            if (!ahead || std::fabs(*ahead) > 50.f)
+                return std::nullopt;
+            out.ahead = *ahead;
+        }
+        return out;
+    }
+
+    // The corner SpotBounds::Box takes (X along `facing` for `length`, Y to its left for `width`) of a box centered on
+    // `centre`.
+    inline Geo::Vec3 BoxCorner(Geo::Vec3 const& centre, float facing, float width, float length)
+    {
+        return Shifted(centre, facing, -length / 2.f, -width / 2.f);
+    }
+
+    // Is `p` inside that box (the plane)?
+    inline bool InBox(Geo::Vec3 const& centre, float facing, float width, float length, Geo::Vec3 const& p)
+    {
+        float const dx = p.x - centre.x;
+        float const dy = p.y - centre.y;
+        float const along = dx * std::cos(facing) + dy * std::sin(facing);
+        float const across = -dx * std::sin(facing) + dy * std::cos(facing);
+        return std::fabs(along) <= length / 2.f && std::fabs(across) <= width / 2.f;
+    }
+
+    // `crawl ... from=<yd>:<bearing>` (yd in (0, 100], bearing in degrees, either sign) and `circle ...
+    // around=<yd>:<n>` (yd in (0, 100], n from 2 to kMaxAround): two numbers split by a colon.
+    struct PolarSpec
+    {
+        float yd = 0.f;
+        float second = 0.f;     // from=: the bearing (degrees); around=: the count
+    };
+
+    constexpr std::uint32_t kMaxAround = 16;
+
+    inline std::optional<PolarSpec> ParseFrom(std::string_view value)
+    {
+        std::size_t const colon = value.find(':');
+        if (colon == std::string_view::npos)
+            return std::nullopt;
+        std::optional<float> const yd = Number(value.substr(0, colon));
+        std::optional<float> const bearing = SignedNumber(value.substr(colon + 1));
+        if (!yd || *yd <= 0.f || *yd > 100.f || !bearing || std::fabs(*bearing) > 360.f)
+            return std::nullopt;
+        return PolarSpec{ *yd, *bearing };
+    }
+
+    inline std::optional<PolarSpec> ParseAround(std::string_view value)
+    {
+        std::size_t const colon = value.find(':');
+        if (colon == std::string_view::npos)
+            return std::nullopt;
+        std::optional<float> const yd = Number(value.substr(0, colon));
+        std::optional<std::uint32_t> const n = DigitsNumber(value.substr(colon + 1));
+        if (!yd || *yd <= 0.f || *yd > 100.f || !n || *n < 2 || *n > kMaxAround)
+            return std::nullopt;
+        return PolarSpec{ *yd, static_cast<float>(*n) };
+    }
+
+    // Where a `from=` crawl starts: `yd` from `centre` at `bearingDeg` from `facing` (counterclockwise).
+    inline Geo::Vec3 FromPoint(Geo::Vec3 const& centre, float facing, float yd, float bearingDeg)
+    {
+        return Shifted(centre, facing + Geo::DegToRad(bearingDeg), yd, 0.f);
+    }
+
+    // `mark=<n>` (soak, crawl): 1 to kMaxMark Marked (drill) stacks for whoever fills it.
+    constexpr std::uint32_t kMaxMark = 10;      // Ids::MARKED_DRILL_MAX_STACKS
+
+    // The stacks a holder of `have` reaches after `add` more (never past kMaxMark).
+    constexpr std::uint32_t MarkedAfter(std::uint32_t have, std::uint32_t add)
+    {
+        return have + add > kMaxMark ? kMaxMark : have + add;
+    }
+
+    // `afflict <spell> <ms> [n=1] [pick=any|same] [lone=6] [burst=6] tag=<n>` (plan keys stripped): ms from 1000 to
+    // kMaxWalkMs, n from 1 to 5, lone and burst in (0, 20]; nullopt otherwise.
+    struct AfflictStep
+    {
+        std::uint32_t spell = 0;
+        std::uint32_t ms = 0;
+        std::uint32_t count = 1;
+        bool same = false;              // pick=same: the last pick first (a `marker` before it)
+        float lone = 6.f;               // DispelEntry when Not(NearPlayer(lone))
+        float burst = 6.f;              // Shatter: the others this near a dispelled carrier
+        std::uint32_t ledgerTag = 0;
+    };
+
+    constexpr std::uint32_t kAfflictPollMs = 250;
+
+    inline std::optional<AfflictStep> ParseAfflict(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "afflict" || !OnlyKeys(t, { "n", "pick", "lone", "burst", "tag" }))
+            return std::nullopt;
+        AfflictStep a;
+        std::optional<std::uint32_t> const spell = DigitsNumber(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        std::optional<std::uint32_t> const tag = StepTag(line);
+        if (!spell || !*spell || !ms || *ms < 1000 || *ms > kMaxWalkMs || !tag)
+            return std::nullopt;
+        a.spell = *spell;
+        a.ms = *ms;
+        a.ledgerTag = *tag;
+        if (std::optional<std::string_view> const v = Value(line, "n"))
+        {
+            std::optional<std::uint32_t> const n = DigitsNumber(*v);
+            if (!n || *n < 1 || *n > 5)
+                return std::nullopt;
+            a.count = *n;
+        }
+        if (std::optional<std::string_view> const v = Value(line, "pick"))
+        {
+            if (*v != "any" && *v != "same")
+                return std::nullopt;
+            a.same = *v == "same";
+        }
+        for (auto [key, field] : { std::pair<std::string_view, float*>{ "lone", &a.lone }, { "burst", &a.burst } })
+            if (std::optional<std::string_view> const v = Value(line, key))
+            {
+                std::optional<float> const yd = Number(*v);
+                if (!yd || *yd <= 0.f || *yd > 20.f)
+                    return std::nullopt;
+                *field = *yd;
+            }
+        return a;
+    }
+
+    // A carrier that lost the aura before the step's end (`elapsedMs` < ms) was dispelled: every other member within
+    // `burst` (the plane) is hit. An aura that ran its course is no dispel.
+    inline bool ShatterHits(Geo::Vec3 const& carrier, Geo::Vec3 const& other, float burst)
+    {
+        float const dx = other.x - carrier.x;
+        float const dy = other.y - carrier.y;
+        return dx * dx + dy * dy <= burst * burst;
+    }
+
+    // `partner <entry> <ms> [every=15000] [grace=3000] [tick=1000] [apart=6] tag=<n>` (plan keys stripped): ms from 2 s
+    // to kMaxWalkMs, every from 2 s, grace below every, tick from 250 ms, apart in [2, 20]; nullopt otherwise.
+    struct PartnerStep
+    {
+        std::uint32_t entry = 0;
+        std::uint32_t ms = 0;
+        std::uint32_t everyMs = kZfFlipMs;
+        std::uint32_t graceMs = kZfFlipGraceMs;
+        std::uint32_t tickMs = 1000;
+        float apart = 6.f;
+        std::uint32_t ledgerTag = 0;
+    };
+
+    inline std::optional<PartnerStep> ParsePartner(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "partner" || !OnlyKeys(t, { "every", "grace", "tick", "apart", "tag" }))
+            return std::nullopt;
+        PartnerStep p;
+        std::optional<std::uint32_t> const entry = DigitsNumber(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        std::optional<std::uint32_t> const tag = StepTag(line);
+        if (!entry || !*entry || !ms || *ms < 2000 || *ms > kMaxWalkMs || !tag)
+            return std::nullopt;
+        p.entry = *entry;
+        p.ms = *ms;
+        p.ledgerTag = *tag;
+        for (auto [key, field] : { std::pair<std::string_view, std::uint32_t*>{ "every", &p.everyMs },
+            { "grace", &p.graceMs }, { "tick", &p.tickMs } })
+            if (std::optional<std::string_view> const v = Value(line, key))
+            {
+                std::optional<std::uint32_t> const n = DigitsNumber(*v);
+                if (!n)
+                    return std::nullopt;
+                *field = *n;
+            }
+        if (std::optional<std::string_view> const v = Value(line, "apart"))
+        {
+            std::optional<float> const yd = Number(*v);
+            if (!yd || *yd < 2.f || *yd > 20.f)
+                return std::nullopt;
+            p.apart = *yd;
+        }
+        if (p.everyMs < 2000 || p.graceMs >= p.everyMs || p.tickMs < 250)
+            return std::nullopt;
+        return p;
+    }
+
+    // Is the selected unit (true) or the partner (false) the favored target `elapsedMs` into the step? The selected
+    // unit first, flipping every `everyMs`.
+    constexpr bool PartnerSelectedFavored(std::uint32_t elapsedMs, std::uint32_t everyMs)
+    {
+        return everyMs == 0 || (elapsedMs / everyMs) % 2 == 0;
+    }
+
+    // Is a tick `elapsedMs` into the step judged? Not within `graceMs` of the start or of a flip.
+    constexpr bool PartnerJudged(std::uint32_t elapsedMs, std::uint32_t everyMs, std::uint32_t graceMs)
+    {
+        return everyMs == 0 ? elapsedMs >= graceMs : elapsedMs % everyMs >= graceMs;
+    }
+
+    // `stalk <speed> <ms> [every=2000] [trail=0] [trailms=15000] [trailtag=0] [home=1]` (plan keys stripped): speed in
+    // (0, 14], ms from kZfStalkStepMs to kMaxWalkMs, every from 500 ms, trail in [0, 10] (0: none), trailms from 1 s
+    // with a trail, trailtag >= 1 with a trail; nullopt otherwise.
+    struct StalkStep
+    {
+        float speed = 0.f;
+        std::uint32_t ms = 0;
+        std::uint32_t everyMs = 2000;
+        float trail = 0.f;
+        std::uint32_t trailMs = 15000;
+        std::uint32_t trailTag = 0;
+        bool home = false;
+    };
+
+    inline std::optional<StalkStep> ParseStalk(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "stalk" || !OnlyKeys(t, { "every", "trail", "trailms", "trailtag", "home" }))
+            return std::nullopt;
+        StalkStep s;
+        std::optional<float> const speed = Number(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        if (!speed || *speed <= 0.f || *speed > 14.f || !ms || *ms < kZfStalkStepMs || *ms > kMaxWalkMs)
+            return std::nullopt;
+        s.speed = *speed;
+        s.ms = *ms;
+        for (auto [key, field] : { std::pair<std::string_view, std::uint32_t*>{ "every", &s.everyMs },
+            { "trailms", &s.trailMs }, { "trailtag", &s.trailTag } })
+            if (std::optional<std::string_view> const v = Value(line, key))
+            {
+                std::optional<std::uint32_t> const n = DigitsNumber(*v);
+                if (!n)
+                    return std::nullopt;
+                *field = *n;
+            }
+        if (std::optional<std::string_view> const v = Value(line, "trail"))
+        {
+            std::optional<float> const r = Number(*v);
+            if (!r || *r > 10.f)
+                return std::nullopt;
+            s.trail = *r;
+        }
+        if (std::optional<std::string_view> const v = Value(line, "home"))
+        {
+            if (*v != "0" && *v != "1")
+                return std::nullopt;
+            s.home = *v == "1";
+        }
+        if (s.everyMs < 500 || (s.trail > 0.f && (s.trailMs < 1000 || !s.trailTag)))
+            return std::nullopt;
+        return s;
+    }
+
+    // The stalk's walked distance since its last trail circle: a new one when it reaches kZfTrailEveryYd (the rest
+    // carries over).
+    struct TrailMeter
+    {
+        float since = 0.f;
+
+        bool Walk(float yd)
+        {
+            since += yd;
+            if (since < kZfTrailEveryYd)
+                return false;
+            since -= kZfTrailEveryYd;
+            return true;
+        }
+    };
+
+    // `floes <r> <ms> n=<n> ring=<yd> [centre=1] [grace=2000] [tick=1000] tag=<n>` (plan keys stripped): r in (0, 20],
+    // ms from 1 s to kMaxWalkMs, n from 1 to 12, ring in (0, 40], grace below ms, tick from 250 ms; nullopt otherwise.
+    struct FloesStep
+    {
+        float r = 0.f;
+        std::uint32_t ms = 0;
+        std::uint32_t n = 0;
+        float ring = 0.f;
+        bool centre = false;
+        std::uint32_t graceMs = 2000;
+        std::uint32_t tickMs = 1000;
+        std::uint32_t ledgerTag = 0;
+    };
+
+    inline std::optional<FloesStep> ParseFloes(std::string_view line)
+    {
+        std::vector<std::string_view> const t = Tokens(line);
+        if (t.size() < 3 || t[0] != "floes" || !OnlyKeys(t, { "n", "ring", "centre", "grace", "tick", "tag" }))
+            return std::nullopt;
+        FloesStep f;
+        std::optional<float> const r = Number(t[1]);
+        std::optional<std::uint32_t> const ms = DigitsNumber(t[2]);
+        std::optional<std::uint32_t> const tag = StepTag(line);
+        std::optional<std::string_view> const n = Value(line, "n");
+        std::optional<std::string_view> const ring = Value(line, "ring");
+        if (!r || *r <= 0.f || *r > 20.f || !ms || *ms < 1000 || *ms > kMaxWalkMs || !tag || !n || !ring)
+            return std::nullopt;
+        f.r = *r;
+        f.ms = *ms;
+        f.ledgerTag = *tag;
+        std::optional<std::uint32_t> const count = DigitsNumber(*n);
+        std::optional<float> const ringYd = Number(*ring);
+        if (!count || *count < 1 || *count > 12 || !ringYd || *ringYd <= 0.f || *ringYd > 40.f)
+            return std::nullopt;
+        f.n = *count;
+        f.ring = *ringYd;
+        if (std::optional<std::string_view> const v = Value(line, "centre"))
+        {
+            if (*v != "0" && *v != "1")
+                return std::nullopt;
+            f.centre = *v == "1";
+        }
+        for (auto [key, field] : { std::pair<std::string_view, std::uint32_t*>{ "grace", &f.graceMs },
+            { "tick", &f.tickMs } })
+            if (std::optional<std::string_view> const v = Value(line, key))
+            {
+                std::optional<std::uint32_t> const k = DigitsNumber(*v);
+                if (!k)
+                    return std::nullopt;
+                *field = *k;
+            }
+        if (f.graceMs >= f.ms || f.tickMs < 250)
+            return std::nullopt;
+        return f;
+    }
+
+    // The floes' centres: one on `centre` (with centre=1), then n on the ring from bearing `rotation`.
+    inline std::vector<Geo::Vec3> FloeCentres(Geo::Vec3 const& centre, FloesStep const& f, float rotation)
+    {
+        std::vector<Geo::Vec3> out;
+        if (f.centre)
+            out.push_back(centre);
+        for (Geo::Vec3 const& p : RingSpots(centre, f.ring, f.n, rotation))
+            out.push_back(p);
+        return out;
+    }
+
+    // Is `p` on any floe (the plane)?
+    inline bool OnAnyFloe(std::vector<Geo::Vec3> const& centres, float r, Geo::Vec3 const& p)
+    {
+        for (Geo::Vec3 const& c : centres)
+        {
+            float const dx = p.x - c.x;
+            float const dy = p.y - c.y;
+            if (dx * dx + dy * dy <= r * r)
+                return true;
+        }
+        return false;
+    }
+
+    // `cast ... twin=1`: the second head stands this far to the selected unit's left.
+    constexpr float kTwinApartYd = 4.f;
 
     // ---- repeat= and every= on a drill step (Scarlet Monastery G2: the runner used to drop them) -------------------
     // `.mech test` reads `repeat=` (1, at most kMaxStepRepeat) and `every=` (1000 ms) and registers the repeats every
