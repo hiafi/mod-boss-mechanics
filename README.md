@@ -141,8 +141,10 @@ M3 options:
 
 `Cluster(n)` must be set in the statement that registers the Stack; once the Stack has committed it is refused.
 `Ordering::roleLast` (Soak, SM-BM): players of that role claim only what the others leave
-([Scarlet Monastery additions](#scarlet-monastery-additions-sm-bm)). A Spread or RunOut with `Persistent` judges every
-carrier's circle at every tick and keeps the rings on their carriers (each tick one `onResolve`).
+([Scarlet Monastery additions](#scarlet-monastery-additions-sm-bm)). `Ordering::minStacks` (Soak, Gnomeregan BM-G):
+players below that many stacks never claim ([Gnomeregan additions](#gnomeregan-additions-bm-g)). A Spread or RunOut
+with `Persistent` judges every carrier's circle at every tick and keeps the rings on their carriers (each tick one
+`onResolve`).
 
 **Decoys** (Scholomance build WP-X: Jandice's heroic fake sigil and fake lane). `Decoy()` fits a Zone or Frontal that
 is not a mine (`Judge::DecoyFits`) and must be set in the registering statement. The marker is drawn exactly like a
@@ -448,7 +450,8 @@ tick (`NearTeleportTo`) instead of gliding there while its far end overshoots.
 .mech drill <smite|cookie|fenrus|alexei|soaks|ras|deadmines-followups|sfk-hunt|scholomance-shapes
             |stratholme-followups|stratholme-drops|stratholme-jump|blackrock-spire-followups
             |blackrock-depths-shapes|blackrock-depths-shapes-2|scarlet-monastery-shapes|scarlet-monastery-shapes-2
-            |ragefire-chasm-shapes|zul-farrak-shapes> [cycles=3 (alexei 1)] [seed=] [dmg=1] [self=0]
+            |ragefire-chasm-shapes|zul-farrak-shapes|gnomeregan-shapes> [cycles=3 (alexei 1)] [seed=] [dmg=1]
+            [self=0]
 .mech bots [all]
 ```
 
@@ -513,7 +516,8 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   On `bait`, `aura=<spell>` without a colon is the rule's aura instead.
 - `self=<spell>:<min>` (spread, runout): the carriers are whoever holds that many stacks when it resolves (a stack
   change mid-warning counts). `self=0/1` (no colon) still means "the GM may be landed on".
-- `order=<spell>[:asc|desc][:cap=<n>]` (soak, bait): claimers by stacks, players at `cap` or more never claim.
+- `order=<spell>[:asc|desc][:cap=<n>][:min=<n>]` (soak, bait): claimers by stacks, players at `cap` or more never
+  claim, players below `min` never claim (soak; Gnomeregan BM-G).
 - `count=` on runout: that many random eligible targets instead of the selected unit.
 - `persist=`/`tick=` on stack and soak: a lasting get-in shape judged at every tick.
 - `shape=line` `length=` (30) `width=` (the size) on stack and soak: a lane centered on the anchor point along the
@@ -538,10 +542,11 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
   last pick that was not `other` (none left: a non-tank other than the previous pick, then any non-tank), so a chain
   of three hits three members; on line and projectile, `min=<yd>` makes a `to=member` pick prefer members at least
   that far from the line's source (none: the farthest), `fix=1` freezes a `to=` line at registration (from where its
-  source is now toward where the unit stands now, `size` long), and `reach=1` also ends it there (at least `size`
-  long). `offset=<deg>` turns a frontal (not with `rear=1`). Drill steps also take `after=resolve` (start `atMs`
-  after the previous step of the cycle resolves), `after=with` (`atMs` after it starts) and `cycle=even|odd` (only in
-  those cycles); the runner strips them before the `.mech test` parser (`src/MechanicDrill.h`, `StepOffsets`).
+  source is now toward where the unit stands now, `size` long; a projectile flies along it), and `reach=1` also
+  ends it there (at least `size` long). `offset=<deg>` turns a frontal (not with `rear=1`). Drill steps also take
+  `after=resolve` (start `atMs` after the previous step of the cycle resolves), `after=with` (`atMs` after it starts)
+  and `cycle=even|odd` (only in those cycles); the runner strips them before the `.mech test` parser
+  (`src/MechanicDrill.h`, `StepOffsets`).
 - Shadowfang Keep build §3.9 (the chase, drill `sfk-hunt`): `hunt <r> <ms> speed=<rate> persist=<ms>` summons a
   chaser (a Mechanic Marker: invisible, not selectable or attackable) at the selected unit and fixates a member
   (`pick=`); a circle of r on the chaser, eligible for that member only, stands through the `<ms>` warning, then the
@@ -687,6 +692,26 @@ M3 keys (STAGE-M3-HANDOFF §3.11):
     n=<n> ring=<yd> [center=1] [inset=0] [grace=2000] [tick=1000] tag=<n>` (n circles on a ring round the selected
     unit, plus one on it, the strict bounds of every member for `ms` (each shrunk by `inset`, the live bots' bounds),
     drawn as teal decoys; a member on none of them after `grace` is an OffSpot each tick).
+- Gnomeregan build (WP-G1 §3.9, drill `gnomeregan-shapes`):
+  - `pick=marked:<n>`: the member holding exactly n Marked (drill) stacks, else anyone (two Rubber Band owners at 1
+    and 2 stacks keep their own chains); `marker <n> pick=unmarked` (drills) marks a member without Marked.
+  - `circle ... exempt=member`: every scope member but the member of the step's `pick=` (`pick=same`, `pick=marked:<n>`)
+    is eligible (TB6's save point bursting on everyone else). Not with `only=member`, `at=each` or `decoy=1`.
+  - `cast ... nokick=1` (drills): a do-not-kick entry (priority 0) for the spell, so the bots hold their kicks and the
+    cast must run to its end (Patch with no bug alive; not with `kick=1`); `cast ... twin=1 kill=<n>`: the twin (Drill
+    Caster) is a kill target of priority n (1-10) while it lives (a duplicating bug first).
+  - Three drill-only steps (no damage; their judges post to the ledger): `lights <angle> <ms> [n=1] [len=30]
+    [speed=12] [dir=1|-1] [start=<deg>|pick=any] [lit=0] [reverse=0] [stop=2000] [faster=0] [latch=3000] [ahead=3000]
+    [step=500] tag=<n>` (KT-G's TurningLights as a drill: n cones of `angle` and `len` on the selected unit, 360 / n
+    apart, light 0 at `start` degrees from your facing, at a random member with `pick=any`, else anywhere; dark and
+    still for `lit` ms, then turning `speed` degrees a second, the other way every `reverse` ms after a `stop`; a member
+    inside a light is Spotted once per `latch` (shared by the lights): a Hit `Zone/<tag>`, and `faster` percent more
+    speed, 180 at most; every `step` ms each light's floor over the next `ahead` ms registers as a lasting no-damage
+    cone on the unit's spot, hot until the next one is, its contacts reported under the tag + 1), `movecost <above>
+    <ms> [band=11:12|0]` (BM-G's move cost, more than `above` Marked stacks, and the ranged band round the owner, on
+    the descriptor for `ms`, then taken off: Static scoped to one row) and `saturated <tick> <ms> tag=<n>` (every
+    `tick` ms the selected unit inside an armed lasting point circle of the test owner is an OffSpot `Zone/<tag>` on
+    its victim: Viscous Fallout's Saturated, the tank's drag-out).
 - `bait` moves the test owner to the selected unit (else you): the bait lands on whoever is farthest from it.
 - Stack thresholds use the Weakened aura: `.mech weakened <0-7>` sets stacks on the selected player (recorded on the
   test encounter, so `.mech clear` takes them off).
@@ -961,6 +986,35 @@ used and printed. Lane placement keeps the registry's own RNG. In the open world
     by hand from the bosses' Logic headers in mod-dungeon-bosses `ZulFarrak/`: change both together. The sweep runs
     `zul-farrak-shapes:5`, one sweep for this drill alone, 300 s: `mechanics_sweep.py run --programs zul-farrak-shapes:5
     --duration 300 --iterations 5 --step 100 --jobs 6 --sweep zul-farrak-shapes`.
+  - `gnomeregan-shapes` (Gnomeregan build §3.9, WP-G1; 60 s, six cycles = 360 s, one boss a cycle, heroic numbers in
+    `pct=`): cycle 0 Techbot (TB1: two 5 yd Lag Spikes where a member stood; TB6 + TB7: two Rubber Band owners at once,
+    a 6 yd RunOut, each one's 6 yd save point set at 2 s and bursting at 5 s on everyone but its owner, spikes under
+    each owner at 2 s and 3.5 s, 12 bug echoes near members on each spike; TB8: two Battle Nets; TB3 + TB4: three
+    Duplications on a twin listed as a kill target, Patch twice listed for kicks and twice as a never-kick entry);
+    cycle 1 Viscous Fallout (the creature follows its tank for 36 s, `saturated` judging it in an armed pool; six
+    Sloughs of 7 to 9 yd under it, two 5 yd globs and their pools, Volley pools under everyone twice, 30 Leaking pools;
+    then two Marked 10 carriers spreading 6 yd and Half-Life twice: a 10 yd Stack for Marked 8+ and a keep-out for the
+    rest); cycle 2 Electrocutioner 6000 (`movecost 4` with the 11-12 yd band for 56 s, two pairs of Marked 6 carriers;
+    the 8 yd donut and the 15 yd circle in turn, twice; three pairs of 40 degree Megavolt cones; Chain Bolt kicks with
+    the 10 yd and the 6 yd spreads; two 10 yd discharges from the carriers and two circles on a carrier; the healer
+    past 13 yd reported); cycle 3 the Alert System (MA1 twice: a 40 degree light on a member, dark 2 s, 60 degrees
+    clockwise in 3 s; MA2-MA4: two opposite 30 degree lights for 42 s at 12 degrees a second, reversing every 15 s
+    after a 2 s stop, +10% per Spotted; §7 #21: past 30 yd every 3 s); cycle 4 Crowd Pummeler (combinations of 3, 5
+    and 8 punches from the creature along your facing: the halves to 30 yd either side of the center line, Pummel
+    12 yd, Clinch 12-40 yd, the 8 yd Uppercut lane, all registered at the call, strikes at n x 1 s + 0.8 s then 1.2 s
+    apart, One-Two pairs from the fourth punch) and The Big One twice (the creature steps back 15 yd and walks home at
+    3 yd/s under an 8 yd Stack); cycle 5 Thermaplugg (plates 25 yd out on the face bearings, two then three after an
+    Override, the soaker Marked and the tank last; two walking bombs at 4.6 yd/s with a RunOut on the mark; 3 yd mines
+    and their 6 yd rings under everyone; a Detonator kick) and the Whole Workshop, reported (20 mines, 45 projectiles at
+    2 yd/s, two lights on the creature walking 10 yd, two fist combinations from a point 50 yd out, Justice's donut).
+    Tags 1, 3-6, 20-27, 40-42, 44-46, 48, 50, 52, 54, 60-64, 70, 74, 75 gated and barred on the reference members too,
+    10-12, 43, 71, 77 group bars, 2, 47, 51, 53, 72, 73, 76, 80-85 reported (`kGnBarTags`, `kGnGroupTags`,
+    `kGnReferenceTags`, `kGnReportedTags`); one block per boss (Techbot 1-19, Fallout 20-39, Electrocutioner 40-49,
+    the Alert System 50-59, Pummeler 60-69, Thermaplugg 70-79, the hard mode 80-89), mirrored by the bosses' Logic
+    headers in mod-dungeon-bosses `Gnomeregan/`: change both together. The sweep runs `gnomeregan-shapes:6`, one sweep
+    for this drill alone, 360 s: `mechanics_sweep.py run --programs gnomeregan-shapes:6 --duration 360 --iterations 5
+    --step 100 --jobs 6 --sweep gnomeregan-shapes`. Host tests: `tests/gnomer_drill_test.cpp` (the program parses, the
+    tag blocks, the new steps' judges), with BM-G's `tests/gnomer_bmg_test.cpp`.
 - `.mech bots [all]`: per bot in the GM's group (`all`: every bot on the map, to check the gate on bot-only groups):
   the boss-mechanics strategy status, mode, target and distance, time left to leave, counters, ledger hits. The report
   is part of the playerbots glue; a build without playerbots prints that bot support is not compiled.
@@ -2169,6 +2223,62 @@ Mechanic::Soak(me, soul, 2.f, 1, 26s).OneClaimPerBot().HealerWithinTankReach();
 **Check**: `.mech desc` prints `ignore ... (dps only)` and `heal until <aura> to 95% (read as 80%)`. `.mech` keys:
 `seen=<type>` on any shape that draws, `healreach=1` on a `soak` or `crawl`. Host tests:
 `tests/zf_bm1_test.cpp`.
+
+### Gnomeregan additions (BM-G)
+
+Two descriptor entries and one Soak option for the Gnomeregan build (HANDOFF §3.11, §7 #12 A, gaps F19, F20, F41);
+each is off by default, so no other encounter changes.
+
+| Option | Where | What |
+| --- | --- | --- |
+| `MoveCostEntry(aura, above)` | `moveCosts` | a bot with more than `above` stacks of `aura` makes no optional move |
+| `RangeBandEntry(min, max).For(Who).KeepOut(...)` | `rangeBands` | ranged bots and healers prefer `min`-`max` yd |
+| `Ordering::minStacks` | Soak `Order(...)` | players below that many stacks of `auraSpell` never claim |
+
+```cpp
+Descriptor d;
+// Electrocutioner 6000, heroic (§7 #12 A): Static above 12 makes a bot stand; ranged bots hold 11-12 yd.
+d.moveCosts.emplace_back(SPELL_STATIC, 12);
+d.rangeBands.emplace_back(11.f, 12.f);
+Mechanic::Describe(me, std::move(d));
+// The Whole Workshop (F41): a bot at 8 dose or more takes a plate, the highest dose first.
+BossMechanics::Ordering plates;
+plates.auraSpell = SPELL_IRRADIATED;
+plates.ascending = false;
+plates.minStacks = 8;
+ref.Order(plates);
+```
+
+- **Move cost** (`Desc::MoveCostly`, the brain's `ReadMoveCost` / `StepMoveCost`, the lock): stacks are
+  `Unit::GetAuraCount` (the stack amount, any caster), read every brain step. While one entry holds, the bot answers
+  every mechanic (a danger zone, a Spread, a region it must stand in) and nothing else. Its solves score the shortest
+  way out (`Solver::Input::moveCost`: no role band, spacing, sight or reach term, the walk weighed
+  `kMoveCostPathWeight` 3 times), and an escape stops on the first spot that passes `TargetOk` (the margin and the
+  horizon still hold). Skipped: the chase valve and its walk-in, the strand and inner-chase routes, the route back to
+  a stock motion, the recovery and band solves, the healer's sight and reach solves, the tank's re-facing walk, the
+  drop rule's walk, the hold's release for the role band. A foreign motion already under way (a stock chase or
+  follow) is stopped by a 500 ms hold (`LockRules::kMoveCostHoldMs`, renewed). The lock refuses every stock mover
+  (movement actions, named movers, movement spells, moving items) in Idle, Watch and Hold, except `avoid aoe`
+  (`LockRules::kMoveCostDodges`: a dodge goes, and its walk is not stopped for 1.5 s). Kept: tracking a region on a
+  moving anchor, tank parking and drag-out, the target picks and the swing. Released bots are the stock AI's.
+- **Ranged band** (`Desc::RangeBandFor`, `StepRangeBand`): in combat, a bot whose role band is a ranged one (a healer,
+  or a ranged bot that is not a tank) and that fits `who` (Any: both) gets the band, 2D round the encounter owner, as
+  its role band in every solve. Out of it for 1 s, a role solve at most once a second; a walk is taken when it ends in
+  the band or 1 yd nearer, else none for 5 s (`LockRules::kBand*`). Never under a move cost. The first valid entry
+  that fits wins; `min >= max` or a negative `min` is ignored. `.KeepOut(x, y, r)` (Gnomeregan F-2) clips 2D
+  circles out of the band (a corner with no line of sight to the owner): a bot inside one is out of the band by its
+  depth there (`Desc::RangeBandKeepOutYd`), and the band walk's solve takes them as strict bounds (its own spot
+  inside one is no answer).
+- **Minimum stacks** (`Assign::SoakRule::minStacks`): mirrors `capStacks` from below. Players under the floor are not
+  claimants (inside or not, bot or human), but stay eligible: a bot below it keeps out of the soak as an eligible
+  player with no claim, and a human below it who steps in still counts for the registry. Needs `auraSpell` (without
+  it every player has 0 stacks). In a `OneClaimPerBot` group the floor holds on every soak of the group; the group
+  order stays earliest resolve, then the lowest id (not the nearest plate; `DwellSoaks::Reprioritize` orders it).
+
+**Check**: `.mech desc` prints `move cost: above N stacks of <aura>` and `ranged band: A to B yd from the owner`;
+`.mech bots` prints a `bm-g` line (move cost on or off, motions and escapes stopped, movers refused, the band and its
+walks). `.mech` keys: `order=<spell>:desc:min=<n>` on a soak; the program entry `describe move-cost` (Marked (drill)
+above 4 stacks, the 11-12 yd band) is the drill stand-in. Host tests: `tests/gnomer_bmg_test.cpp`.
 
 ### Gate
 

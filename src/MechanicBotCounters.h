@@ -141,6 +141,13 @@ namespace BossMechanics
         // M5 CD (E): waker wakes for the descriptor (its revision moved since the bot's view, a listed cast it can
         // kick started, a listed urgent or deadline aura it can dispel appeared), also in wakes.
         uint32 descriptorWakes = 0;
+        // Gnomeregan BM-G (the move cost and the preferred band, MechanicBotBrain.cpp / MechanicBotLock.cpp): foreign
+        // motions stopped and escapes stopped at the first safe spot under a move cost, stock movers the lock refused
+        // for it (also in lockBlocks), and walks into the preferred band.
+        uint32 moveCostMotionStops = 0;
+        uint32 moveCostEscapeStops = 0;
+        uint32 moveCostLockBlocks = 0;
+        uint32 bandWalks = 0;
         // M4 WP-Q3: mover auras (LockRules::kMoverAuras, Killing Spree) cancelled because the brain walked, held or
         // froze the bot while one ran.
         uint32 moverBreaks = 0;

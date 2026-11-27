@@ -885,8 +885,10 @@ namespace BossMechanics
         // Solve (§3.9) with the telemetry and the once-per-mechanic Fallback log. M3: allies, synthetic hazards and
         // claims are refreshed right before the solve, and the plan goes onto the reservation board right after it,
         // so the next bot solving on this map thread sees it (§3.6). A re-route plan is never published.
+        // `extraBounds` (the band walk's keep-out, F-2): one more bounds set for this solve only, added after the
+        // allies' refresh (which rebuilds the view's bounds) and removed after the solve.
         Solver::Plan RunSolve(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            ViewCtx& ctx, bool roleSolve = false)
+            ViewCtx& ctx, bool roleSolve = false, Solver::Bounds const* extraBounds = nullptr)
         {
             Solver::Input& in = st.input;
             // M5 C4: the allies' refresh is timed apart from the solve (refreshUs*), so solveUs is the solver alone.
@@ -911,10 +913,14 @@ namespace BossMechanics
             NavOracleStats nav;
             NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
             TimedOracle oracle(navOracle, st.cost);
+            if (extraBounds)
+                in.bounds.push_back(*extraBounds);
             CostClock::time_point const t0 = CostClock::now();
             Solver::Plan plan = Solver::Solve(in, oracle);
             uint32 const us = UsSince(t0);
             in.roleSolve = false;
+            if (extraBounds)
+                in.bounds.pop_back();
 
             // M4 cost (§3.6) and the Fallback split (§3.7).
             CostStats& cost = st.cost;
@@ -1544,6 +1550,136 @@ namespace BossMechanics
             }
         }
 
+        // ---- Gnomeregan BM-G (HANDOFF §7 #12 A, F19, F20): the move cost and the preferred band ----
+
+        // Reads the active descriptor's MoveCostEntry and RangeBandEntry lists for the bot, once per brain step:
+        // st.moveCost (a move cost holds: Static above its threshold) and st.rangeBand (the preferred band round the
+        // encounter owner, in combat, for a bot whose role band is a ranged one). Both off with no descriptor, no
+        // entries or no live owner, so every other encounter reads nothing here but a revision compare.
+        void ReadMoveCost(Registry const& reg, Player* bot, MechanicBotState& st)
+        {
+            st.moveCost = false;
+            st.rangeBand = Solver::RoleBand();
+            st.rangeBandKeepOut.clear();
+            RefreshDescriptorView(&reg, bot, st.descriptor);
+            DescriptorView const& v = st.descriptor;
+            if (!v.Active())
+                return;
+            Descriptor const& d = v.descriptor;
+            if (!d.moveCosts.empty())
+                st.moveCost = Desc::MoveCostly(d.moveCosts, [bot](uint32 aura) { return bot->GetAuraCount(aura); });
+            if (d.rangeBands.empty() || !bot->IsInCombat())
+                return;
+            Desc::BotFacts facts;
+            facts.tank = PlayerbotAI::IsTank(bot);
+            facts.healer = PlayerbotAI::IsHeal(bot);
+            facts.melee = PlayerbotAI::IsMelee(bot);
+            facts.mainTank = facts.tank && PlayerbotAI::IsMainTank(bot);
+            facts.guid = bot->GetGUID().GetRawValue();
+            // BotRole::RoleBandOf's own test for a ranged band.
+            bool const rangedRole = facts.healer || (PlayerbotAI::IsRanged(bot) && !facts.tank);
+            RangeBandEntry const* e = Desc::RangeBandFor(d.rangeBands, facts, rangedRole);
+            if (!e)
+                return;
+            Unit const* owner = ObjectAccessor::GetUnit(*bot, v.owner);
+            if (!owner || !owner->IsInWorld() || !owner->IsAlive() || owner->GetMap() != bot->GetMap())
+                return;
+            st.rangeBand.present = true;
+            st.rangeBand.anchor = PosOf(owner);
+            st.rangeBand.minYd = e->minYd;
+            st.rangeBand.maxYd = e->maxYd;
+            st.rangeBandKeepOut = e->keepOut;
+        }
+
+        // Under a move cost, the spot passing TargetOk: an Escape stops where it stands (the first safe spot is the
+        // shortest way out), a foreign motion (stock chase, follow, a walk begun before the cost) is stopped by a short
+        // hold, unless it is a stock dodge (st.moveCostDodgeUntil). true = the step is done (the bot holds).
+        bool StepMoveCost(PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg)
+        {
+            if (!st.moveCost || st.mode == MechanicBotMode::Hold || st.mode == MechanicBotMode::Freeze)
+                return false;
+            Solver::Input const& in = st.input;
+            bool const escaping = st.mode == MechanicBotMode::Escape;
+            bool const released = BotBrain::Released(botAI, st, now);
+            bool const spotSafe = !released && Solver::TargetOk(in, in.bot, now, now + in.params.horizon);
+            // A stock dodge the lock let through (`avoid aoe`) walks on (LockRules::kMoveCostDodgeMs).
+            bool const foreign = BotBrain::HasForeignMotion(bot) && now >= st.moveCostDodgeUntil;
+            LockRules::MoveCostStep const step = LockRules::MoveCostStepOf(st.moveCost, released, spotSafe, escaping,
+                foreign);
+            if (step != LockRules::MoveCostStep::StopEscape && step != LockRules::MoveCostStep::StopMotion)
+                return false;
+            // A task hold keeps its spot as long as it would (a region, a carried shape), the move cost at least
+            // kMoveCostHoldMs; renewed by the next step while the cost holds.
+            std::vector<uint32> ids;
+            Milliseconds const until = std::max(TaskHoldUntil(st, now, &ids),
+                now + Milliseconds(LockRules::kMoveCostHoldMs));
+            HoldForTasks(st, now, until, std::move(ids));
+            st.refacing = false;
+            st.ownWalk = false;
+            st.reachWalk = false;
+            st.regionRoute = false;
+            if (step == LockRules::MoveCostStep::StopEscape)
+                ++st.counters.moveCostEscapeStops;
+            else
+                ++st.counters.moveCostMotionStops;
+            if (cfg.debug)
+                LOG_INFO(kLog, "Bot {}: move cost, {} stops on the safe spot it stands on", bot->GetName(),
+                    step == LockRules::MoveCostStep::StopEscape ? "its escape" : "a foreign motion");
+            return true;
+        }
+
+        // The preferred band (Desc::RangeBandEntry): out of it for LockRules::kBandSlackMs, a role solve now and then
+        // (the band is the role band, so its score pulls the bot in; the hazards keep it out of every live mechanic).
+        // Soft like the healer's sight solve: a walk that does not end in the band or kBandGainYd nearer it backs off.
+        // Never under a move cost or a release. true = an Escape began.
+        bool StepRangeBand(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
+            ViewCtx& ctx, bool released)
+        {
+            Solver::RoleBand const band = st.rangeBand;
+            // F-2 (RF-1 Minor-4): a spot inside the band's keep-out is out of the band by its depth there.
+            auto const gapAt = [&band, &st](Geo::Vec3 const& p)
+            {
+                return std::max(LockRules::BandGapYd(Dist2d(p, band.anchor), band.minYd, band.maxYd),
+                    Desc::RangeBandKeepOutYd(st.rangeBandKeepOut, p.x, p.y));
+            };
+            float const gap = band.present ? gapAt(st.input.bot) : 0.f;
+            if (gap <= 0.f)
+            {
+                st.outOfBandSince = Milliseconds(0);
+                return false;
+            }
+            if (st.outOfBandSince == Milliseconds(0))
+                st.outOfBandSince = now;
+            if (st.moveCost || released
+                || !LockRules::BandWalkDue(now.count(), st.outOfBandSince.count(), st.lastBandAt.count(),
+                    st.nextBandAt.count())
+                || !CanSolve(bot, st, now, cfg))
+                return false;
+            st.lastBandAt = now;
+            // The keep-out binds the walk's end (strict: the bot's own spot inside one is no answer either).
+            Solver::Bounds keepOut;
+            keepOut.strict = true;
+            for (RangeBandEntry::KeepOutCircle const& k : st.rangeBandKeepOut)
+                if (std::isfinite(k.radiusYd) && k.radiusYd > 0.f)
+                    keepOut.keepOut.push_back({ Geo::Vec3{ k.x, k.y, band.anchor.z }, k.radiusYd, false });
+            Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true,
+                keepOut.keepOut.empty() ? nullptr : &keepOut);
+            bool moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
+            if (moving)
+                moving = LockRules::BandWalkGains(gap, gapAt(plan.target));
+            if (!moving)
+            {
+                st.nextBandAt = now + Milliseconds(LockRules::kBandBackoffMs);
+                return false;
+            }
+            ++st.counters.bandWalks;
+            if (cfg.debug)
+                LOG_INFO(kLog, "Bot {}: {:.1f} yd outside its band ({:.1f}-{:.1f} yd), walks in to ({:.1f}, {:.1f})",
+                    bot->GetName(), gap, band.minYd, band.maxYd, plan.target.x, plan.target.y);
+            BeginEscape(st, std::move(plan), now);
+            return true;
+        }
+
         // Idle/Watch (§3.4 step 4): solve when the spot fails TargetOk; hold for live tasks; re-route or hold when
         // only the current motion is unsafe; then the tank and healer tasks.
         void StepWatch(Registry& reg, PlayerbotAI* botAI, Player* bot, MechanicBotState& st, Milliseconds now,
@@ -1582,6 +1718,13 @@ namespace BossMechanics
                 }
             }
             bool const released = BotBrain::Released(botAI, st, now);
+            // Gnomeregan BM-G: under a move cost no optional move (no valve, re-route, re-facing walk, recovery,
+            // band or sight solve); a foreign motion is stopped (StepMoveCost) and the spot kept.
+            if (st.moveCost && !released)
+            {
+                st.mode = MechanicBotMode::Watch;
+                return;
+            }
             // M5 CD: during a walk-in no valve and no recovery solve; its stock chase is policed like any motion, on
             // the short horizon.
             bool const walkIn = now < st.walkInUntil;
@@ -1645,6 +1788,8 @@ namespace BossMechanics
             if (StepTankFacing(reg, bot, st, now, cfg))
                 return;
             if (!released && !walkIn && StepChaseRecovery(reg, bot, st, now, cfg, ctx))
+                return;
+            if (StepRangeBand(reg, bot, st, now, cfg, ctx, released))
                 return;
             StepHealerSight(reg, bot, st, now, cfg, ctx);
         }
@@ -2058,6 +2203,13 @@ namespace BossMechanics
                     BeginEscape(st, std::move(plan), now);
                     return;
                 }
+            }
+            // Gnomeregan BM-G: under a move cost the hold keeps its spot to its end (no drop walk, no valve, no
+            // release for the role band); tracking a region on a moving anchor above still goes.
+            if (st.moveCost)
+            {
+                st.outOfRoleSince = Milliseconds(0);
+                return;
             }
             if (NeedsDropSolve(st, now) && TakeBudget(bot, now))
             {
@@ -2514,6 +2666,8 @@ namespace BossMechanics
         if (st.reserved && st.viewInfo.tasks.empty())
             DropBoard(reg, bot, st);
         BotRole::UpdateFrontalSources(bot, *reg, st, cfg);
+        // Gnomeregan BM-G: the move cost (Static) and the preferred band, from the active descriptor.
+        ReadMoveCost(*reg, bot, st);
         // Blackrock Depths WP-DS: strict bounds bind the bot (its owner fights it): Watch keeps its spot and its stock
         // motions inside them.
         // STAGE-HEALER-RANGE: a healer whose tank is past reach (or who walks back in) is relevant with no mechanic
@@ -2522,7 +2676,8 @@ namespace BossMechanics
             st.reachWalk = false;
         bool const relevant = AnyRelevant(in) || AnyTask(st, now) || now <= st.freezeUntil
             || (cfg.tankFacingEnable && !st.frontalSources.empty()) || DropSpot::AnyStrict(in.bounds)
-            || LockRules::HealerReachRelevant(BotRole::HealerTankYd(bot), BotRole::HealerReachYd(), st.reachWalk);
+            || LockRules::HealerReachRelevant(BotRole::HealerTankYd(bot), BotRole::HealerReachYd(), st.reachWalk)
+            || st.moveCost || st.rangeBand.present;
         if (!relevant)
         {
             DropBoard(reg, bot, st);
@@ -2530,6 +2685,11 @@ namespace BossMechanics
             return;
         }
         in.role = BotRole::RoleBandOf(botAI, bot, cfg);
+        // Gnomeregan BM-G: the preferred band replaces a ranged bot's role band; a move cost scores the shortest way
+        // out (Solver::Input::moveCost).
+        if (st.rangeBand.present)
+            in.role = st.rangeBand;
+        in.moveCost = st.moveCost;
         ApplyWalkInHorizon(st, now, cfg);
         // M5 CD (C5): the stranding clock's reference, then this step's verdict (the clock, the strand route below).
         if (!OutOfMeleeRange(bot, in.role, in.bot) || st.lastInRangeAt == Milliseconds(0))
@@ -2643,7 +2803,8 @@ namespace BossMechanics
         // M5 CD (C5): a stranded bot asks the route search for a clear ring point (it runs just below). F-4a: a bot
         // refused its chase with only points inside the ring clear routes in to one; neither starts while a look
         // window is owed or near (Gaze::OwnWalkAt).
-        bool const ownRouteFree = cfg.routeEnable && !st.routePending && st.mode != MechanicBotMode::Escape
+        bool const ownRouteFree = !st.moveCost && cfg.routeEnable && !st.routePending
+            && st.mode != MechanicBotMode::Escape
             && now - st.lastRouteAt >= Milliseconds(cfg.routeRetryMs);
         Geo::Vec3 innerGoal;
         bool const innerChase = !stranded && ownRouteFree && ChaseInnerWanted(botAI, bot, st, now)
@@ -2674,7 +2835,8 @@ namespace BossMechanics
             st.routePending = false;
             bool const own = st.ownRouteAsked;
             st.ownRouteAsked = false;
-            bool const due = st.mode == MechanicBotMode::Hold && cfg.routeEnable
+            // Gnomeregan BM-G: a route back to a stock motion is an optional walk.
+            bool const due = !st.moveCost && st.mode == MechanicBotMode::Hold && cfg.routeEnable
                 && now - st.lastRouteAt >= Milliseconds(cfg.routeRetryMs)
                 && !BotBrain::Released(botAI, st, now)
                 && Solver::PointSafe(in, st.routeGoal, now, now + in.params.horizon);
@@ -2719,6 +2881,15 @@ namespace BossMechanics
                 BreakMoverAuras(bot, st, cfg);
                 return;
             }
+        }
+
+        // Gnomeregan BM-G: under a move cost an escape stops at the first safe spot, and a foreign motion stops.
+        if (StepMoveCost(botAI, bot, st, now, cfg))
+        {
+            BotFacing::UpdateLookAway(bot, st, now);
+            PublishLookAway(*reg, bot, st, now);
+            BreakMoverAuras(bot, st, cfg);
+            return;
         }
 
         switch (st.mode)

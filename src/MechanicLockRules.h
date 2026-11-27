@@ -564,6 +564,85 @@ namespace BossMechanics::LockRules
     {
         return targetYd <= awayYd - kHealerReachGainYd;
     }
+
+    // ---- Gnomeregan BM-G (HANDOFF §7 #12 A, F19, F20): the move cost and the preferred band ----
+    //
+    // A bot a descriptor MoveCostEntry holds for (Static above 12) makes no optional move: the brain skips its role
+    // solves, walks and routes (MechanicBotBrain.cpp), and the lock refuses the stock movers in Idle, Watch and Hold
+    // (Escape and Freeze refuse them anyway; ours are never asked), except the dodges below: a dodge still goes.
+    // "avoid aoe" is playerbots' own dodge of a ground effect (AvoidAoeAction).
+    inline constexpr std::array<std::string_view, 1> kMoveCostDodges = { "avoid aoe" };
+
+    inline bool IsMoveCostDodgeName(std::string_view name)
+    {
+        for (std::string_view const dodge : kMoveCostDodges)
+            if (dodge == name)
+                return true;
+        return false;
+    }
+
+    // The lock's verdict for a stock action under a move cost: refused when it moves the bot (`mover`: a movement
+    // action, a named mover, a movement spell) and is not a dodge. Attack-only picks are not movers.
+    inline bool MoveCostRefusesMover(bool moveCost, bool mover, std::string_view name)
+    {
+        return moveCost && mover && !IsMoveCostDodgeName(name);
+    }
+
+    // The brain under a move cost, once its spot passes TargetOk (nothing to dodge there): a foreign motion under way
+    // (stock chase, follow, a drift) is stopped and the bot holds where it stands for kMoveCostHoldMs (renewed while
+    // the cost holds), and an Escape stops at the first spot that passes (the shortest way out: the solver's target
+    // may lie farther, past an edge comfort or a reservation).
+    inline constexpr int64_t kMoveCostHoldMs = 500;
+    // A stock dodge the lock let through under a move cost (kMoveCostDodges) is not stopped for this long: its walk
+    // is foreign motion too (playerbots' AvoidAoeAction moves every 1,000 ms at most).
+    inline constexpr int64_t kMoveCostDodgeMs = 1500;
+
+    enum class MoveCostStep : uint8_t
+    {
+        None,           // no move cost, or the spot is unsafe (the solver answers it), or released
+        Stand,          // Watch: nothing under way; stay, skip every optional walk
+        StopMotion,     // Watch or Idle: a foreign motion runs: hold here (the hold action stops it)
+        StopEscape      // Escape: the spot it reached is safe: hold here
+    };
+
+    inline MoveCostStep MoveCostStepOf(bool moveCost, bool released, bool spotSafe, bool escaping, bool foreignMotion)
+    {
+        if (!moveCost || released || !spotSafe)
+            return MoveCostStep::None;
+        if (escaping)
+            return MoveCostStep::StopEscape;
+        return foreignMotion ? MoveCostStep::StopMotion : MoveCostStep::Stand;
+    }
+
+    // The preferred band (Desc::RangeBandEntry, 2D round the encounter owner). Out of it for kBandSlackMs, a bot
+    // (no move cost, in Watch, not released, no task hold) runs a role solve at most every kBandCheckEveryMs; a walk
+    // is taken only when it ends in the band or at least kBandGainYd nearer it, else no new check for kBandBackoffMs.
+    inline constexpr int64_t kBandSlackMs = 1000;
+    inline constexpr int64_t kBandCheckEveryMs = 1000;
+    inline constexpr int64_t kBandBackoffMs = 5000;
+    inline constexpr float kBandGainYd = 1.f;
+
+    // How far outside [minYd, maxYd] a distance lies (0 inside).
+    inline float BandGapYd(float distYd, float minYd, float maxYd)
+    {
+        if (distYd < minYd)
+            return minYd - distYd;
+        if (distYd > maxYd)
+            return distYd - maxYd;
+        return 0.f;
+    }
+
+    // Due now? `outSince` 0 = in the band; `nextAt` the backoff's end; `lastAt` the last check (0 = none).
+    inline bool BandWalkDue(int64_t now, int64_t outSince, int64_t lastAt, int64_t nextAt)
+    {
+        return outSince > 0 && now - outSince >= kBandSlackMs && now >= nextAt
+            && (lastAt == 0 || now - lastAt >= kBandCheckEveryMs);
+    }
+
+    inline bool BandWalkGains(float gapNowYd, float gapAtTargetYd)
+    {
+        return gapAtTargetYd <= 0.f || gapAtTargetYd <= gapNowYd - kBandGainYd;
+    }
 }
 
 #endif

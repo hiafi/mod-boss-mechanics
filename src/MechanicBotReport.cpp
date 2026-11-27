@@ -159,6 +159,11 @@ namespace BossMechanics
             handler->PSendSysMessage("  x3 jumps: hops {} ({} along the walk), refused {}, could not hop {}, too late "
                 "{}{}", c.hops, c.hopsAlong, c.hopsRefused, c.hopsBlocked, c.hopsLate,
                 BotBrain::Hopping(bot, *st, now) ? " (in the air)" : "");
+            // Gnomeregan BM-G: the move cost (Static) and the preferred band (MechanicBotBrain.cpp, the lock).
+            handler->PSendSysMessage("  bm-g move cost: {}, motions stopped {}, escapes stopped {}, movers refused {}; "
+                "band {}, walks into it {}", st->moveCost ? "on" : "off", c.moveCostMotionStops, c.moveCostEscapeStops,
+                c.moveCostLockBlocks, st->rangeBand.present ? Acore::StringFormat("{:.1f}-{:.1f} yd",
+                st->rangeBand.minYd, st->rangeBand.maxYd) : std::string("none"), c.bandWalks);
             // M5 WP-T: the focus and the ignore list (MechanicBotTargets.cpp).
             handler->PSendSysMessage("  {}", BotTargets::ReportLine(*st));
             // M5 WP-P: dispels and purges, and which `party member to dispel` the bot holds (MechanicBotDispel.cpp).

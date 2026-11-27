@@ -255,6 +255,10 @@ namespace BossMechanics::Solver
         // Solve even when the bot's spot passes TargetOk (a role move: healer sight, reach): the spot competes as an
         // ordinary candidate (with Weights::stay) and wins as Safe. Ignored while frozen and under `reroute`.
         bool roleSolve = false;
+        // Gnomeregan BM-G (a MoveCostEntry holds for the bot: Static): the shortest way out. The score drops the role
+        // band, spacing, sight and reach terms and weighs the walk Detail::kMoveCostPathWeight times; the hazards,
+        // regions, carried shapes and every other term stay (Detail::Score, Solve).
+        bool moveCost = false;
     };
 
     // Walkable path from `from` to `to`: `out` gets the corner points, from the start (or its first corner) to the
@@ -2487,15 +2491,18 @@ namespace BossMechanics::Solver
             return pull;
         }
 
+        // Gnomeregan BM-G: a move-cost bot's walk weighs this many times Weights::path (Input::moveCost).
+        constexpr float kMoveCostPathWeight = 3.f;
+
         inline float Score(Input const& in, Geo::Vec3 const& c, float dist, Ms arrival, Ms deadline, bool isBot)
         {
             Weights const& w = in.params.w;
-            float score = w.path * dist;
+            float score = (in.moveCost ? w.path * kMoveCostPathWeight : w.path) * dist;
             // Stratholme X2: a carrier with a drop rule leaves its role band for the drop (the rule's terms decide).
             bool const dropping = DropCarried(in) != nullptr;
             if (dropping)
                 score += DropScore(in, c);
-            else if (in.role.present)
+            else if (in.role.present && !in.moveCost)
             {
                 float const d = Dist2(in.role.anchor, c);
                 score += w.role * std::max({ 0.f, in.role.minYd - d, d - in.role.maxYd });
@@ -2524,7 +2531,7 @@ namespace BossMechanics::Solver
                     nearest = std::min(nearest, Dist2(q, c));
                 score += w.crowd * std::max(0.f, kCrowdComfortYd - nearest);
             }
-            if (w.spacing > 0.f && !in.standing.empty() && SpacingApplies(in))
+            if (w.spacing > 0.f && !in.moveCost && !in.standing.empty() && SpacingApplies(in))
             {
                 float nearest = kInf;
                 for (Geo::Vec3 const& q : in.standing)
@@ -2550,7 +2557,7 @@ namespace BossMechanics::Solver
             }
             if (in.far.present)
                 score -= in.far.weightPerYd * Dist2(in.far.from, c);
-            if (in.reach.weightPerYd > 0.f)
+            if (in.reach.weightPerYd > 0.f && !in.moveCost)
                 for (Geo::Vec3 const& q : in.reach.points)
                     score += in.reach.weightPerYd * std::max(0.f, Dist2(q, c) - in.reach.maxYd);
             score += FrontPull(in, c, arrival);
@@ -3269,7 +3276,7 @@ namespace BossMechanics::Solver
         // the primary point, or whose primary ray was not cast, counts every point (so it ranks after every checked
         // one that sees it); one that sees it counts the other points found blocked (unchecked ones count as seen).
         std::vector<float> sightPenalty;
-        if (!in.sight.points.empty() && !kept.empty())
+        if (!in.sight.points.empty() && !in.moveCost && !kept.empty())
             Detail::ScoreSight(in, oracle, kept, cands.size(), sightPenalty, plan.sightChecks);
         std::sort(kept.begin(), kept.end(), Detail::ScoredLess);
         plan.stats.kept = static_cast<std::uint32_t>(kept.size());

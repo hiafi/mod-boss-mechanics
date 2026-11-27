@@ -229,6 +229,21 @@ namespace BossMechanics::Desc
             return d;
         }
 
+        // Gnomeregan BM-G, Static's shape (§7 #12 A): a bot carrying more than kMoveCostDrillAbove Marked (drill)
+        // stacks (the stand-in for Static, 10 at most) makes no optional move and dodges by the shortest way out;
+        // ranged bots and healers prefer 11 to 12 yd from the dummy (the Electrocutioner's band).
+        inline constexpr std::uint32_t kMoveCostDrillAbove = 4;
+        inline constexpr float kMoveCostDrillBandMinYd = 11.f;
+        inline constexpr float kMoveCostDrillBandMaxYd = 12.f;
+
+        inline Descriptor MoveCostDrill()
+        {
+            Descriptor d;
+            d.moveCosts.emplace_back(I::SPELL_MARKED_DRILL, kMoveCostDrillAbove);
+            d.rangeBands.emplace_back(kMoveCostDrillBandMinYd, kMoveCostDrillBandMaxYd);
+            return d;
+        }
+
         // Every list at once (the `descriptor` drill): kicks, dispels, purges; prisons (3) before the aiming add
         // (2) before the casters (1) before the dummy; the purge adds below the dummy; the copies ignored.
         inline Descriptor All()
@@ -276,6 +291,8 @@ namespace BossMechanics::Desc
             { "hold-kicks", "kick the casters' high cast, never on a caster with Aiming", &DrillPresets::HoldKicks },
             { "dispel-stacks", "Magic Affliction cured on the member with the most Taunt Swap stacks first",
                 &DrillPresets::DispelStacks },
+            { "move-cost", "Static's shape: above 4 Marked (drill) stacks no optional move, dodges by the shortest "
+                "way out; ranged bots and healers prefer 11-12 yd from the owner", &DrillPresets::MoveCostDrill },
             { "descriptor", "every list at once: kicks, dispels, purges, prisons > aiming add > casters, copies "
                 "ignored", &DrillPresets::All },
         };
