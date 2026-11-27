@@ -173,7 +173,8 @@ namespace BossMechanics
                     Desc::RangeBandValid(x) ? "" : " (invalid: ignored)");
             for (RangeBandEntry const& x : d.rangeBands)
                 for (RangeBandEntry::KeepOutCircle const& k : x.keepOut)
-                    handler->PSendSysMessage("    band keep-out: {:.1f} yd round ({:.1f}, {:.1f})", k.radiusYd, k.x, k.y);
+                    handler->PSendSysMessage("    band keep-out: {:.1f} yd round ({:.1f}, {:.1f})", k.radiusYd, k.x,
+                        k.y);
             // Blackrock Depths WP-DS (BD3): each hold, and the encounter's live units it covers now by its aura (the
             // `when` part is judged by the bots' view, not here).
             for (HoldEntry const& h : d.holds)
