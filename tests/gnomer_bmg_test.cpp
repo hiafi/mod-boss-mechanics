@@ -282,6 +282,73 @@ namespace
         CHECK(Solver::Solve(safe, oracle).outcome == Solver::Outcome::Safe);
     }
 
+    // ---- F-2 (RF-1 Minor-4), RF-2 Nit-3: the band walk's strict keep-out through the solver ----
+
+    // MechanicBotBrain.cpp StepRangeBand's role solve: the band (19-26 yd round the owner at the origin) is the role
+    // band, and the keep-out rides as one areas-less strict Bounds (anywhere outside its circles). The circle mirrors
+    // Crowd Pummeler's blind corner: 23.8 yd out, 7.75 yd across, so it covers the band's full depth in its sector.
+    Vec3 const kKeepOutAt{ 23.8f, 0.f, 0.f };
+    float constexpr kKeepOutYd = 7.75f;
+
+    Solver::Input BandWalk(Vec3 const& bot, bool keepOut)
+    {
+        Solver::Input in;
+        in.bot = bot;
+        in.now = kNow;
+        in.speed = 7.f;
+        in.role.present = true;
+        in.role.anchor = { 0.f, 0.f, 0.f };
+        in.role.minYd = 19.f;
+        in.role.maxYd = 26.f;
+        in.roleSolve = true;
+        if (keepOut)
+        {
+            Solver::Bounds b;
+            b.strict = true;
+            b.keepOut.push_back({ kKeepOutAt, kKeepOutYd, false });
+            in.bounds.push_back(b);
+        }
+        return in;
+    }
+
+    float BandGap(Vec3 const& p)
+    {
+        std::vector<RangeBandEntry::KeepOutCircle> const k{ { kKeepOutAt.x, kKeepOutAt.y, kKeepOutYd } };
+        return std::max(LockRules::BandGapYd(std::hypot(p.x, p.y), 19.f, 26.f), RangeBandKeepOutYd(k, p.x, p.y));
+    }
+
+    void TestBandKeepOutSolve()
+    {
+        StraightOracle oracle;
+        // The bot at the circle's center (the whole band sector round it is clipped): it walks to the clear band.
+        for (Vec3 const& bot : std::vector<Vec3>{ kKeepOutAt, { 22.f, 2.f, 0.f }, { 25.f, -3.f, 0.f } })
+        {
+            CHECK(BandGap(bot) > 0.f);
+            Solver::Plan const p = Solver::Solve(BandWalk(bot, true), oracle);
+            CHECK(p.outcome == Solver::Outcome::Move);
+            CHECK(std::hypot(p.target.x - kKeepOutAt.x, p.target.y - kKeepOutAt.y) >= kKeepOutYd);
+            CHECK_NEAR(BandGap(p.target), 0.f, 0.05);
+            CHECK(LockRules::BandWalkGains(BandGap(bot), BandGap(p.target)));
+        }
+        // Outside the circle and outside the band, beside the clipped sector: the nearest band floor is inside the
+        // circle, and no answer ends there.
+        Vec3 const beside{ 31.f, 5.f, 0.f };
+        CHECK(std::hypot(beside.x - kKeepOutAt.x, beside.y - kKeepOutAt.y) > kKeepOutYd);
+        Solver::Plan const p = Solver::Solve(BandWalk(beside, true), oracle);
+        CHECK(p.outcome == Solver::Outcome::Move);
+        CHECK(std::hypot(p.target.x - kKeepOutAt.x, p.target.y - kKeepOutAt.y) >= kKeepOutYd);
+        CHECK_NEAR(BandGap(p.target), 0.f, 0.05);
+        // Strict: the bot's own spot inside the circle is no answer, even in the band (no Safe, no stay).
+        Solver::Plan const inBand = Solver::Solve(BandWalk({ 22.f, 0.f, 0.f }, true), oracle);
+        CHECK(inBand.outcome == Solver::Outcome::Move);
+        CHECK(std::hypot(inBand.target.x - kKeepOutAt.x, inBand.target.y - kKeepOutAt.y) >= kKeepOutYd);
+        // With no keep-out (Electrocutioner's and the Alert System's bands) the same bot in the band stays: the
+        // bounds are what move it.
+        Solver::Plan const plain = Solver::Solve(BandWalk({ 22.f, 0.f, 0.f }, false), oracle);
+        CHECK(plain.outcome != Solver::Outcome::Move
+            || std::hypot(plain.target.x - 22.f, plain.target.y) < 1.f);
+    }
+
     // ---- F41: Ordering::minStacks (Assign::SoakRule::minStacks) ----
 
     Assign::Claimant C(std::uint64_t guid, std::uint32_t stacks, std::int64_t eta, bool inside = false,
@@ -357,6 +424,7 @@ int main()
     TestMoveCostStep();
     TestBandRules();
     TestShortestWayOut();
+    TestBandKeepOutSolve();
     TestMinStacks();
     return Report("gnomer_bmg_test");
 }

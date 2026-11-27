@@ -377,7 +377,7 @@ namespace BossMechanics
     //     d.rangeBands.emplace_back(11.f, 12.f);      // Electrocutioner: a short step from the donut or the circle
     // Gnomeregan F-2 (RF-1 Minor-4): KeepOut clips floor out of the band (2D circles, e.g. a corner with no line of
     // sight to the owner): a bot inside one is out of its band, and the band walk never ends inside one.
-    //     d.rangeBands.emplace_back(19.f, 26.f).KeepOut(-896.f, 383.5f, 6.5f);    // Crowd Pummeler's blind corner
+    //     d.rangeBands.emplace_back(19.f, 26.f).KeepOut(-896.f, 383.5f, 7.75f);   // Crowd Pummeler's blind corner
     struct RangeBandEntry
     {
         struct KeepOutCircle
