@@ -116,6 +116,19 @@ namespace
         CHECK(RangeBandFor(bad, kRangedDps, true) == &bad[4]);
         CHECK(RangeBandValid(RangeBandEntry(0.f, 1.f)));
         CHECK(!RangeBandValid(RangeBandEntry()));
+
+        // F-2 (RF-1 Minor-4): KeepOut clips floor out of the band; a spot inside is out of the band by its depth.
+        RangeBandEntry clipped(19.f, 26.f);
+        clipped.KeepOut(10.f, 0.f, 4.f).KeepOut(0.f, 10.f, 0.f).KeepOut(0.f, 20.f, std::nanf(""));
+        CHECK(clipped.keepOut.size() == 3);
+        CHECK(RangeBandValid(clipped));
+        CHECK_NEAR(RangeBandKeepOutYd(clipped.keepOut, 10.f, 0.f), 4.f, 1e-5);
+        CHECK_NEAR(RangeBandKeepOutYd(clipped.keepOut, 12.f, 0.f), 2.f, 1e-5);
+        CHECK_NEAR(RangeBandKeepOutYd(clipped.keepOut, 14.f, 0.f), 0.f, 1e-6);    // on the edge: outside
+        CHECK_NEAR(RangeBandKeepOutYd(clipped.keepOut, 0.f, 10.f), 0.f, 1e-6);    // a zero circle does nothing
+        CHECK_NEAR(RangeBandKeepOutYd(clipped.keepOut, 0.f, 20.f), 0.f, 1e-6);    // ...nor a NaN one
+        CHECK_NEAR(RangeBandKeepOutYd({}, 10.f, 0.f), 0.f, 1e-6);
+        CHECK(RangeBandEntry(1.f, 2.f).keepOut.empty());
     }
 
     void TestDescriptorEmpty()

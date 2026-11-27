@@ -212,6 +212,7 @@ namespace BossMechanics
         // ---- Gnomeregan BM-G (HANDOFF §7 #12 A, F19, F20; MechanicBotBrain.cpp ReadMoveCost) ----
         bool moveCost = false;                              // a descriptor MoveCostEntry holds for the bot this step
         Solver::RoleBand rangeBand;                         // the descriptor's preferred band for it (present: one)
+        std::vector<RangeBandEntry::KeepOutCircle> rangeBandKeepOut;    // ...its clipped floor (F-2, RF-1 Minor-4)
         Milliseconds outOfBandSince{ 0 };                   // out of rangeBand since (0 = in it, or no band)
         Milliseconds lastBandAt{ 0 };                       // the last band check's role solve (0 = none)
         Milliseconds nextBandAt{ 0 };                       // ...none before this (one that found nothing backs off)

@@ -3096,7 +3096,9 @@ namespace BossMechanics::Drill
                         "tag=60" },
                     { 21000, "circle 12 17200 at=target pct=60 tankpct=60 weak=1 cycle=4/6 tag=62" },
                     // row 9, The Big One heroic (MT13): the stand-in steps back 15 yd, then walks to its spot (the
-                    // center) at 3 yd/s under an 8 yd Stack that lands on the arrival; twice
+                    // center) at 3 yd/s under an 8 yd Stack that lands on the arrival; twice. No damage value: a drill
+                    // `stack` takes none (a get-in kind, like crawl and holdstill), so the live "nobody within 8 yd:
+                    // everyone takes 100%" is not swept here; the Stack's tag 70 still reports who was in (RF-1 Nit-4)
                     { 41000, "walk 15 1500 offset=180 cycle=4/6" },
                     { 43000, "walk 15 5000 cycle=4/6" },
                     { 43000, "stack 8 5000 anchor=target cycle=4/6 tag=70" },
@@ -3106,7 +3108,11 @@ namespace BossMechanics::Drill
                     // row 8, Mekgineer Thermaplugg heroic: two plates 25 yd out on the face bearings (the first to
                     // resolve first: face priority), the soaker Locked Out (Marked) and the tank last; two walking
                     // bombs at 4.6 yd/s with a RunOut on the mark; mines under everyone (the 3 yd trigger and the
-                    // 6 yd ring); three plates after an Override; the Detonator kick
+                    // 6 yd ring); three plates after an Override; the Detonator kick. The Whole Workshop's Fallout
+                    // plate plan (the plates as one exclusive group, one claim a bot, ordered by the dose) has no row:
+                    // a drill soak has no one-claim-per-bot key and the drill gives nobody the dose stacks, so an
+                    // `order=` row would test the parse only; MDB gnomer_plate_plan_bm_test models it against BM's
+                    // own claim rule (RF-1 Nit-3)
                     { 0, "soak 3 6000 need=1 at=target shift=22.56:10.76 aura=205009:0:0 mark=1 last=tank cycle=5/6 "
                         "tag=71" },
                     { 0, "soak 3 7000 need=1 at=target shift=5.84:24.31 aura=205009:0:0 mark=1 last=tank cycle=5/6 "

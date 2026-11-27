@@ -171,6 +171,9 @@ namespace BossMechanics
                 handler->PSendSysMessage("  ranged band: {:.1f} to {:.1f} yd from the owner{}{}", x.minYd, x.maxYd,
                     x.who == Who::Any ? std::string() : Acore::StringFormat(" ({} only)", WhoName(x.who)),
                     Desc::RangeBandValid(x) ? "" : " (invalid: ignored)");
+            for (RangeBandEntry const& x : d.rangeBands)
+                for (RangeBandEntry::KeepOutCircle const& k : x.keepOut)
+                    handler->PSendSysMessage("    band keep-out: {:.1f} yd round ({:.1f}, {:.1f})", k.radiusYd, k.x, k.y);
             // Blackrock Depths WP-DS (BD3): each hold, and the encounter's live units it covers now by its aura (the
             // `when` part is judged by the bots' view, not here).
             for (HoldEntry const& h : d.holds)

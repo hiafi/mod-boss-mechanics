@@ -885,8 +885,10 @@ namespace BossMechanics
         // Solve (§3.9) with the telemetry and the once-per-mechanic Fallback log. M3: allies, synthetic hazards and
         // claims are refreshed right before the solve, and the plan goes onto the reservation board right after it,
         // so the next bot solving on this map thread sees it (§3.6). A re-route plan is never published.
+        // `extraBounds` (the band walk's keep-out, F-2): one more bounds set for this solve only, added after the
+        // allies' refresh (which rebuilds the view's bounds) and removed after the solve.
         Solver::Plan RunSolve(Registry& reg, Player* bot, MechanicBotState& st, Milliseconds now, BotConfig const& cfg,
-            ViewCtx& ctx, bool roleSolve = false)
+            ViewCtx& ctx, bool roleSolve = false, Solver::Bounds const* extraBounds = nullptr)
         {
             Solver::Input& in = st.input;
             // M5 C4: the allies' refresh is timed apart from the solve (refreshUs*), so solveUs is the solver alone.
@@ -911,10 +913,14 @@ namespace BossMechanics
             NavOracleStats nav;
             NavOracle navOracle(bot, cfg.debug ? &nav : nullptr, cfg.healerMaxSightChecks);
             TimedOracle oracle(navOracle, st.cost);
+            if (extraBounds)
+                in.bounds.push_back(*extraBounds);
             CostClock::time_point const t0 = CostClock::now();
             Solver::Plan plan = Solver::Solve(in, oracle);
             uint32 const us = UsSince(t0);
             in.roleSolve = false;
+            if (extraBounds)
+                in.bounds.pop_back();
 
             // M4 cost (§3.6) and the Fallback split (§3.7).
             CostStats& cost = st.cost;
@@ -1554,6 +1560,7 @@ namespace BossMechanics
         {
             st.moveCost = false;
             st.rangeBand = Solver::RoleBand();
+            st.rangeBandKeepOut.clear();
             RefreshDescriptorView(&reg, bot, st.descriptor);
             DescriptorView const& v = st.descriptor;
             if (!v.Active())
@@ -1581,6 +1588,7 @@ namespace BossMechanics
             st.rangeBand.anchor = PosOf(owner);
             st.rangeBand.minYd = e->minYd;
             st.rangeBand.maxYd = e->maxYd;
+            st.rangeBandKeepOut = e->keepOut;
         }
 
         // Under a move cost, the spot passing TargetOk: an Escape stops where it stands (the first safe spot is the
@@ -1628,8 +1636,13 @@ namespace BossMechanics
             ViewCtx& ctx, bool released)
         {
             Solver::RoleBand const band = st.rangeBand;
-            float const gap = band.present
-                ? LockRules::BandGapYd(Dist2d(st.input.bot, band.anchor), band.minYd, band.maxYd) : 0.f;
+            // F-2 (RF-1 Minor-4): a spot inside the band's keep-out is out of the band by its depth there.
+            auto const gapAt = [&band, &st](Geo::Vec3 const& p)
+            {
+                return std::max(LockRules::BandGapYd(Dist2d(p, band.anchor), band.minYd, band.maxYd),
+                    Desc::RangeBandKeepOutYd(st.rangeBandKeepOut, p.x, p.y));
+            };
+            float const gap = band.present ? gapAt(st.input.bot) : 0.f;
             if (gap <= 0.f)
             {
                 st.outOfBandSince = Milliseconds(0);
@@ -1643,11 +1656,17 @@ namespace BossMechanics
                 || !CanSolve(bot, st, now, cfg))
                 return false;
             st.lastBandAt = now;
-            Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true);
+            // The keep-out binds the walk's end (strict: the bot's own spot inside one is no answer either).
+            Solver::Bounds keepOut;
+            keepOut.strict = true;
+            for (RangeBandEntry::KeepOutCircle const& k : st.rangeBandKeepOut)
+                if (std::isfinite(k.radiusYd) && k.radiusYd > 0.f)
+                    keepOut.keepOut.push_back({ Geo::Vec3{ k.x, k.y, band.anchor.z }, k.radiusYd, false });
+            Solver::Plan plan = RunSolve(reg, bot, st, now, cfg, ctx, true,
+                keepOut.keepOut.empty() ? nullptr : &keepOut);
             bool moving = plan.outcome == Solver::Outcome::Move || plan.outcome == Solver::Outcome::GraceMove;
             if (moving)
-                moving = LockRules::BandWalkGains(gap,
-                    LockRules::BandGapYd(Dist2d(plan.target, band.anchor), band.minYd, band.maxYd));
+                moving = LockRules::BandWalkGains(gap, gapAt(plan.target));
             if (!moving)
             {
                 st.nextBandAt = now + Milliseconds(LockRules::kBandBackoffMs);

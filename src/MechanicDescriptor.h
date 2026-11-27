@@ -375,8 +375,18 @@ namespace BossMechanics
     // walks in by a role solve (MechanicBotBrain.cpp StepRangeBand), unless a MoveCostEntry holds for it. The first
     // entry that fits wins.
     //     d.rangeBands.emplace_back(11.f, 12.f);      // Electrocutioner: a short step from the donut or the circle
+    // Gnomeregan F-2 (RF-1 Minor-4): KeepOut clips floor out of the band (2D circles, e.g. a corner with no line of
+    // sight to the owner): a bot inside one is out of its band, and the band walk never ends inside one.
+    //     d.rangeBands.emplace_back(19.f, 26.f).KeepOut(-896.f, 383.5f, 6.5f);    // Crowd Pummeler's blind corner
     struct RangeBandEntry
     {
+        struct KeepOutCircle
+        {
+            float x = 0.f;
+            float y = 0.f;
+            float radiusYd = 0.f;           // <= 0 or not finite: the circle does nothing
+        };
+
         RangeBandEntry(float minYd_ = 0.f, float maxYd_ = 0.f) : minYd(minYd_), maxYd(maxYd_) { }
 
         RangeBandEntry& For(Who who_)
@@ -385,9 +395,16 @@ namespace BossMechanics
             return *this;
         }
 
+        RangeBandEntry& KeepOut(float x, float y, float radiusYd)
+        {
+            keepOut.push_back({ x, y, radiusYd });
+            return *this;
+        }
+
         float minYd = 0.f;
         float maxYd = 0.f;                  // <= minYd or not finite: the entry does nothing
         Who who = Who::Any;                 // which ranged bots (Any: ranged damage dealers and healers)
+        std::vector<KeepOutCircle> keepOut; // floor clipped out of the band (none: the whole band)
     };
 
     // Blackrock Depths WP-DS (shared doc BD3, aura-conditioned boss data): "hold action A on unit U while U has aura
@@ -1552,6 +1569,22 @@ namespace BossMechanics::Desc
             if (RangeBandValid(e) && Fits(e.who, bot))
                 return &e;
         return nullptr;
+    }
+
+    // Gnomeregan F-2 (RF-1 Minor-4): how deep (x, y) lies inside a band's keep-out circles (the deepest; 0 outside
+    // every one): a bot there is that far out of its band (added to LockRules::BandGapYd's gap).
+    inline float RangeBandKeepOutYd(std::vector<RangeBandEntry::KeepOutCircle> const& keepOut, float x, float y)
+    {
+        float deepest = 0.f;
+        for (RangeBandEntry::KeepOutCircle const& k : keepOut)
+        {
+            if (!std::isfinite(k.radiusYd) || k.radiusYd <= 0.f)
+                continue;
+            float const d = std::hypot(x - k.x, y - k.y);
+            if (d < k.radiusYd)
+                deepest = std::max(deepest, k.radiusYd - d);
+        }
+        return deepest;
     }
 
     // Is the unit a player turned against the group now: a charmed player carrying one of the descriptor's

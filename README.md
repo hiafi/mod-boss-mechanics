@@ -2232,7 +2232,7 @@ each is off by default, so no other encounter changes.
 | Option | Where | What |
 | --- | --- | --- |
 | `MoveCostEntry(aura, above)` | `moveCosts` | a bot with more than `above` stacks of `aura` makes no optional move |
-| `RangeBandEntry(min, max).For(Who)` | `rangeBands` | ranged bots and healers prefer `min`-`max` yd from the owner |
+| `RangeBandEntry(min, max).For(Who).KeepOut(...)` | `rangeBands` | ranged bots and healers prefer `min`-`max` yd |
 | `Ordering::minStacks` | Soak `Order(...)` | players below that many stacks of `auraSpell` never claim |
 
 ```cpp
@@ -2265,7 +2265,10 @@ ref.Order(plates);
   or a ranged bot that is not a tank) and that fits `who` (Any: both) gets the band, 2D round the encounter owner, as
   its role band in every solve. Out of it for 1 s, a role solve at most once a second; a walk is taken when it ends in
   the band or 1 yd nearer, else none for 5 s (`LockRules::kBand*`). Never under a move cost. The first valid entry
-  that fits wins; `min >= max` or a negative `min` is ignored.
+  that fits wins; `min >= max` or a negative `min` is ignored. `.KeepOut(x, y, r)` (Gnomeregan F-2) clips 2D
+  circles out of the band (a corner with no line of sight to the owner): a bot inside one is out of the band by its
+  depth there (`Desc::RangeBandKeepOutYd`), and the band walk's solve takes them as strict bounds (its own spot
+  inside one is no answer).
 - **Minimum stacks** (`Assign::SoakRule::minStacks`): mirrors `capStacks` from below. Players under the floor are not
   claimants (inside or not, bot or human), but stay eligible: a bot below it keeps out of the soak as an eligible
   player with no claim, and a human below it who steps in still counts for the registry. Needs `auraSpell` (without
